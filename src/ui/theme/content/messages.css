@@ -52,33 +52,33 @@ assistant-message { margin-right: var(--pill-inset); }
  */
 
 markdown-block h1 {
-  font-size: var(--text-lg);
-  font-weight: 700;
-  line-height: 1.3;
-  margin: 16px 0 8px;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  line-height: 1.28 !important;
+  margin: 12px 0 6px !important;
 }
 
 markdown-block h2 {
-  font-size: var(--text-md);
-  font-weight: 700;
-  line-height: 1.35;
-  margin: 14px 0 6px;
+  font-size: var(--text-md) !important;
+  font-weight: 700 !important;
+  line-height: 1.32 !important;
+  margin: 10px 0 5px !important;
 }
 
 markdown-block h3 {
-  font-size: var(--text-base);
-  font-weight: 700;
-  line-height: 1.4;
-  margin: 12px 0 4px;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  line-height: 1.35 !important;
+  margin: 8px 0 4px !important;
 }
 
 markdown-block h4,
 markdown-block h5,
 markdown-block h6 {
-  font-size: var(--text-base);
-  font-weight: 600;
-  line-height: 1.4;
-  margin: 10px 0 4px;
+  font-size: var(--text-base) !important;
+  font-weight: 650 !important;
+  line-height: 1.35 !important;
+  margin: 7px 0 3px !important;
 }
 
 markdown-block h1:first-child,
@@ -87,6 +87,6 @@ markdown-block h3:first-child,
 markdown-block h4:first-child,
 markdown-block h5:first-child,
 markdown-block h6:first-child {
-  margin-top: 0;
+  margin-top: 0 !important;
 }
 
