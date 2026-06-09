@@ -105,6 +105,8 @@ const DEFAULT_ALLOWED_TARGET_HOSTS = new Set([
   "api.github.com",
   "auth.openai.com",
   "api.openai.com",
+  "api.deepseek.com",
+  "open.bigmodel.cn",
   "chatgpt.com",
   "oauth2.googleapis.com",
   "generativelanguage.googleapis.com",

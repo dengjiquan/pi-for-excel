@@ -14,6 +14,7 @@ export const DEV_REWRITES: ReadonlyArray<readonly [prefix: string, proxy: string
 
   // API endpoints
   ["https://api.anthropic.com/", "/api-proxy/anthropic/"],
+  ["https://api.deepseek.com/", "/api-proxy/deepseek/"],
   ["https://api.openai.com/", "/api-proxy/openai/"],
   ["https://chatgpt.com/", "/api-proxy/chatgpt/"],
 

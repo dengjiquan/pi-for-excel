@@ -21,6 +21,7 @@ import { isDebugEnabled } from "../debug/debug.js";
 import { selectToolBundle, type ToolBundleId } from "../context/tool-disclosure.js";
 import { modelRecencyScore } from "../models/model-ordering.js";
 import { OPENAI_GATEWAY_PROVIDER_PREFIX } from "./custom-gateways.js";
+import { rewriteDevProxyUrl } from "./dev-rewrites.js";
 import {
   createPrefixFingerprint,
   type PrefixChangeReason,
@@ -40,6 +41,11 @@ function shouldProxyProvider(provider: string, apiKey?: string): boolean {
   switch (p) {
     // Known to require proxy in browser webviews (CORS blocked)
     case "openai-codex":
+      return true;
+
+    // DeepSeek's OpenAI-compatible endpoint does not reliably allow browser
+    // requests from Office webviews, so route through the configured proxy.
+    case "deepseek":
       return true;
 
     // Anthropic OAuth tokens are blocked by CORS; some orgs also block direct browser access.
@@ -73,6 +79,22 @@ function applyProxy(model: Model<Api>, proxyUrl: string): Model<Api> {
   return {
     ...model,
     baseUrl: `${normalizedProxy}/?url=${encodeURIComponent(model.baseUrl)}`,
+  };
+}
+
+function applyDevProxy(model: Model<Api>): Model<Api> {
+  if (!import.meta.env.DEV) return model;
+  if (!model.baseUrl) return model;
+  if (!/^https?:\/\//i.test(model.baseUrl)) return model;
+  if (typeof window === "undefined" || !window.location?.origin) return model;
+
+  const baseUrl = model.baseUrl.replace(/\/+$/, "");
+  const rewritten = rewriteDevProxyUrl(`${baseUrl}/`);
+  if (!rewritten) return model;
+
+  return {
+    ...model,
+    baseUrl: `${window.location.origin}${rewritten.replace(/\/+$/, "")}`,
   };
 }
 
@@ -268,6 +290,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function normalizeDeepSeekPayload(payload: unknown): unknown {
+  if (!isRecord(payload)) return payload;
+  if (!Array.isArray(payload.messages)) return payload;
+
+  let changed = false;
+  const sourceMessages: unknown[] = payload.messages;
+  const messages = sourceMessages.map((message) => {
+    if (!isRecord(message) || message.role !== "developer") {
+      return message;
+    }
+
+    changed = true;
+    return {
+      ...message,
+      role: "system",
+    };
+  });
+
+  return changed
+    ? {
+        ...payload,
+        messages,
+      }
+    : payload;
+}
+
 function summarizePayloadShape(payload: unknown): PayloadShapeSummary {
   if (payload === null) {
     return {
@@ -436,15 +484,21 @@ function withPayloadHook(
   options: StreamOptions | undefined,
   call: number,
   captureSnapshot: boolean,
+  model: Model<Api>,
 ): StreamOptions | undefined {
   const originalOnPayload = options?.onPayload;
-  if (!captureSnapshot && !originalOnPayload) return options;
+  const normalizePayload = model.provider === "deepseek";
+  if (!captureSnapshot && !originalOnPayload && !normalizePayload) return options;
 
   const onPayload: NonNullable<StreamOptions["onPayload"]> = (payload, model) => {
+    const effectivePayload = normalizePayload
+      ? normalizeDeepSeekPayload(payload)
+      : payload;
+
     if (captureSnapshot) {
-      upsertPayloadShape(call, payload);
+      upsertPayloadShape(call, effectivePayload);
     }
-    return originalOnPayload?.(payload, model);
+    return originalOnPayload?.(effectivePayload, model) ?? effectivePayload;
   };
 
   if (options) return { ...options, onPayload };
@@ -466,7 +520,7 @@ export function createOfficeStreamFn(getProxyUrl: GetProxyUrl) {
       ? context
       : { ...context, tools: toolSelection.tools };
 
-    const normalizedModel = normalizeGoogleOAuthModel(model);
+    const normalizedModel = applyDevProxy(normalizeGoogleOAuthModel(model));
 
     const callRecord = recordCall(
       normalizedModel,
@@ -475,7 +529,7 @@ export function createOfficeStreamFn(getProxyUrl: GetProxyUrl) {
       continuation,
       toolSelection.bundleId,
     );
-    const effectiveOptions = withPayloadHook(options, callRecord.call, callRecord.captureSnapshot);
+    const effectiveOptions = withPayloadHook(options, callRecord.call, callRecord.captureSnapshot, normalizedModel);
 
     const proxyUrl = await getProxyUrl();
     if (!proxyUrl) {

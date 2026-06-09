@@ -375,6 +375,23 @@ void test("dev rewrite routes cloudcode hosts to dedicated proxies", () => {
   assert.equal(rewriteDevProxyUrl("https://example.com/test"), null);
 });
 
+void test("dev rewrite routes DeepSeek API calls through Vite proxy", () => {
+  assert.equal(
+    rewriteDevProxyUrl("https://api.deepseek.com/chat/completions"),
+    "/api-proxy/deepseek/chat/completions",
+  );
+});
+
+void test("runtime proxy decision includes DeepSeek provider", () => {
+  const streamProxySource = readFileSync(path.resolve(process.cwd(), "src/auth/stream-proxy.ts"), "utf8");
+
+  assert.match(streamProxySource, /case "deepseek":\s*return true;/);
+  assert.match(streamProxySource, /function applyDevProxy/);
+  assert.match(streamProxySource, /rewriteDevProxyUrl\(`\$\{baseUrl\}\/`\)/);
+  assert.match(streamProxySource, /function normalizeDeepSeekPayload/);
+  assert.match(streamProxySource, /role:\s*"system"/);
+});
+
 void test("vite proxy orders overlapping routes from most specific to least specific", () => {
   const viteConfigPath = path.resolve(process.cwd(), "vite.config.ts");
   const content = readFileSync(viteConfigPath, "utf8");

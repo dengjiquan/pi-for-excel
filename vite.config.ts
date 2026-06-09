@@ -286,6 +286,7 @@ export default defineConfig({
 
       // API proxies (providers that block browser CORS)
       "/api-proxy/anthropic": proxyEntry("https://api.anthropic.com", "/api-proxy/anthropic"),
+      "/api-proxy/deepseek": proxyEntry("https://api.deepseek.com", "/api-proxy/deepseek"),
       "/api-proxy/openai-auth": proxyEntry("https://auth.openai.com", "/api-proxy/openai-auth"),
       "/api-proxy/openai": proxyEntry("https://api.openai.com", "/api-proxy/openai"),
       "/api-proxy/chatgpt": proxyEntry("https://chatgpt.com", "/api-proxy/chatgpt"),
