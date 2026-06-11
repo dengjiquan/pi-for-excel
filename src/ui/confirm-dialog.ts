@@ -3,6 +3,7 @@ import {
   createOverlayButton,
   createOverlayDialog,
   createOverlayHeader,
+  NESTED_OVERLAY_Z_INDEX,
 } from "./overlay-dialog.js";
 import { CONFIRM_DIALOG_OVERLAY_ID } from "./overlay-ids.js";
 
@@ -47,6 +48,7 @@ export function requestConfirmationDialog(options: ConfirmDialogOptions): Promis
       overlayId,
       cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
       restoreFocusOnClose: options.restoreFocusOnClose,
+      zIndex: NESTED_OVERLAY_Z_INDEX,
     });
 
     let settled = false;

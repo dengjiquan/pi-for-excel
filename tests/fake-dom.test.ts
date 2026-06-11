@@ -181,6 +181,10 @@ class FakeHTMLElement extends FakeElement {
   constructor(tagName: string) {
     super(tagName);
   }
+
+  click(): void {
+    this.dispatchEvent(new Event("click"));
+  }
 }
 
 class FakeBodyElement extends FakeHTMLElement {

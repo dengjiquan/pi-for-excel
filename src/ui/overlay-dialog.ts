@@ -13,6 +13,8 @@ import { installOverlayEscapeClose } from "./overlay-escape.js";
 
 const overlayClosers = new WeakMap<HTMLElement, () => void>();
 
+export const NESTED_OVERLAY_Z_INDEX = 300;
+
 export function closeOverlayById(overlayId: string): boolean {
   const existing = document.getElementById(overlayId);
   if (!(existing instanceof HTMLElement)) {

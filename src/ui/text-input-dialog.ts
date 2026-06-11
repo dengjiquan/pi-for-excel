@@ -4,6 +4,7 @@ import {
   createOverlayDialog,
   createOverlayHeader,
   createOverlayInput,
+  NESTED_OVERLAY_Z_INDEX,
 } from "./overlay-dialog.js";
 import { TEXT_INPUT_DIALOG_OVERLAY_ID } from "./overlay-ids.js";
 
@@ -43,6 +44,7 @@ export function requestTextInputDialog(options: TextInputDialogOptions): Promise
       overlayId,
       cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
       restoreFocusOnClose: options.restoreFocusOnClose,
+      zIndex: NESTED_OVERLAY_Z_INDEX,
     });
 
     let settled = false;

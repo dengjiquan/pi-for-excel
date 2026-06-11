@@ -270,7 +270,49 @@ sampleLines.forEach((line, i) => {
 });
 previewSection.appendChild(preview);
 
-/* ── 7. Action Buttons ───────────────────────────────── */
+/* ── 7. Text File Viewer ──────────────────────────────── */
+
+const fileViewerSection = section("file-viewer", "Text File Viewer");
+
+const fileViewer = document.createElement("div");
+fileViewer.className = "pi-welcome-card pi-overlay-card pi-overlay-card--l pi-files-text-viewer";
+fileViewer.style.width = "100%";
+
+const fileViewerHeader = document.createElement("div");
+fileViewerHeader.className = "pi-overlay-header";
+
+const fileViewerTitleWrap = document.createElement("div");
+fileViewerTitleWrap.className = "pi-overlay-title-wrap";
+
+const fileViewerTitle = document.createElement("h2");
+fileViewerTitle.className = "pi-overlay-title";
+fileViewerTitle.textContent = "SKILL.md";
+
+const fileViewerSubtitle = document.createElement("p");
+fileViewerSubtitle.className = "pi-overlay-subtitle";
+fileViewerSubtitle.textContent = "skills/pricing/SKILL.md";
+
+const fileViewerClose = document.createElement("button");
+fileViewerClose.type = "button";
+fileViewerClose.className = "pi-overlay-close";
+fileViewerClose.textContent = "×";
+fileViewerClose.setAttribute("aria-label", "Close file");
+
+fileViewerTitleWrap.append(fileViewerTitle, fileViewerSubtitle);
+fileViewerHeader.append(fileViewerTitleWrap, fileViewerClose);
+
+const fileViewerBody = document.createElement("div");
+fileViewerBody.className = "pi-overlay-body pi-files-text-viewer__body";
+
+const fileViewerContent = document.createElement("pre");
+fileViewerContent.className = "pi-files-text-viewer__content";
+fileViewerContent.textContent = sampleLines.join("\n");
+
+fileViewerBody.appendChild(fileViewerContent);
+fileViewer.append(fileViewerHeader, fileViewerBody);
+fileViewerSection.appendChild(fileViewer);
+
+/* ── 8. Action Buttons ───────────────────────────────── */
 
 const buttonsSection = section("buttons", "Overlay Buttons");
 
@@ -278,7 +320,7 @@ const btnRow = document.createElement("div");
 btnRow.className = "pi-files-detail-actions";
 
 for (const [label, cls] of [
-  ["Open ↗", "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact"],
+  ["Open", "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact"],
   ["Download", "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact"],
   ["Delete", "pi-overlay-btn pi-overlay-btn--danger pi-overlay-btn--compact"],
 ] as const) {
@@ -290,7 +332,7 @@ for (const [label, cls] of [
 }
 buttonsSection.appendChild(btnRow);
 
-/* ── 8. Toast variants ───────────────────────────────── */
+/* ── 9. Toast variants ───────────────────────────────── */
 
 const toastSection = section("toasts", "Toast Notifications");
 

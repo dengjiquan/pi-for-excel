@@ -510,6 +510,32 @@
   flex: 1;
 }
 
+.pi-files-text-viewer {
+  height: min(720px, 86vh);
+}
+
+.pi-files-text-viewer__body {
+  overflow: hidden;
+}
+
+.pi-files-text-viewer__content {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--alpha-8);
+  border-radius: var(--radius-sm);
+  background: var(--white-alpha-45);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: pre;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
 /* ── Badge overrides inside file items (#490) ────── */
 .pi-files-item .pi-overlay-badge {
   border-radius: var(--radius-xs);

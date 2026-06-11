@@ -9,6 +9,7 @@ export const RECOVERY_OVERLAY_ID = "pi-recovery-overlay";
 export const SHORTCUTS_OVERLAY_ID = "pi-shortcuts-overlay";
 export const ADDONS_OVERLAY_ID = "pi-addons-overlay";
 export const FILES_WORKSPACE_OVERLAY_ID = "pi-files-workspace-overlay";
+export const FILES_TEXT_VIEWER_OVERLAY_ID = "pi-files-text-viewer-overlay";
 export const WELCOME_LOGIN_OVERLAY_ID = "pi-welcome-login-overlay";
 export const PROVIDER_PROMPT_OVERLAY_ID = "pi-prompt-overlay";
 export const CONFIRM_DIALOG_OVERLAY_ID = "pi-confirm-dialog-overlay";

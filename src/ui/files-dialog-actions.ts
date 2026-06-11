@@ -10,6 +10,13 @@ import { getErrorMessage } from "../utils/errors.js";
 import { requestConfirmationDialog } from "./confirm-dialog.js";
 import { isFilesDialogBuiltInDoc } from "./files-dialog-filtering.js";
 import { resolveRenameDestinationPath } from "./files-dialog-paths.js";
+import { FILES_TEXT_VIEWER_OVERLAY_ID } from "./overlay-ids.js";
+import {
+  closeOverlayById,
+  createOverlayDialog,
+  createOverlayHeader,
+  NESTED_OVERLAY_Z_INDEX,
+} from "./overlay-dialog.js";
 import { requestTextInputDialog } from "./text-input-dialog.js";
 import { showToast } from "./toast.js";
 
@@ -110,7 +117,59 @@ function downloadViaDataUri(text: string, fileName: string, mimeType: string): v
   anchor.remove();
 }
 
-async function openFileInBrowser(options: {
+async function openTextFileInDialog(options: {
+  file: WorkspaceFileEntry;
+  fileRef: FilesDialogDetailActionFileRef;
+  workspace: FilesDialogDetailActionsWorkspace;
+  auditContext: FilesWorkspaceAuditContext;
+}): Promise<void> {
+  closeOverlayById(FILES_TEXT_VIEWER_OVERLAY_ID);
+
+  const dialog = createOverlayDialog({
+    overlayId: FILES_TEXT_VIEWER_OVERLAY_ID,
+    cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--l pi-files-text-viewer",
+    restoreFocusOnClose: false,
+    zIndex: NESTED_OVERLAY_Z_INDEX,
+  });
+
+  const { header } = createOverlayHeader({
+    title: options.file.name,
+    subtitle: options.file.path,
+    closeLabel: "Close file",
+    onClose: dialog.close,
+  });
+
+  const body = document.createElement("div");
+  body.className = "pi-overlay-body pi-files-text-viewer__body";
+
+  const content = document.createElement("pre");
+  content.className = "pi-files-text-viewer__content";
+  content.textContent = "Loading…";
+
+  body.appendChild(content);
+  dialog.card.append(header, body);
+  dialog.mount();
+
+  try {
+    const result = await options.workspace.readFile(options.file.path, {
+      mode: "text",
+      maxChars: 16_000_000,
+      audit: options.auditContext,
+      locationKind: options.fileRef.locationKind,
+    });
+
+    if (result.text === undefined || result.truncated) {
+      throw new Error("File is too large to open in the viewer.");
+    }
+
+    content.textContent = result.text;
+  } catch (error: unknown) {
+    dialog.close();
+    throw error;
+  }
+}
+
+async function openBinaryFileInBrowser(options: {
   file: WorkspaceFileEntry;
   fileRef: FilesDialogDetailActionFileRef;
   workspace: FilesDialogDetailActionsWorkspace;
@@ -119,26 +178,6 @@ async function openFileInBrowser(options: {
   const pendingWindow = window.open("", "_blank");
 
   try {
-    if (options.file.kind === "text") {
-      const result = await options.workspace.readFile(options.file.path, {
-        mode: "text",
-        maxChars: 16_000_000,
-        audit: options.auditContext,
-        locationKind: options.fileRef.locationKind,
-      });
-
-      if (result.text === undefined || result.truncated) {
-        throw new Error("File is too large to open in a browser tab.");
-      }
-
-      const blob = new Blob([result.text], {
-        type: resolveSafeBlobUrlMimeType(options.file.mimeType || "text/plain"),
-      });
-
-      openBlobInNewTab(blob, pendingWindow);
-      return;
-    }
-
     const result = await options.workspace.readFile(options.file.path, {
       mode: "base64",
       maxChars: 16_000_000,
@@ -168,31 +207,40 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
 
   const isBuiltIn = isFilesDialogBuiltInDoc(options.file);
 
-  if (isBuiltIn && options.file.kind === "text") {
-    // Built-in docs: use clipboard + data-URI download instead of
-    // window.open / blob URLs which silently fail in the Office WebView.
-    // This add-in always runs inside the Office WebView (loaded via
-    // manifest.xml into Excel's sidebar), so this path covers all
-    // production usage. Dev-server testing in a browser is unaffected
-    // because built-in docs are only available via the workspace.
-    const copyButton = document.createElement("button");
-    copyButton.type = "button";
-    copyButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
-    copyButton.textContent = "Copy content";
-    copyButton.addEventListener("click", () => {
-      void (async () => {
-        const result = await options.workspace.readFile(options.file.path, {
-          mode: "text",
-          maxChars: 16_000_000,
-          audit: options.auditContext,
-          locationKind: options.fileRef.locationKind,
+  if (options.file.kind === "text") {
+    const primaryButton = document.createElement("button");
+    primaryButton.type = "button";
+    primaryButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
+
+    if (isBuiltIn) {
+      primaryButton.textContent = "Copy content";
+      primaryButton.addEventListener("click", () => {
+        void (async () => {
+          const result = await options.workspace.readFile(options.file.path, {
+            mode: "text",
+            maxChars: 16_000_000,
+            audit: options.auditContext,
+            locationKind: options.fileRef.locationKind,
+          });
+          if (result.text === undefined) throw new Error("Could not read file.");
+          await copyTextToClipboard(result.text, options.file.name);
+        })().catch((error: unknown) => {
+          showToast(`Copy failed: ${getErrorMessage(error)}`);
         });
-        if (result.text === undefined) throw new Error("Could not read file.");
-        await copyTextToClipboard(result.text, options.file.name);
-      })().catch((error: unknown) => {
-        showToast(`Copy failed: ${getErrorMessage(error)}`);
       });
-    });
+    } else {
+      primaryButton.textContent = "Open";
+      primaryButton.addEventListener("click", () => {
+        void openTextFileInDialog({
+          file: options.file,
+          fileRef: options.fileRef,
+          workspace: options.workspace,
+          auditContext: options.auditContext,
+        }).catch((error: unknown) => {
+          showToast(`Open failed: ${getErrorMessage(error)}`);
+        });
+      });
+    }
 
     const downloadButton = document.createElement("button");
     downloadButton.type = "button";
@@ -217,17 +265,15 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
       });
     });
 
-    actions.append(copyButton, downloadButton);
+    actions.append(primaryButton, downloadButton);
   } else {
-    // Non-built-in files: use the standard blob URL approach.
+    // Binary files still need the browser download/open path.
     const openButton = document.createElement("button");
     openButton.type = "button";
-    openButton.className = options.file.kind === "text"
-      ? "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact"
-      : "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
+    openButton.className = "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
     openButton.textContent = "Open ↗";
     openButton.addEventListener("click", () => {
-      void openFileInBrowser({
+      void openBinaryFileInBrowser({
         file: options.file,
         fileRef: options.fileRef,
         workspace: options.workspace,
