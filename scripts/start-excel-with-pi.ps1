@@ -8,10 +8,32 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $ServiceProcessIds = @()
 $ManagedPorts = @(3000, 3003)
+$ProxyEnvironmentVariables = @(
+  "ALLOWED_TARGET_HOSTS",
+  "ALLOW_ALL_TARGET_HOSTS",
+  "ALLOW_LOOPBACK_TARGETS",
+  "ALLOW_PRIVATE_TARGETS"
+)
 
 function Write-Step {
   param([string]$Message)
   Write-Host ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Message)
+}
+
+function Import-PersistentEnvironmentVariables {
+  foreach ($name in $ProxyEnvironmentVariables) {
+    $value = [Environment]::GetEnvironmentVariable($name, "User")
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      $value = [Environment]::GetEnvironmentVariable($name, "Machine")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      Remove-Item -LiteralPath ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+      continue
+    }
+
+    Set-Item -LiteralPath ("Env:{0}" -f $name) -Value $value
+  }
 }
 
 function Get-PortListenerProcessIds {
@@ -96,6 +118,7 @@ function Start-ExcelApp {
 
 try {
   Write-Step ("Repo: {0}" -f $RepoRoot)
+  Import-PersistentEnvironmentVariables
 
   foreach ($port in $ManagedPorts) {
     Stop-PortListeners -Port $port

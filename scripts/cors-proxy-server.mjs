@@ -384,6 +384,10 @@ const handler = async (req, res) => {
       const lower = key.toLowerCase();
       if (lower === "set-cookie") return;
       if (HOP_BY_HOP_HEADERS.has(lower)) return;
+      // The proxy owns the browser-facing CORS policy. Forwarding upstream
+      // CORS headers can overwrite our expose policy and hide transport
+      // headers such as Mcp-Session-Id from Office WebView clients.
+      if (lower.startsWith("access-control-")) return;
       // Node fetch transparently decompresses responses but keeps the original
       // Content-Encoding header (e.g. "gzip"). Forwarding that header would
       // make the browser try to decompress *again* and fail while reading.

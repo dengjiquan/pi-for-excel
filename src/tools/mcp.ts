@@ -25,6 +25,11 @@ import {
   type McpServerConfig,
   type McpConfigStore,
 } from "./mcp-config.js";
+import {
+  MCP_HTTP_ACCEPT,
+  MCP_SESSION_HEADER,
+  parseMcpHttpResponseBody,
+} from "./mcp-http.js";
 
 const MCP_CLIENT_NAME = APP_NAME;
 const MCP_CLIENT_VERSION = APP_VERSION;
@@ -74,6 +79,7 @@ interface RpcCallResult {
   result: unknown;
   proxied: boolean;
   proxyBaseUrl?: string;
+  sessionId?: string;
 }
 
 export interface McpGatewayDetails {
@@ -104,6 +110,7 @@ export interface McpToolDependencies {
     signal: AbortSignal | undefined;
     proxyBaseUrl?: string;
     expectResponse?: boolean;
+    sessionId?: string;
   }) => Promise<RpcCallResult | null>;
 }
 
@@ -316,8 +323,9 @@ async function defaultCallJsonRpc(args: {
   signal: AbortSignal | undefined;
   proxyBaseUrl?: string;
   expectResponse?: boolean;
+  sessionId?: string;
 }): Promise<RpcCallResult | null> {
-  const { server, method, params, signal, proxyBaseUrl, expectResponse = true } = args;
+  const { server, method, params, signal, proxyBaseUrl, expectResponse = true, sessionId } = args;
 
   const resolved = resolveOutboundRequestUrl({
     targetUrl: server.url,
@@ -326,11 +334,15 @@ async function defaultCallJsonRpc(args: {
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Accept: "application/json",
+    Accept: MCP_HTTP_ACCEPT,
   };
 
   if (server.token) {
     headers.Authorization = `Bearer ${server.token}`;
+  }
+
+  if (sessionId) {
+    headers[MCP_SESSION_HEADER] = sessionId;
   }
 
   const requestBody: Record<string, unknown> = {
@@ -338,9 +350,8 @@ async function defaultCallJsonRpc(args: {
     method,
   };
 
-  if (expectResponse) {
-    requestBody.id = crypto.randomUUID();
-  }
+  const requestId = expectResponse ? crypto.randomUUID() : undefined;
+  if (requestId) requestBody.id = requestId;
 
   if (params !== undefined) {
     requestBody.params = params;
@@ -369,11 +380,16 @@ async function defaultCallJsonRpc(args: {
           result: null,
           proxied: resolved.proxied,
           proxyBaseUrl: resolved.proxyBaseUrl,
+          sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
         };
       }
 
       const body = await response.text();
-      const payload: unknown = body.trim().length > 0 ? JSON.parse(body) : null;
+      const payload = parseMcpHttpResponseBody({
+        text: body,
+        contentType: response.headers.get("Content-Type"),
+        requestId: requestId ?? "",
+      });
 
       const rpcError = parseJsonRpcError(payload);
       if (rpcError) {
@@ -388,6 +404,7 @@ async function defaultCallJsonRpc(args: {
         result: payload,
         proxied: resolved.proxied,
         proxyBaseUrl: resolved.proxyBaseUrl,
+        sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
       };
     },
   });
@@ -400,6 +417,7 @@ export function createMcpTool(
   const callJsonRpc = dependencies.callJsonRpc ?? defaultCallJsonRpc;
 
   const toolCache = new Map<string, ServerToolList>();
+  const sessionIds = new Map<string, string>();
 
   const ensureServerTools = async (args: {
     server: McpServerConfig;
@@ -416,7 +434,7 @@ export function createMcpTool(
       }
     }
 
-    await callJsonRpc({
+    const initializeResult = await callJsonRpc({
       server,
       method: "initialize",
       params: {
@@ -431,12 +449,21 @@ export function createMcpTool(
       proxyBaseUrl,
     });
 
+    if (initializeResult?.sessionId) {
+      sessionIds.set(server.id, initializeResult.sessionId);
+    } else {
+      sessionIds.delete(server.id);
+    }
+
+    const sessionId = sessionIds.get(server.id);
+
     await callJsonRpc({
       server,
       method: "notifications/initialized",
       signal,
       proxyBaseUrl,
       expectResponse: false,
+      sessionId,
     });
 
     const listResult = await callJsonRpc({
@@ -445,6 +472,7 @@ export function createMcpTool(
       params: {},
       signal,
       proxyBaseUrl,
+      sessionId,
     });
 
     if (!listResult) {
@@ -590,6 +618,7 @@ export function createMcpTool(
             },
             signal,
             proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            sessionId: sessionIds.get(targetServer.id),
           });
 
           if (!callResult) {

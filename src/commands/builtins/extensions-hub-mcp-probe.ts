@@ -3,6 +3,11 @@ import { type IntegrationSettingsStore } from "../../integrations/store.js";
 import { getEnabledProxyBaseUrl, resolveOutboundRequestUrl } from "../../tools/external-fetch.js";
 import { type McpServerConfig } from "../../tools/mcp-config.js";
 import {
+  MCP_HTTP_ACCEPT,
+  MCP_SESSION_HEADER,
+  parseMcpHttpResponseBody,
+} from "../../tools/mcp-http.js";
+import {
   getHttpErrorReason,
   runWithTimeoutAbort,
 } from "../../utils/network.js";
@@ -24,8 +29,9 @@ async function postJsonRpc(args: {
   params?: unknown;
   settings: IntegrationSettingsStore;
   expectResponse?: boolean;
-}): Promise<{ response: unknown; proxied: boolean; proxyBaseUrl?: string } | null> {
-  const { server, method, params, settings, expectResponse = true } = args;
+  sessionId?: string;
+}): Promise<{ response: unknown; proxied: boolean; proxyBaseUrl?: string; sessionId?: string } | null> {
+  const { server, method, params, settings, expectResponse = true, sessionId } = args;
 
   const proxyBaseUrl = await getEnabledProxyBaseUrl(settings);
   const resolved = resolveOutboundRequestUrl({
@@ -42,17 +48,20 @@ async function postJsonRpc(args: {
     body.params = params;
   }
 
-  if (expectResponse) {
-    body.id = crypto.randomUUID();
-  }
+  const requestId = expectResponse ? crypto.randomUUID() : undefined;
+  if (requestId) body.id = requestId;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Accept: "application/json",
+    Accept: MCP_HTTP_ACCEPT,
   };
 
   if (server.token) {
     headers.Authorization = `Bearer ${server.token}`;
+  }
+
+  if (sessionId) {
+    headers[MCP_SESSION_HEADER] = sessionId;
   }
 
   return runWithTimeoutAbort({
@@ -78,16 +87,22 @@ async function postJsonRpc(args: {
           response: null,
           proxied: resolved.proxied,
           proxyBaseUrl: resolved.proxyBaseUrl,
+          sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
         };
       }
 
       const text = await response.text();
-      const payload: unknown = text.trim().length > 0 ? JSON.parse(text) : null;
+      const payload = parseMcpHttpResponseBody({
+        text,
+        contentType: response.headers.get("Content-Type"),
+        requestId: requestId ?? "",
+      });
 
       return {
         response: payload,
         proxied: resolved.proxied,
         proxyBaseUrl: resolved.proxyBaseUrl,
+        sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
       };
     },
   });
@@ -97,7 +112,7 @@ export async function probeMcpServer(
   server: McpServerConfig,
   settings: IntegrationSettingsStore,
 ): Promise<{ toolCount: number; proxied: boolean; proxyBaseUrl?: string }> {
-  await postJsonRpc({
+  const initializeResult = await postJsonRpc({
     server,
     method: "initialize",
     params: {
@@ -110,12 +125,14 @@ export async function probeMcpServer(
     },
     settings,
   });
+  const sessionId = initializeResult?.sessionId;
 
   await postJsonRpc({
     server,
     method: "notifications/initialized",
     settings,
     expectResponse: false,
+    sessionId,
   });
 
   const list = await postJsonRpc({
@@ -123,6 +140,7 @@ export async function probeMcpServer(
     method: "tools/list",
     params: {},
     settings,
+    sessionId,
   });
 
   if (!list) {

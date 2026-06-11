@@ -103,11 +103,14 @@ async function startProxy(extraEnv = {}) {
   };
 }
 
-async function startMockTarget(responseText = "ok") {
+async function startMockTarget(responseText = "ok", responseHeaders = {}) {
   const port = await getFreePort();
   const server = http.createServer((_req, res) => {
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    for (const [name, value] of Object.entries(responseHeaders)) {
+      res.setHeader(name, value);
+    }
     res.end(responseText);
   });
 
@@ -254,6 +257,35 @@ test("proxy can allow local targets with explicit overrides", async (t) => {
   assert.equal(response.status, 200);
   const text = await response.text();
   assert.equal(text, "hello-from-local");
+});
+
+test("proxy preserves its CORS policy and exposes MCP session headers", async (t) => {
+  const target = await startMockTarget("ok", {
+    "Access-Control-Expose-Headers": "X-Upstream-Only",
+    "Access-Control-Allow-Credentials": "true",
+    "Mcp-Session-Id": "session-123",
+  });
+  t.after(async () => {
+    await target.stop();
+  });
+
+  const proxy = await startProxy({
+    ALLOW_LOOPBACK_TARGETS: "1",
+    ALLOW_PRIVATE_TARGETS: "1",
+  });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const url = encodeURIComponent(`http://127.0.0.1:${target.port}/mcp`);
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${url}`, {
+    headers: { Origin: ORIGIN },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-expose-headers"), "*");
+  assert.equal(response.headers.get("access-control-allow-credentials"), null);
+  assert.equal(response.headers.get("mcp-session-id"), "session-123");
 });
 
 test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
