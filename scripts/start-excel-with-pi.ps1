@@ -141,7 +141,7 @@ try {
 
   if ($PythonBin) {
     $escapedRoot = $RepoRoot.Replace("'", "''")
-    $bridgeCommand = "`$env:PYTHON_BRIDGE_MODE='real'; `$env:PYTHON_BRIDGE_PYTHON_BIN='$PythonBin'; Set-Location -LiteralPath '$escapedRoot'; node scripts/python-bridge-server.mjs --http"
+    $bridgeCommand = "`$env:PYTHON_BRIDGE_MODE='real'; `$env:PYTHON_BRIDGE_PYTHON_BIN='$PythonBin'; Set-Location -LiteralPath '$escapedRoot'; node scripts/python-bridge-server.mjs --https"
     Start-PiService -Name "Pi for Excel python bridge" -Command $bridgeCommand
     Wait-Port -Port 3340 -Name "Pi for Excel python bridge"
   } else {
