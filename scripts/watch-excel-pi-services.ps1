@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$ManagedPorts = @(3000, 3003)
+$ManagedPorts = @(3000, 3003, 3340)
 $ServiceProcessIds = @()
 $ServicesRunning = $false
 $LogDir = Join-Path $env:LOCALAPPDATA "PiForExcel"
@@ -126,6 +126,24 @@ function Start-PiServices {
 
   Start-PiService -Name "Pi for Excel proxy" -Command "npm run proxy:https"
   Wait-Port -Port 3003 -Name "Pi for Excel proxy"
+
+  # Python bridge (optional — skip gracefully if Python is not installed)
+  $PythonBin = $null
+  foreach ($candidate in @("python", "python3", "py")) {
+    if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+      $PythonBin = $candidate
+      break
+    }
+  }
+
+  if ($PythonBin) {
+    $escapedRoot = $RepoRoot.Replace("'", "''")
+    $bridgeCommand = "`$env:PYTHON_BRIDGE_MODE='real'; `$env:PYTHON_BRIDGE_PYTHON_BIN='$PythonBin'; Set-Location -LiteralPath '$escapedRoot'; node scripts/python-bridge-server.mjs --http"
+    Start-PiService -Name "Pi for Excel python bridge" -Command $bridgeCommand
+    Wait-Port -Port 3340 -Name "Pi for Excel python bridge"
+  } else {
+    Write-Log "Python not found — python bridge skipped"
+  }
 
   $script:ServicesRunning = $true
   Write-Log "Pi for Excel services are running"

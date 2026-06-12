@@ -15,7 +15,7 @@ foreach ($process in $watcherProcesses) {
   Stop-Process -Id ([int]$process.ProcessId) -Force
 }
 
-foreach ($port in @(3000, 3003)) {
+foreach ($port in @(3000, 3003, 3340)) {
   $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen)
   foreach ($listener in $listeners) {
     Stop-Process -Id ([int]$listener.OwningProcess) -Force
