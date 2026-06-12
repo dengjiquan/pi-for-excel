@@ -6,12 +6,16 @@ import { base64ToBytes } from "../files/encoding.js";
 import { formatBytes } from "../files/mime.js";
 import {
   FILES_WORKSPACE_CHANGED_EVENT,
+  type FilesWorkspaceChangedDetail,
   type WorkspaceBackendStatus,
   type WorkspaceFileEntry,
   type WorkspaceFileLocationKind,
   type WorkspaceFileWorkbookTag,
 } from "../files/types.js";
-import { type FilesWorkspaceAuditContext, getFilesWorkspace } from "../files/workspace.js";
+import {
+  type FilesWorkspaceAuditContext,
+  getFilesWorkspace,
+} from "../files/workspace.js";
 import { getErrorMessage } from "../utils/errors.js";
 import {
   createFilesDialogDetailActions,
@@ -70,7 +74,9 @@ interface DetailPreviewResult {
 
 type FilesDialogFileRef = FilesDialogDetailActionFileRef;
 
-function resolveFileLocationKind(file: WorkspaceFileEntry): WorkspaceFileLocationKind {
+function resolveFileLocationKind(
+  file: WorkspaceFileEntry,
+): WorkspaceFileLocationKind {
   if (file.locationKind) {
     return file.locationKind;
   }
@@ -89,8 +95,13 @@ function toFileRef(file: WorkspaceFileEntry): FilesDialogFileRef {
   };
 }
 
-function fileMatchesRef(file: WorkspaceFileEntry, ref: FilesDialogFileRef): boolean {
-  return file.path === ref.path && resolveFileLocationKind(file) === ref.locationKind;
+function fileMatchesRef(
+  file: WorkspaceFileEntry,
+  ref: FilesDialogFileRef,
+): boolean {
+  return (
+    file.path === ref.path && resolveFileLocationKind(file) === ref.locationKind
+  );
 }
 
 function formatRelativeDate(timestamp: number): string {
@@ -112,7 +123,10 @@ function isPdfMimeType(mimeType: string): boolean {
   return mimeType.trim().toLowerCase() === "application/pdf";
 }
 
-function hasOneOfExtensions(path: string, extensions: readonly string[]): boolean {
+function hasOneOfExtensions(
+  path: string,
+  extensions: readonly string[],
+): boolean {
   const lowerPath = path.toLowerCase();
   return extensions.some((extension) => lowerPath.endsWith(extension));
 }
@@ -267,7 +281,10 @@ function createBinaryPreview(args: {
   return preview;
 }
 
-function createTextPreview(text: string, truncated: boolean): {
+function createTextPreview(
+  text: string,
+  truncated: boolean,
+): {
   element: HTMLDivElement;
   hasMoreLines: boolean;
 } {
@@ -296,7 +313,8 @@ function createTextPreview(text: string, truncated: boolean): {
   const hasMoreLines = lines.length > TEXT_PREVIEW_MAX_LINES;
   if (hasMoreLines && !truncated) {
     const fadeLine = document.createElement("div");
-    fadeLine.className = "pi-files-detail-preview__line pi-files-detail-preview__line--fade";
+    fadeLine.className =
+      "pi-files-detail-preview__line pi-files-detail-preview__line--fade";
 
     const lineNumber = document.createElement("span");
     lineNumber.className = "pi-files-detail-preview__ln";
@@ -321,7 +339,8 @@ function createUploadActionButton(args: {
 }): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
+  button.className =
+    "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
 
   const iconEl = document.createElement("span");
   iconEl.className = "pi-files-actions__icon";
@@ -349,11 +368,13 @@ function createEmptyState(onUpload: () => void): HTMLDivElement {
 
   const description = document.createElement("p");
   description.className = "pi-files-empty__desc";
-  description.textContent = "Upload documents, data, or reference material to help Pi give better answers.";
+  description.textContent =
+    "Upload documents, data, or reference material to help Pi give better answers.";
 
   const uploadButton = document.createElement("button");
   uploadButton.type = "button";
-  uploadButton.className = "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
+  uploadButton.className =
+    "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
   uploadButton.textContent = "Upload files";
   uploadButton.addEventListener("click", onUpload);
 
@@ -371,7 +392,9 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return out;
 }
 
-function createWorkbookTagCallout(workbookTag: WorkspaceFileWorkbookTag): HTMLDivElement {
+function createWorkbookTagCallout(
+  workbookTag: WorkspaceFileWorkbookTag,
+): HTMLDivElement {
   const strong = document.createElement("strong");
   strong.textContent = workbookTag.workbookLabel;
 
@@ -390,7 +413,8 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
 
   const dialog = createOverlayDialog({
     overlayId: OVERLAY_ID,
-    cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-files-dialog",
+    cardClassName:
+      "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-files-dialog",
   });
 
   const closeOverlay = dialog.close;
@@ -518,7 +542,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     activePreviewObjectUrl = null;
   };
 
-  const findFileByRef = (ref: FilesDialogFileRef): WorkspaceFileEntry | null => {
+  const findFileByRef = (
+    ref: FilesDialogFileRef,
+  ): WorkspaceFileEntry | null => {
     return allFiles.find((file) => fileMatchesRef(file, ref)) ?? null;
   };
 
@@ -576,7 +602,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     });
   };
 
-  const buildDetailPreview = async (file: WorkspaceFileEntry): Promise<DetailPreviewResult> => {
+  const buildDetailPreview = async (
+    file: WorkspaceFileEntry,
+  ): Promise<DetailPreviewResult> => {
     const fileRef = toFileRef(file);
 
     if (file.kind === "text") {
@@ -587,7 +615,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
         locationKind: fileRef.locationKind,
       });
 
-      const preview = createTextPreview(result.text ?? "", result.truncated === true);
+      const preview = createTextPreview(
+        result.text ?? "",
+        result.truncated === true,
+      );
       return {
         element: preview.element,
         previewTruncated: result.truncated === true,
@@ -616,10 +647,13 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       }
 
       const bytes = base64ToBytes(result.base64);
-      const url = URL.createObjectURL(new Blob([toArrayBuffer(bytes)], { type: file.mimeType }));
+      const url = URL.createObjectURL(
+        new Blob([toArrayBuffer(bytes)], { type: file.mimeType }),
+      );
 
       const preview = document.createElement("div");
-      preview.className = "pi-files-detail-preview pi-files-detail-preview--image";
+      preview.className =
+        "pi-files-detail-preview pi-files-detail-preview--image";
 
       const image = document.createElement("img");
       image.src = url;
@@ -656,7 +690,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     };
   };
 
-  const renderDetailView = async (fileRef: FilesDialogFileRef): Promise<void> => {
+  const renderDetailView = async (
+    fileRef: FilesDialogFileRef,
+  ): Promise<void> => {
     const file = findFileByRef(fileRef);
     if (!file) {
       showListView();
@@ -680,10 +716,14 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     }
 
     if (isFilesDialogBuiltInDoc(file)) {
-      nodes.push(createInfoCallout({
-        icon: lucide(ClipboardList),
-        body: ["Built-in documentation — read only. Pi references this automatically."],
-      }));
+      nodes.push(
+        createInfoCallout({
+          icon: lucide(ClipboardList),
+          body: [
+            "Built-in documentation — read only. Pi references this automatically.",
+          ],
+        }),
+      );
     }
 
     let previewResult: DetailPreviewResult;
@@ -784,7 +824,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     return row;
   };
 
-  const createFolderGroup = (folder: FilesDialogFolderGroup, collapseKey: string): HTMLDivElement => {
+  const createFolderGroup = (
+    folder: FilesDialogFolderGroup,
+    collapseKey: string,
+  ): HTMLDivElement => {
     const group = document.createElement("div");
     group.className = "pi-files-folder-group";
 
@@ -841,7 +884,8 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
   const renderListView = (): void => {
     const files = allFiles;
 
-    const connectState = resolveFilesDialogConnectFolderButtonState(backendStatus);
+    const connectState =
+      resolveFilesDialogConnectFolderButtonState(backendStatus);
     connectFolderButton.hidden = connectState.hidden;
     connectFolderButton.disabled = connectState.disabled;
     connectFolderButton.title = connectState.title;
@@ -873,15 +917,20 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       backendStatus,
     });
 
-    const hasNonBuiltInFiles = files.some((file) => !isFilesDialogBuiltInDoc(file));
-    const hasFilterQuery = normalizeFilesDialogFilterText(filterText).length > 0;
+    const hasNonBuiltInFiles = files.some(
+      (file) => !isFilesDialogBuiltInDoc(file),
+    );
+    const hasFilterQuery =
+      normalizeFilesDialogFilterText(filterText).length > 0;
 
     sectionsHost.replaceChildren();
 
     if (!hasNonBuiltInFiles && !hasFilterQuery) {
-      sectionsHost.appendChild(createEmptyState(() => {
-        hiddenInput.click();
-      }));
+      sectionsHost.appendChild(
+        createEmptyState(() => {
+          hiddenInput.click();
+        }),
+      );
     }
 
     if (sections.length === 0) {
@@ -929,11 +978,16 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
 
         // Folder groups
         section.folders.forEach((folder) => {
-          sectionList.appendChild(createFolderGroup(folder, `${section.key}:${folder.name}`));
+          sectionList.appendChild(
+            createFolderGroup(folder, `${section.key}:${folder.name}`),
+          );
         });
 
         const applyCollapsedState = (collapsed: boolean): void => {
-          sectionHead.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          sectionHead.setAttribute(
+            "aria-expanded",
+            collapsed ? "false" : "true",
+          );
           sectionList.hidden = collapsed;
         };
 
@@ -961,11 +1015,16 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       totalCount: files.length,
       totalSizeBytes: totalSize,
       backendLabel: backendStatus?.label ?? "Storage unavailable",
-      nativeDirectoryName: backendStatus?.nativeConnected ? backendStatus.nativeDirectoryName ?? null : null,
+      nativeDirectoryName: backendStatus?.nativeConnected
+        ? (backendStatus.nativeDirectoryName ?? null)
+        : null,
     });
   };
 
-  const onWorkspaceChanged: EventListener = () => {
+  const onWorkspaceChanged: EventListener = (event) => {
+    const detail = (event as CustomEvent<FilesWorkspaceChangedDetail>).detail;
+    if (detail?.reason === "audit") return;
+
     void (async () => {
       try {
         await refreshWorkspaceState();
@@ -990,7 +1049,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
   };
 
   dialog.addCleanup(() => {
-    document.removeEventListener(FILES_WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
+    document.removeEventListener(
+      FILES_WORKSPACE_CHANGED_EVENT,
+      onWorkspaceChanged,
+    );
     revokePreviewObjectUrl();
   });
 
@@ -1003,11 +1065,13 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       return;
     }
 
-    void workspace.connectNativeDirectory({
-      audit: DIALOG_AUDIT_CONTEXT,
-    }).catch((error: unknown) => {
-      showToast(`Connect folder failed: ${getErrorMessage(error)}`);
-    });
+    void workspace
+      .connectNativeDirectory({
+        audit: DIALOG_AUDIT_CONTEXT,
+      })
+      .catch((error: unknown) => {
+        showToast(`Connect folder failed: ${getErrorMessage(error)}`);
+      });
   });
 
   hiddenInput.addEventListener("change", () => {
@@ -1019,9 +1083,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     const files = Array.from(selected);
     hiddenInput.value = "";
 
-    void workspace.importFiles(files, {
-      audit: DIALOG_AUDIT_CONTEXT,
-    })
+    void workspace
+      .importFiles(files, {
+        audit: DIALOG_AUDIT_CONTEXT,
+      })
       .then((count) => {
         showToast(`Imported ${count} file${count === 1 ? "" : "s"}.`);
       })
