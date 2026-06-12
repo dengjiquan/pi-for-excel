@@ -5,10 +5,9 @@ import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 
 const ORIGIN = "https://localhost:3000";
-const PROXY_SCRIPT_PATH = fileURLToPath(new URL("../scripts/cors-proxy-server.mjs", import.meta.url));
+const PROXY_SCRIPT_PATH = new URL("../scripts/cors-proxy-server.mjs", import.meta.url).pathname;
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -103,13 +102,13 @@ async function startProxy(extraEnv = {}) {
   };
 }
 
-async function startMockTarget(responseText = "ok", responseHeaders = {}) {
+async function startMockTarget(responseText = "ok", extraHeaders = {}) {
   const port = await getFreePort();
   const server = http.createServer((_req, res) => {
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    for (const [name, value] of Object.entries(responseHeaders)) {
-      res.setHeader(name, value);
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      res.setHeader(key, value);
     }
     res.end(responseText);
   });
@@ -186,8 +185,6 @@ test("proxy default allowlist includes supported OAuth and web search providers"
   const requiredHosts = [
     "platform.claude.com",
     "auth.openai.com",
-    "api.deepseek.com",
-    "open.bigmodel.cn",
     "s.jina.ai",
     "api.firecrawl.dev",
     "google.serper.dev",
@@ -259,11 +256,16 @@ test("proxy can allow local targets with explicit overrides", async (t) => {
   assert.equal(text, "hello-from-local");
 });
 
-test("proxy preserves its CORS policy and exposes MCP session headers", async (t) => {
-  const target = await startMockTarget("ok", {
-    "Access-Control-Expose-Headers": "X-Upstream-Only",
-    "Access-Control-Allow-Credentials": "true",
-    "Mcp-Session-Id": "session-123",
+test("proxy keeps its own CORS headers when upstream sends conflicting ones", async (t) => {
+  const target = await startMockTarget("upstream-cors", {
+    // llama.cpp-style upstream: empty/incorrect CORS headers that would break
+    // the browser integration if forwarded verbatim.
+    "Access-Control-Allow-Origin": "",
+    "Access-Control-Allow-Methods": "GET",
+    "Access-Control-Allow-Headers": "x-upstream-only",
+    "Access-Control-Max-Age": "0",
+    "Vary": "Accept-Encoding",
+    "X-Upstream-Custom": "passthrough",
   });
   t.after(async () => {
     await target.stop();
@@ -277,15 +279,25 @@ test("proxy preserves its CORS policy and exposes MCP session headers", async (t
     await proxy.stop();
   });
 
-  const url = encodeURIComponent(`http://127.0.0.1:${target.port}/mcp`);
+  const url = encodeURIComponent(`http://127.0.0.1:${target.port}/v1/models`);
   const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${url}`, {
     headers: { Origin: ORIGIN },
   });
 
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("access-control-expose-headers"), "*");
-  assert.equal(response.headers.get("access-control-allow-credentials"), null);
-  assert.equal(response.headers.get("mcp-session-id"), "session-123");
+  assert.equal(await response.text(), "upstream-cors");
+
+  // Our CORS policy must win over upstream values.
+  assert.equal(response.headers.get("access-control-allow-origin"), ORIGIN);
+  assert.equal(
+    response.headers.get("access-control-allow-methods"),
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  );
+  assert.equal(response.headers.get("access-control-max-age"), "86400");
+  assert.equal(response.headers.get("vary"), "Origin");
+
+  // Unrelated upstream headers still pass through.
+  assert.equal(response.headers.get("x-upstream-custom"), "passthrough");
 });
 
 test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
