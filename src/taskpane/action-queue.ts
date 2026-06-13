@@ -14,6 +14,7 @@
  */
 
 import type { Agent } from "@earendil-works/pi-agent-core";
+import type { ImageContent } from "@earendil-works/pi-ai";
 
 import { commandRegistry } from "../commands/types.js";
 import {
@@ -23,11 +24,11 @@ import {
 import { recoverFromContextOverflow } from "../compaction/overflow-recovery.js";
 
 export type QueuedAction =
-  | { type: "prompt"; text: string }
+  | { type: "prompt"; text: string; images?: ImageContent[] }
   | { type: "command"; name: string; args: string };
 
 export interface ActionQueue {
-  enqueuePrompt: (text: string) => void;
+  enqueuePrompt: (text: string, images?: ImageContent[]) => void;
   enqueueCommand: (name: string, args: string) => void;
   drainQueuedActions: () => QueuedAction[];
   isBusy: () => boolean;
@@ -150,7 +151,7 @@ export function createActionQueue(opts: {
         });
 
         if (closed) break;
-        await agent.prompt(next.text);
+        await agent.prompt(next.text, next.images);
 
         if (closed) break;
         if (autoCompactEnabled) {
@@ -169,13 +170,17 @@ export function createActionQueue(opts: {
     }
   }
 
-  const enqueuePrompt = (text: string) => {
+  const enqueuePrompt = (text: string, images?: ImageContent[]) => {
     if (closed) return;
 
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && (!images || images.length === 0)) return;
 
-    actions.push({ type: "prompt", text: trimmed });
+    actions.push({
+      type: "prompt",
+      text: trimmed,
+      ...(images && images.length > 0 ? { images: [...images] } : {}),
+    });
     syncDisplay();
     void process();
   };

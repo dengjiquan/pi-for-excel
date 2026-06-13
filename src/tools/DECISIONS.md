@@ -260,6 +260,7 @@ Concise record of recent tool behavior choices to avoid regressions. Update this
 - **Preview UX:** Files dialog supports inline text editing plus image/PDF preview; other binaries fall back to metadata + download. Built-in docs are marked read-only in the UI.
 - **Filter UX:** Files dialog includes workbook-tag filtering (`all`, `current workbook`, `untagged`, and per-tag options) without changing underlying shared storage.
 - **Input drop UX:** dropping files onto the chat input imports them directly into workspace (and auto-enables `files-workspace` if needed).
+- **Chat image paste UX:** clipboard images are handled by a lightweight image-only path, previewed in the input, and sent to vision-capable models without restoring the heavy PDF/DOCX/XLSX attachment parser bundle.
 - **Naming:** user-facing UI uses "Files" (not "Files workspace"). Internal flag id remains `files_workspace`; slug `files-workspace` and alias `files` are both accepted.
 - **Rationale:** keep one shared artifact space while preserving workbook context/transparency, while making core assistant docs available without extra setup.
 

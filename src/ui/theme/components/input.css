@@ -58,6 +58,45 @@
   /* JS auto-grow in pi-input.ts keeps sizing consistent across Office WebViews. */
 }
 
+.pi-input-images {
+  display: flex;
+  gap: 6px;
+  max-width: 100%;
+  padding: 10px 40px 2px;
+  overflow-x: auto;
+}
+
+.pi-input-image {
+  position: relative;
+  flex: 0 0 52px;
+  width: 52px;
+  height: 52px;
+}
+
+.pi-input-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.pi-input-image__remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  place-items: center;
+  cursor: pointer;
+}
+
 .pi-input-textarea:placeholder-shown {
   white-space: nowrap;
   overflow: hidden;

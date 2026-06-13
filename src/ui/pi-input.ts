@@ -5,18 +5,26 @@
  * Purpose-built for a narrow sidebar. Replaces pi-web-ui's MessageEditor.
  *
  * Events:
- *   'pi-send'        → detail: { text: string }
+ *   'pi-send'        → detail: { text: string, images: ImageContent[] }
  *   'pi-abort'       → (no detail)
  *   'pi-files-drop'  → detail: { files: File[] }
  *   'pi-open-files'  → (no detail)
  */
 
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { html, LitElement } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { customElement, property, state, query } from "lit/decorators.js";
-import { FileText } from "lucide";
+import { FileText, X } from "lucide";
 
 import { doesUiClaimStreamingEscape } from "../utils/escape-guard.js";
+import {
+  MAX_PASTED_IMAGES,
+  readPastedImage,
+  toImageContent,
+  type PastedImage,
+} from "./pasted-images.js";
+import { showToast } from "./toast.js";
 
 const PLACEHOLDER_HINTS = [
   "Ask about this workbook…",
@@ -32,6 +40,8 @@ export class PiInput extends LitElement {
   @state() private _value = "";
   @state() private _placeholderIndex = 0;
   @state() private _isDragOver = false;
+  @state() private _pastedImages: PastedImage[] = [];
+  @state() private _isProcessingPaste = false;
   @query("textarea") private _textarea!: HTMLTextAreaElement;
 
   private _placeholderTimer?: ReturnType<typeof setInterval>;
@@ -49,6 +59,7 @@ export class PiInput extends LitElement {
 
   clear(): void {
     this._value = "";
+    this._pastedImages = [];
     if (this._textarea) {
       this._textarea.value = "";
       this._autoGrow();
@@ -68,7 +79,7 @@ export class PiInput extends LitElement {
   private _onKeydown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       if (this.isStreaming) return;
-      if (!this._value.trim()) return;
+      if (!this._value.trim() && this._pastedImages.length === 0) return;
       if (this._value.startsWith("/")) return;
       e.preventDefault();
       this._send();
@@ -80,6 +91,39 @@ export class PiInput extends LitElement {
       e.preventDefault();
       this.dispatchEvent(new CustomEvent("pi-abort", { bubbles: true }));
     }
+  };
+
+  private _onPaste = (event: ClipboardEvent) => {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const imageFiles = items
+      .filter((item) => item.kind === "file" && item.type.toLowerCase().startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+
+    if (imageFiles.length === 0) return;
+
+    event.preventDefault();
+    if (this._pastedImages.length + imageFiles.length > MAX_PASTED_IMAGES) {
+      showToast(`You can attach up to ${MAX_PASTED_IMAGES} images.`);
+      return;
+    }
+
+    this._isProcessingPaste = true;
+    void Promise.all(imageFiles.map((file, index) => readPastedImage(file, this._pastedImages.length + index)))
+      .then((images) => {
+        this._pastedImages = [...this._pastedImages, ...images];
+      })
+      .catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : "Could not paste that image.");
+      })
+      .finally(() => {
+        this._isProcessingPaste = false;
+        this._textarea?.focus();
+      });
+  };
+
+  private _removePastedImage = (id: string) => {
+    this._pastedImages = this._pastedImages.filter((image) => image.id !== id);
   };
 
   private _onDragEnter = (event: DragEvent) => {
@@ -128,8 +172,13 @@ export class PiInput extends LitElement {
 
   private _send() {
     const text = this._value.trim();
-    if (!text) return;
-    this.dispatchEvent(new CustomEvent("pi-send", { bubbles: true, detail: { text } }));
+    if ((!text && this._pastedImages.length === 0) || this._isProcessingPaste) return;
+
+    const images: ImageContent[] = toImageContent(this._pastedImages);
+    this.dispatchEvent(new CustomEvent("pi-send", {
+      bubbles: true,
+      detail: { text, images },
+    }));
   }
 
   private _autoGrow() {
@@ -156,7 +205,7 @@ export class PiInput extends LitElement {
   override firstUpdated() { this._textarea?.focus(); }
 
   override render() {
-    const hasContent = this._value.trim().length > 0;
+    const hasContent = this._value.trim().length > 0 || this._pastedImages.length > 0;
 
     return html`
       <div
@@ -175,6 +224,30 @@ export class PiInput extends LitElement {
         >
           ${icon(FileText, "sm")}
         </button>
+        ${this._pastedImages.length > 0
+          ? html`
+            <div class="pi-input-images" aria-label="Pasted images">
+              ${this._pastedImages.map((image) => html`
+                <div class="pi-input-image">
+                  <img
+                    src=${`data:${image.mimeType};base64,${image.data}`}
+                    alt=${image.fileName}
+                    title=${image.fileName}
+                  />
+                  <button
+                    type="button"
+                    class="pi-input-image__remove"
+                    @click=${() => this._removePastedImage(image.id)}
+                    aria-label=${`Remove ${image.fileName}`}
+                    title="Remove image"
+                  >
+                    ${icon(X, "xs")}
+                  </button>
+                </div>
+              `)}
+            </div>
+          `
+          : null}
         <textarea
           class="pi-input-textarea"
           .value=${this._value}
@@ -184,6 +257,7 @@ export class PiInput extends LitElement {
           autocomplete="off"
           @input=${this._onInput}
           @keydown=${this._onKeydown}
+          @paste=${this._onPaste}
         ></textarea>
         ${this._isDragOver
           ? html`<div class="pi-input-drop-hint">Drop files to import into Files</div>`
@@ -198,7 +272,7 @@ export class PiInput extends LitElement {
               class="pi-input-btn pi-input-btn--send ${hasContent ? "" : "is-disabled"}"
               @click=${() => this._send()}
               aria-label="Send"
-              ?disabled=${!hasContent}
+              ?disabled=${!hasContent || this._isProcessingPaste}
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
             </button>`

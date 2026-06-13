@@ -1780,14 +1780,14 @@ export async function initTaskpane(opts: {
   };
   document.addEventListener("pi:command-run", onCommandRun);
 
-  sidebar.onSend = (text) => {
+  sidebar.onSend = (text, images) => {
     clearErrorBanner(errorRoot);
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
       showToast("No active session");
       return;
     }
-    activeRuntime.actionQueue.enqueuePrompt(text);
+    activeRuntime.actionQueue.enqueuePrompt(text, images);
   };
 
   sidebar.onAbort = () => {

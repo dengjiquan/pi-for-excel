@@ -9,6 +9,7 @@ import { createActionQueue } from "../src/taskpane/action-queue.ts";
 
 class TestAgent extends Agent {
   promptCalls: string[] = [];
+  promptImages: Array<ImageContent[] | undefined> = [];
   continueCalls = 0;
   waitForIdleCalls = 0;
   onPrompt?: (text: string) => void;
@@ -42,10 +43,11 @@ class TestAgent extends Agent {
   override prompt(input: string, images?: ImageContent[]): Promise<void>;
   override prompt(
     input: string | AgentMessage | AgentMessage[],
-    _images?: ImageContent[],
+    images?: ImageContent[],
   ): Promise<void> {
     if (typeof input === "string") {
       this.promptCalls.push(input);
+      this.promptImages.push(images);
       this.onPrompt?.(input);
     }
 
@@ -423,4 +425,26 @@ void test("shutdown uninstalls the mid-turn prepareNextTurn hook", () => {
   assert.equal(typeof agent.prepareNextTurn, "function");
   queue.shutdown();
   assert.equal(agent.prepareNextTurn, undefined);
+});
+
+void test("queued prompt preserves pasted images", async () => {
+  const agent = new TestAgent();
+  const queue = createActionQueue({
+    agent,
+    autoCompactEnabled: false,
+    runCompact: async () => {},
+    sidebar: { setBusyIndicator: () => {} },
+    queueDisplay: { setActionQueue: () => {} },
+  });
+  const image: ImageContent = {
+    type: "image",
+    data: "aGVsbG8=",
+    mimeType: "image/png",
+  };
+
+  queue.enqueuePrompt("What is in this image?", [image]);
+
+  await waitForCondition(() => agent.promptCalls.length === 1 && !queue.isBusy());
+  assert.deepEqual(agent.promptImages, [[image]]);
+  queue.shutdown();
 });

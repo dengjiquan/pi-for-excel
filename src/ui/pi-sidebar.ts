@@ -10,7 +10,7 @@ import { html, LitElement, nothing, type PropertyValues } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import type { Agent, AgentEvent } from "@earendil-works/pi-agent-core";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { StreamingMessageContainer } from "@earendil-works/pi-web-ui/dist/components/StreamingMessageContainer.js";
 import { Archive, ChevronRight, FileText, Keyboard, Puzzle, RotateCcw, Ruler, Settings, Wrench } from "lucide";
 import "./pi-input.js";
@@ -124,7 +124,7 @@ const INNER_SCROLLABLE_SELECTOR =
 export class PiSidebar extends LitElement {
   @property({ attribute: false }) agent?: Agent;
   @property({ attribute: false }) emptyHints: EmptyHint[] = [];
-  @property({ attribute: false }) onSend?: (text: string) => void;
+  @property({ attribute: false }) onSend?: (text: string, images?: ImageContent[]) => void;
   @property({ attribute: false }) onAbort?: () => void;
   @property({ attribute: false }) sessionTabs: SessionTabView[] = [];
   @property({ attribute: false }) onCreateTab?: () => void;
@@ -258,9 +258,9 @@ export class PiSidebar extends LitElement {
     this.requestUpdate();
   }
 
-  sendMessage(text: string): void {
+  sendMessage(text: string, images?: ImageContent[]): void {
     if (this.onSend) {
-      this.onSend(text);
+      this.onSend(text, images);
       this._input?.clear();
     }
   }
@@ -528,9 +528,9 @@ export class PiSidebar extends LitElement {
     container.addEventListener("scroll", this._scrollListener);
   }
 
-  private _onSend = (e: CustomEvent<{ text: string }>) => {
+  private _onSend = (e: CustomEvent<{ text: string; images: ImageContent[] }>) => {
     this._autoScroll = true;
-    this.onSend?.(e.detail.text);
+    this.onSend?.(e.detail.text, e.detail.images);
     this._input?.clear();
   };
 
