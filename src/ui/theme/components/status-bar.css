@@ -91,11 +91,9 @@
   opacity: 1;
 }
 .pi-status-model__mark {
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  font-weight: 700;
-  color: var(--primary);
-  line-height: 1;
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
   flex-shrink: 0;
 }
 .pi-status-model__name {

@@ -1212,7 +1212,7 @@ export class PiSidebar extends LitElement {
     return html`
       <div class="pi-empty">
         <div class="pi-empty__content">
-          <div class="pi-empty__logo">π</div>
+          <img class="pi-empty__logo" src="/assets/icon-128.png" alt="AI for Excel" />
           <p class="pi-empty__tagline">
             Understands and acts in Excel. Remembers how you like things.<br />Builds its own tools.
           </p>

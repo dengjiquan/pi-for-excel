@@ -19,13 +19,12 @@
 }
 
 .pi-empty__logo {
-  font-size: var(--text-xl);
-  font-weight: 700;
-  color: var(--pi-green);
-  font-family: var(--font-sans);
+  display: block;
+  width: 58px;
+  height: 58px;
+  object-fit: contain;
   margin-bottom: 4px;
-  opacity: 0.18;
-  letter-spacing: -0.03em;
+  opacity: 0.24;
 }
 
 .pi-empty__tagline {

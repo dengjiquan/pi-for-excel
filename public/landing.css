@@ -68,9 +68,9 @@
       white-space: nowrap;
     }
     .nav-mark__logo {
-      font-family: var(--font-display);
-      font-size: 20px;
-      line-height: 1;
+      width: 24px;
+      height: 24px;
+      object-fit: contain;
     }
     .exp-badge {
       display: inline-flex;
@@ -588,10 +588,10 @@
       margin-top: 24px;
     }
     .footer-pi {
-      font-family: var(--font-display);
-      font-size: 32px;
-      color: var(--green);
-      opacity: 0.15;
+      width: 48px;
+      height: 48px;
+      object-fit: contain;
+      opacity: 0.2;
       display: block;
       margin-bottom: 12px;
     }

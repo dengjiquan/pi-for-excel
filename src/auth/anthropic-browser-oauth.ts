@@ -154,7 +154,7 @@ export async function loginAnthropicInBrowser(callbacks: OAuthLoginCallbacks): P
   callbacks.onAuth({
     url: flow.url,
     instructions:
-      "Complete login in your browser. If the browser cannot reach localhost, copy the final redirect URL and paste it back in Pi for Excel.",
+      "Complete login in your browser. If the browser cannot reach localhost, copy the final redirect URL and paste it back in AI for Excel.",
   });
 
   if (callbacks.signal?.aborted) {

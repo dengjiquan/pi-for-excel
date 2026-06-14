@@ -18,6 +18,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 const DEV_BASE_URL = "https://localhost:3000";
+const LOCAL_PURPOSE =
+  "<!-- Local development manifest. Use this file, or manifest.local.xml, for a localhost shared-folder catalog. -->";
+const PROD_PURPOSE =
+  "<!-- Hosted production manifest. Do not use this file for a localhost shared-folder catalog. -->";
 
 function fail(msg) {
   console.error(`[pi-for-excel] ${msg}`);
@@ -59,8 +63,11 @@ const xml = fs.readFileSync(inPath, "utf-8");
 if (!xml.includes(DEV_BASE_URL)) {
   fail(`Input manifest does not include expected dev base URL ${DEV_BASE_URL}`);
 }
+if (!xml.includes(LOCAL_PURPOSE)) {
+  fail("Input manifest does not include the expected local-purpose marker");
+}
 
-const replaced = xml.split(DEV_BASE_URL).join(baseUrl);
+const replaced = xml.split(DEV_BASE_URL).join(baseUrl).replace(LOCAL_PURPOSE, PROD_PURPOSE);
 
 fs.writeFileSync(outPath, replaced);
 console.log(`[pi-for-excel] Wrote ${outPath}`);

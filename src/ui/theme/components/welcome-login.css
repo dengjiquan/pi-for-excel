@@ -1,12 +1,11 @@
 
 .pi-welcome-logo {
-  font-family: var(--font-sans);
-  font-size: var(--text-xl);
-  font-weight: 700;
-  color: var(--pi-green);
-  opacity: 0.25;
+  display: block;
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+  opacity: 0.9;
   margin-bottom: 4px;
-  text-align: center;
 }
 
 .pi-welcome-title {

@@ -1,8 +1,8 @@
-# Pi for Excel
+# AI for Excel
 
 Open-source, multi-model AI sidebar add-in for Microsoft Excel. Powered by [Pi](https://pi.dev).
 
-Pi for Excel is an AI agent that lives inside Excel. It reads your workbook, makes changes, and does research — using any model you choose. Bring your own API key or OAuth login for Anthropic, OpenAI, Google Gemini, or GitHub Copilot.
+AI for Excel is an AI agent that lives inside Excel. It reads your workbook, makes changes, and does research — using any model you choose. Bring your own API key or OAuth login for Anthropic, OpenAI, Google Gemini, or GitHub Copilot.
 
 ## Features
 
@@ -62,7 +62,7 @@ Pi for Excel is an AI agent that lives inside Excel. It reads your workbook, mak
 
 1. Download [`manifest.prod.xml`](https://pi-for-excel.vercel.app/manifest.prod.xml)
 2. Add it to Excel — see [**install guide**](docs/install.md) for step-by-step instructions (macOS + Windows)
-3. Click **Open Pi** in the ribbon
+3. Click **Open AI** in the ribbon
 4. Connect a provider (API key or OAuth), or configure a custom OpenAI-compatible gateway in `/settings`
 5. Start chatting — try `What sheets do I have?` or `Summarize my current selection`
 
@@ -99,13 +99,23 @@ Then sideload the dev manifest into Excel:
 ```bash
 cp manifest.xml ~/Library/Containers/com.microsoft.Excel/Data/Documents/wef/
 ```
-Then open Excel → **Insert** → **My Add-ins** → **Pi for Excel**.
+Then open Excel → **Insert** → **My Add-ins** → **AI for Excel**.
 
 **Windows** ([Microsoft docs](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing)):
 
 Open Excel → **Insert** → **My Add-ins** → **Upload My Add-in** → select `manifest.xml`.
 
-The dev manifest points to `https://localhost:3000`. The production manifest (`manifest.prod.xml`) points to the hosted Vercel deployment.
+For a Windows shared-folder catalog (for example `C:\OfficeAddins\Catalog`), copy `manifest.local.xml` into the catalog. It points to `https://localhost:3000` and preserves the same local browser storage origin.
+
+Manifest purposes:
+
+| File | Use | Source |
+|---|---|---|
+| `manifest.xml` | Standard local development | `https://localhost:3000` |
+| `manifest.local.xml` | Windows shared-folder catalog | `https://localhost:3000` |
+| `manifest.prod.xml` | Hosted production installation only | `https://pi-for-excel.vercel.app` |
+
+Do not copy `manifest.prod.xml` over a local catalog manifest: it switches the taskpane to the hosted site, so locally stored sessions, skills, and scripts will appear missing.
 
 ### Useful commands
 
@@ -169,7 +179,7 @@ Source-checkout alternatives remain available via `npm run python:bridge:https` 
 
 ## Architecture
 
-Pi for Excel is a single-page Office taskpane add-in built with:
+AI for Excel is a single-page Office taskpane add-in built with:
 
 - **[Vite](https://vite.dev/)** — dev server + production bundler
 - **[Lit](https://lit.dev/)** — web components for the sidebar UI
@@ -251,7 +261,7 @@ Users install by downloading `manifest.prod.xml` and uploading it in Excel — t
 
 ## Credits
 
-- [Pi](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic) (Mario Zechner) — the agent framework powering this project. Pi for Excel uses pi-agent-core, pi-ai, and pi-web-ui for the agent loop, LLM abstraction, and session storage.
+- [Pi](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic) (Mario Zechner) — the agent framework powering this project. AI for Excel uses pi-agent-core, pi-ai, and pi-web-ui for the agent loop, LLM abstraction, and session storage.
 - [whimsical.ts](https://github.com/mitsuhiko/agent-stuff/blob/main/pi-extensions/whimsical.ts) by [@mitsuhiko](https://github.com/mitsuhiko) (Armin Ronacher) — the rotating "Working…" messages are adapted from his Pi extension, rewritten for a spreadsheet/finance audience.
 
 ## License

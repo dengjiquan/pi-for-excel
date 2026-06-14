@@ -80,12 +80,13 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
     const titleId = `${WELCOME_LOGIN_OVERLAY_ID}-title`;
     const subtitleId = `${WELCOME_LOGIN_OVERLAY_ID}-subtitle`;
 
-    const logo = createElement("div", "pi-welcome-logo");
-    logo.textContent = "π";
+    const logo = createElement("img", "pi-welcome-logo");
+    logo.src = "/assets/icon-128.png";
+    logo.alt = "AI for Excel";
 
     const title = createElement("h2", "pi-welcome-title");
     title.id = titleId;
-    title.textContent = "Pi for Excel";
+    title.textContent = "AI for Excel";
 
     const subtitle = createElement("p", "pi-welcome-subtitle");
     subtitle.id = subtitleId;

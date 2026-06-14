@@ -142,7 +142,7 @@ function renderStatusBar(
   const nextMarkup = `
     <div class="pi-status-main">
       <button type="button" class="pi-status-model pi-status-clickable pi-status-tooltip--left" data-tooltip="Switch the AI model for this session.">
-        <span class="pi-status-model__mark">π</span>
+        <img class="pi-status-model__mark" src="/assets/icon-32.png" alt="" aria-hidden="true" />
         <span class="pi-status-model__name">${modelAliasEscaped}</span>
         ${chevronSvg}
       </button>
