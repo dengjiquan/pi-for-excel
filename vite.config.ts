@@ -304,15 +304,6 @@ export default defineConfig({
     "process.env": "{}",
   },
 
-  // Prevent esbuild from downleveling class fields (breaks Lit's @state/@property)
-  optimizeDeps: {
-    esbuildOptions: {
-      target: "esnext",
-      define: {
-        "process.env": "{}",
-      },
-    },
-  },
   esbuild: { target: "esnext" },
 
   resolve: {
