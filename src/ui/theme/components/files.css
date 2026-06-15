@@ -536,6 +536,23 @@
   scrollbar-width: thin;
 }
 
+.pi-files-text-viewer__editor {
+  width: 100%;
+  resize: none;
+  outline: none;
+}
+
+.pi-files-text-viewer__editor:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--alpha-15);
+}
+
+.pi-files-text-viewer__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ── Badge overrides inside file items (#490) ────── */
 .pi-files-item .pi-overlay-badge {
   border-radius: var(--radius-xs);

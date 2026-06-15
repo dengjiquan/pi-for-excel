@@ -27,6 +27,12 @@ export interface FilesDialogDetailActionFileRef {
 
 export interface FilesDialogDetailActionsWorkspace {
   readFile(path: string, opts?: WorkspaceReadOptions): Promise<WorkspaceFileReadResult>;
+  writeTextFile(
+    path: string,
+    text: string,
+    mimeTypeHint?: string,
+    options?: WorkspaceMutationOptions,
+  ): Promise<void>;
   downloadFile(path: string, options?: { locationKind?: WorkspaceFileLocationKind }): Promise<void>;
   renameFile(oldPath: string, newPath: string, options?: WorkspaceMutationOptions): Promise<void>;
   deleteFile(path: string, options?: WorkspaceMutationOptions): Promise<void>;
@@ -117,7 +123,7 @@ function downloadViaDataUri(text: string, fileName: string, mimeType: string): v
   anchor.remove();
 }
 
-async function openTextFileInDialog(options: {
+async function editTextFileInDialog(options: {
   file: WorkspaceFileEntry;
   fileRef: FilesDialogDetailActionFileRef;
   workspace: FilesDialogDetailActionsWorkspace;
@@ -142,11 +148,29 @@ async function openTextFileInDialog(options: {
   const body = document.createElement("div");
   body.className = "pi-overlay-body pi-files-text-viewer__body";
 
-  const content = document.createElement("pre");
-  content.className = "pi-files-text-viewer__content";
-  content.textContent = "Loading…";
+  const editor = document.createElement("textarea");
+  editor.className = "pi-files-text-viewer__content pi-files-text-viewer__editor";
+  editor.value = "Loading…";
+  editor.disabled = true;
 
-  body.appendChild(content);
+  const actions = document.createElement("div");
+  actions.className = "pi-files-text-viewer__actions";
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "pi-overlay-btn pi-overlay-btn--ghost";
+  cancelButton.textContent = "Cancel";
+  cancelButton.addEventListener("click", dialog.close);
+
+  const saveButton = document.createElement("button");
+  saveButton.type = "button";
+  saveButton.className = "pi-overlay-btn pi-overlay-btn--primary";
+  saveButton.textContent = "Save";
+  saveButton.disabled = true;
+
+  actions.append(cancelButton, saveButton);
+
+  body.append(editor, actions);
   dialog.card.append(header, body);
   dialog.mount();
 
@@ -162,7 +186,33 @@ async function openTextFileInDialog(options: {
       throw new Error("File is too large to open in the viewer.");
     }
 
-    content.textContent = result.text;
+    editor.value = result.text;
+    editor.disabled = false;
+    saveButton.disabled = false;
+
+    saveButton.addEventListener("click", () => {
+      void (async () => {
+        saveButton.disabled = true;
+        saveButton.textContent = "Saving…";
+
+        await options.workspace.writeTextFile(
+          options.file.path,
+          editor.value,
+          options.file.mimeType,
+          {
+            audit: options.auditContext,
+            locationKind: options.fileRef.locationKind,
+          },
+        );
+
+        showToast(`Saved ${options.file.name}.`);
+        dialog.close();
+      })().catch((error: unknown) => {
+        saveButton.disabled = false;
+        saveButton.textContent = "Save";
+        showToast(`Save failed: ${getErrorMessage(error)}`);
+      });
+    });
   } catch (error: unknown) {
     dialog.close();
     throw error;
@@ -229,9 +279,9 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
         });
       });
     } else {
-      primaryButton.textContent = "Open";
+      primaryButton.textContent = "Edit";
       primaryButton.addEventListener("click", () => {
-        void openTextFileInDialog({
+        void editTextFileInDialog({
           file: options.file,
           fileRef: options.fileRef,
           workspace: options.workspace,

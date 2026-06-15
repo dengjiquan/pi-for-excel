@@ -28,6 +28,7 @@ function buildReadResult(path) {
 function createWorkspaceStub() {
   return {
     readFile: (path) => Promise.resolve(buildReadResult(path)),
+    writeTextFile: () => Promise.resolve(),
     downloadFile: () => Promise.resolve(),
     renameFile: () => Promise.resolve(),
     deleteFile: () => Promise.resolve(),
@@ -99,23 +100,30 @@ test("detail actions include rename/delete for writable files", () => {
       onAfterDelete: () => Promise.resolve(),
     });
 
-    assert.deepEqual(getButtonLabels(actions), ["Open", "Download", "Rename", "Delete"]);
+    assert.deepEqual(getButtonLabels(actions), ["Edit", "Download", "Rename", "Delete"]);
   } finally {
     restore();
   }
 });
 
-test("open shows writable text files inside the add-in", async () => {
+test("edit opens writable text files and saves changes", async () => {
   const { document, restore } = installFakeDom();
+  let saved = null;
 
   try {
+    const workspace = createWorkspaceStub();
+    workspace.writeTextFile = (path, text, mimeType, options) => {
+      saved = { path, text, mimeType, options };
+      return Promise.resolve();
+    };
+
     const actions = createFilesDialogDetailActions({
       file: makeFile("skills/pricing/SKILL.md"),
       fileRef: {
         path: "skills/pricing/SKILL.md",
         locationKind: "workspace",
       },
-      workspace: createWorkspaceStub(),
+      workspace,
       auditContext: {
         actor: "user",
         source: "test",
@@ -124,14 +132,34 @@ test("open shows writable text files inside the add-in", async () => {
       onAfterDelete: () => Promise.resolve(),
     });
 
-    const openButton = findButton(actions, "Open");
-    assert.ok(openButton);
-    openButton.dispatchEvent(new Event("click"));
+    const editButton = findButton(actions, "Edit");
+    assert.ok(editButton);
+    editButton.dispatchEvent(new Event("click"));
     await flushAsyncActions();
 
     const viewer = document.getElementById("pi-files-text-viewer-overlay");
     assert.ok(viewer);
     assert.equal(viewer.style.zIndex, "300");
+
+    const editor = document.querySelectorAll("textarea")[0];
+    assert.ok(editor);
+    assert.equal(editor.value, "hello");
+    editor.value = "updated skill";
+
+    const saveButton = findButton(viewer, "Save");
+    assert.ok(saveButton);
+    saveButton.dispatchEvent(new Event("click"));
+    await flushAsyncActions();
+
+    assert.deepEqual(saved, {
+      path: "skills/pricing/SKILL.md",
+      text: "updated skill",
+      mimeType: "text/plain",
+      options: {
+        audit: { actor: "user", source: "test" },
+        locationKind: "workspace",
+      },
+    });
   } finally {
     restore();
   }
