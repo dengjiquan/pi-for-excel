@@ -732,3 +732,22 @@
   overflow: hidden;
   background: var(--alpha-3);
 }
+
+/* ── Textarea wrapper with copy button ────────────────────────── */
+
+.pi-overlay-textarea-wrapper {
+  position: relative;
+}
+
+.pi-overlay-textarea__copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+
+.pi-overlay-textarea-wrapper:hover .pi-overlay-textarea__copy {
+  opacity: 1;
+}

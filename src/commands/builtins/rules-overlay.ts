@@ -37,6 +37,7 @@ import {
 } from "../../ui/overlay-dialog.js";
 import { RULES_OVERLAY_ID } from "../../ui/overlay-ids.js";
 import { showToast } from "../../ui/toast.js";
+import { createCopyButton } from "../../ui/lucide-icons.js";
 import { formatWorkbookLabel, getWorkbookContext } from "../../workbook/context.js";
 
 type RulesTab = "user" | "workbook" | "conventions";
@@ -851,12 +852,23 @@ export async function showRulesDialog(opts?: {
   const textarea = document.createElement("textarea");
   textarea.className = "pi-overlay-textarea";
 
+  const textareaWrapper = document.createElement("div");
+  textareaWrapper.className = "pi-overlay-textarea-wrapper";
+  textareaWrapper.append(textarea);
+
+  const copyBtn = createCopyButton({
+    text: () => textarea.value,
+    title: "Copy rules",
+    className: "pi-overlay-textarea__copy",
+  });
+  textareaWrapper.append(copyBtn);
+
   const conventionsContainer = document.createElement("div");
   conventionsContainer.className = "pi-conventions-container";
 
   const body = document.createElement("div");
   body.className = "pi-overlay-body";
-  body.append(header, tabs, workbookTag, hint, textarea, conventionsContainer);
+  body.append(header, tabs, workbookTag, hint, textareaWrapper, conventionsContainer);
 
   const footer = document.createElement("div");
   footer.className = "pi-overlay-footer";

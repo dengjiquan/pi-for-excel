@@ -59,3 +59,62 @@ export {
   Upload,
   Zap,
 };
+
+/* ── Reusable copy button ──────────────────────────────────── */
+
+export interface CopyButtonOptions {
+  /** Text to copy to clipboard (string or function for dynamic content) */
+  text: string | (() => string);
+  /** CSS class for the button */
+  className?: string;
+  /** Tooltip when not copied */
+  title?: string;
+  /** Callback after successful copy */
+  onCopied?: () => void;
+}
+
+let resetCopyTimeout: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Create a copy button that copies text to clipboard on click.
+ * Shows a check icon briefly after successful copy.
+ */
+export function createCopyButton(options: CopyButtonOptions): HTMLButtonElement {
+  const {
+    text,
+    className = "pi-copy-btn",
+    title = "Copy to clipboard",
+    onCopied,
+  } = options;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.appendChild(lucide(Copy));
+
+  const renderCopyIcon = (): void => {
+    button.replaceChildren(lucide(Copy));
+    button.title = title;
+    button.setAttribute("aria-label", title);
+  };
+
+  const renderCopiedIcon = (): void => {
+    button.replaceChildren(lucide(Check));
+    button.title = "Copied!";
+    button.setAttribute("aria-label", "Copied!");
+  };
+
+  button.addEventListener("click", () => {
+    const textToCopy = typeof text === "function" ? text() : text;
+    void navigator.clipboard.writeText(textToCopy).then(() => {
+      if (resetCopyTimeout) clearTimeout(resetCopyTimeout);
+      renderCopiedIcon();
+      onCopied?.();
+      resetCopyTimeout = setTimeout(renderCopyIcon, 1400);
+    });
+  });
+
+  return button;
+}

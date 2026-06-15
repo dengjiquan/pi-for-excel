@@ -11,6 +11,7 @@ import type { ToolRenderer, ToolRenderResult } from "@earendil-works/pi-web-ui/d
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { renderCollapsibleToolCardHeader, renderToolCardHeader } from "./tool-card-header.js";
+import { createCopyButton } from "./lucide-icons.js";
 import { cellRef, cellRefDisplay, cellRefs } from "./cell-link.js";
 import { humanizeToolInput } from "./humanize-params.js";
 import { humanizeColorsInText } from "./color-names.js";
@@ -1031,6 +1032,23 @@ function describeToolCall(
   }
 }
 
+/* ── Copy button helper ─────────────────────────────────────── */
+
+function renderCopyButton(text: string): TemplateResult {
+  const initCopyButton = (el: Element | undefined): void => {
+    if (!(el instanceof HTMLElement)) return;
+    const btn = createCopyButton({
+      text,
+      className: "pi-tool-card__copy",
+      title: "Copy result",
+    });
+    btn.addEventListener("click", (e) => e.stopPropagation());
+    el.replaceChildren(btn);
+  };
+
+  return html`<span ${ref(initCopyButton)}></span>`;
+}
+
 /* ── Renderer ───────────────────────────────────────────────── */
 
 function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<unknown, unknown> {
@@ -1193,12 +1211,12 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
       }
 
       // ── No params or result yet ──────────────────────────
-      return {
-        content: html`
-          <div class="pi-tool-card" data-state=${state} data-tool-name=${toolName}>
-            <div class="pi-tool-card__header">
-              ${renderToolCardHeader(state, title)}
-            </div>
+        return {
+          content: html`
+            <div class="pi-tool-card" data-state=${state} data-tool-name=${toolName}>
+              <div class="pi-tool-card__header">
+                ${renderCollapsibleToolCardHeader(state, title, contentRef, chevronRef, defaultExpanded)}
+              </div>
           </div>
         `,
         isCustom: true,

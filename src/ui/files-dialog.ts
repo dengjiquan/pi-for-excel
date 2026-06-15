@@ -46,6 +46,7 @@ import {
   lucide,
   AlertTriangle,
   ClipboardList,
+  createCopyButton,
   FileSpreadsheet,
   FileText,
   Folder,
@@ -290,6 +291,14 @@ function createTextPreview(
 } {
   const preview = document.createElement("div");
   preview.className = "pi-files-detail-preview pi-files-detail-preview--text";
+
+  // Copy button using reusable helper
+  const copyBtn = createCopyButton({
+    text,
+    className: "pi-files-detail-preview__copy",
+    title: "Copy content",
+  });
+  preview.appendChild(copyBtn);
 
   const lines = text.replaceAll("\r\n", "\n").split("\n");
   const visibleLines = lines.slice(0, TEXT_PREVIEW_MAX_LINES);

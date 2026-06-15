@@ -377,10 +377,47 @@
 
 /* Text preview with line numbers */
 .pi-files-detail-preview {
+  position: relative;
   border: 1px solid var(--alpha-8);
   border-radius: var(--radius-sm);
   background: var(--white-alpha-45);
   overflow: hidden;
+}
+
+/* Copy button — top-right corner of text preview */
+.pi-files-detail-preview__copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--white-alpha-80);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+  z-index: 1;
+}
+.pi-files-detail-preview:hover .pi-files-detail-preview__copy {
+  opacity: 1;
+}
+.pi-files-detail-preview__copy:hover {
+  background: var(--white-alpha-95);
+  color: var(--foreground);
+}
+.pi-files-detail-preview__copy > svg {
+  width: 14px;
+  height: 14px;
+}
+.pi-files-detail-preview__copy--copied {
+  opacity: 1;
+  color: var(--pi-green);
 }
 
 .pi-files-detail-preview--text {
