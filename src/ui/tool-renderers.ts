@@ -10,8 +10,7 @@ import { registerToolRenderer } from "@earendil-works/pi-web-ui/dist/tools/rende
 import type { ToolRenderer, ToolRenderResult } from "@earendil-works/pi-web-ui/dist/tools/types.js";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
-import { renderCollapsibleToolCardHeader, renderToolCardHeader } from "./tool-card-header.js";
-import { createCopyButton } from "./lucide-icons.js";
+import { renderCollapsibleToolCardHeader } from "./tool-card-header.js";
 import { cellRef, cellRefDisplay, cellRefs } from "./cell-link.js";
 import { humanizeToolInput } from "./humanize-params.js";
 import { humanizeColorsInText } from "./color-names.js";
@@ -1030,23 +1029,6 @@ function describeToolCall(
       return { action: "Tool", detail: "" };
     }
   }
-}
-
-/* ── Copy button helper ─────────────────────────────────────── */
-
-function renderCopyButton(text: string): TemplateResult {
-  const initCopyButton = (el: Element | undefined): void => {
-    if (!(el instanceof HTMLElement)) return;
-    const btn = createCopyButton({
-      text,
-      className: "pi-tool-card__copy",
-      title: "Copy result",
-    });
-    btn.addEventListener("click", (e) => e.stopPropagation());
-    el.replaceChildren(btn);
-  };
-
-  return html`<span ${ref(initCopyButton)}></span>`;
 }
 
 /* ── Renderer ───────────────────────────────────────────────── */
