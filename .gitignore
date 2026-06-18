@@ -30,6 +30,8 @@ dist/
 
 # OS
 .DS_Store
+# workbuddy
+.workbuddy/
 
 # Session exports
 pi-session-*

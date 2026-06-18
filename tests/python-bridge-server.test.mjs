@@ -4,9 +4,16 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 const ORIGIN = "https://localhost:3000";
-const BRIDGE_SCRIPT_PATH = new URL("../scripts/python-bridge-server.mjs", import.meta.url).pathname;
+// ponytail: fileURLToPath, not .pathname — on Windows, URL.pathname yields
+// "/D:/..." which node.exe then mis-resolves to "D:\D:\...", failing to load
+// the bridge and breaking the whole suite on zh-CN Windows.
+const BRIDGE_SCRIPT_PATH = fileURLToPath(
+  new URL("../scripts/python-bridge-server.mjs", import.meta.url),
+);
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -64,7 +71,11 @@ async function startBridge(extraEnv = {}) {
     });
 
     child.once("exit", (code, signal) => {
-      reject(new Error(`bridge exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
+      reject(
+        new Error(
+          `bridge exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
+        ),
+      );
     });
   });
 
@@ -192,7 +203,7 @@ test("stub mode python endpoint returns deterministic payload", async (t) => {
     `http://127.0.0.1:${bridge.port}/v1/python-run`,
     requestInit("POST", {
       code: "result = {'value': 1}",
-      input_json: "{\"hello\":\"world\"}",
+      input_json: '{"hello":"world"}',
     }),
   );
 
@@ -203,7 +214,7 @@ test("stub mode python endpoint returns deterministic payload", async (t) => {
   assert.equal(payload.action, "run_python");
   assert.equal(payload.exit_code, 0);
   assert.match(payload.stdout, /simulated/i);
-  assert.equal(payload.result_json, "{\"hello\":\"world\"}");
+  assert.equal(payload.result_json, '{"hello":"world"}');
 });
 
 test("stub mode libreoffice endpoint returns derived output path", async (t) => {
@@ -225,7 +236,7 @@ test("stub mode libreoffice endpoint returns derived output path", async (t) => 
   const payload = await response.json();
   assert.equal(payload.ok, true);
   assert.equal(payload.action, "convert");
-  assert.equal(payload.output_path, "/tmp/source.csv");
+  assert.equal(payload.output_path, path.join("/tmp", "source.csv"));
   assert.equal(payload.converter, "stub");
 });
 

@@ -637,7 +637,15 @@ async function runPython(request, pythonInfo) {
 
   const result = await runCommandCapture({
     command: pythonInfo.command,
-    args: ["-I", "-c", PYTHON_WRAPPER_CODE],
+    // -X utf8 forces UTF-8 mode (stdin/stdout/stderr + open() defaults) so
+    // print()/result payloads never fall back to the system locale. This MUST
+    // be a -X flag, NOT a PYTHONUTF8 env var: -I (isolated mode, kept for
+    // reproducibility/safety) silently ignores ALL PYTHON* env vars, so
+    // PYTHONUTF8/PYTHONIOENCODING set on the child env are dropped and stdout
+    // defaults to cp936/GBK on zh-CN Windows, mojibaking non-ASCII output
+    // before Node decodes it as UTF-8. -X utf8 is a CLI flag and is NOT
+    // ignored by -I.
+    args: ["-I", "-X", "utf8", "-c", PYTHON_WRAPPER_CODE],
     timeoutMs: request.timeout_ms,
     env,
   });
