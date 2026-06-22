@@ -59,6 +59,40 @@ export function createGetWorkbookOverviewTool(): AgentTool<typeof schema> {
   };
 }
 
+/**
+ * Render Name Manager entries in two groups: plain ranges vs named formulas /
+ * custom functions (LAMBDA / LET / ordinary formulas).
+ */
+export function pushNamedItems(
+  lines: string[],
+  items: readonly {
+    type: string;
+    name: string;
+    value: unknown;
+    formula: unknown;
+  }[],
+): void {
+  if (items.length === 0) return;
+  const rangeNames = items.filter((n) => n.type === "Range");
+  const formulaNames = items.filter((n) => n.type !== "Range");
+  lines.push("");
+  lines.push(`### Names (${items.length})`);
+  if (rangeNames.length > 0) {
+    lines.push(`_Named ranges (${rangeNames.length}):_`);
+    for (const n of rangeNames) {
+      lines.push(`- **${n.name}** = ${String(n.value)}`);
+    }
+  }
+  if (formulaNames.length > 0) {
+    lines.push(
+      `_Named formulas / custom functions (${formulaNames.length}) — formula definitions, not cell values:_`,
+    );
+    for (const n of formulaNames) {
+      lines.push(`- **${n.name}** = ${String(n.formula)}`);
+    }
+  }
+}
+
 /** Build the full workbook overview. Also used by context injection. */
 export async function buildOverview(): Promise<string> {
   return excelRun(async (context) => {
@@ -69,7 +103,7 @@ export async function buildOverview(): Promise<string> {
     sheets.load("items/name,items/id,items/position,items/visibility");
 
     const names = wb.names;
-    names.load("items/name,items/type,items/value,items/visible");
+    names.load("items/name,items/type,items/value,items/formula,items/visible");
 
     await context.sync();
 
@@ -147,15 +181,11 @@ export async function buildOverview(): Promise<string> {
       }
     }
 
-    // Named ranges
-    const visibleNames = names.items.filter((n) => n.visible);
-    if (visibleNames.length > 0) {
-      lines.push("");
-      lines.push(`### Named Ranges (${visibleNames.length})`);
-      for (const n of visibleNames) {
-        lines.push(`- **${n.name}** = ${n.value}`);
-      }
-    }
+    // Split ranges from named formulas and show the actual formula definitions.
+    pushNamedItems(
+      lines,
+      names.items.filter((n) => n.visible),
+    );
 
     return lines.join("\n");
   });
@@ -184,7 +214,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
 
     // Named ranges (workbook-level; we filter to this sheet below)
     const names = context.workbook.names;
-    names.load("items/name,items/value,items/visible");
+    names.load("items/name,items/type,items/value,items/formula,items/visible");
 
     // Objects — charts, pivot tables, shapes
     const charts = sheet.charts;
@@ -235,7 +265,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
       }
     }
 
-    // ── Named ranges referencing this sheet ──
+    // ── Named items referencing this sheet ──
     const sheetPrefix = `${sheet.name}!`.toLowerCase();
     const sheetQuotedPrefix = `'${sheet.name}'!`.toLowerCase();
     const relevantNames = names.items.filter((n) => {
@@ -244,13 +274,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
       const val = typeof rawVal === "string" ? rawVal.toLowerCase() : "";
       return val.startsWith(sheetPrefix) || val.startsWith(sheetQuotedPrefix);
     });
-    if (relevantNames.length > 0) {
-      lines.push("");
-      lines.push(`### Named Ranges (${relevantNames.length})`);
-      for (const n of relevantNames) {
-        lines.push(`- **${n.name}** = ${n.value}`);
-      }
-    }
+    pushNamedItems(lines, relevantNames);
 
     // ── Objects (charts, pivot tables, shapes) ──
     const chartNames = charts.items.map((c) => c.name);
