@@ -132,8 +132,15 @@ try {
 
   # Python bridge (optional — skip gracefully if Python is not installed)
   $PythonBin = $null
-  foreach ($candidate in @("python", "python3", "py")) {
-    if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+  $pythonCandidates = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python310\python.exe"),
+    "python3",
+    "python",
+    "py"
+  )
+  foreach ($candidate in $pythonCandidates) {
+    if ((Test-Path -LiteralPath $candidate) -or (Get-Command $candidate -ErrorAction SilentlyContinue)) {
       $PythonBin = $candidate
       break
     }
