@@ -43,7 +43,7 @@
   flex-direction: column;
   gap: 6px;
   width: 100%;
-  max-width: 260px;
+  max-width: 560px;
 }
 
 .pi-empty__hint {

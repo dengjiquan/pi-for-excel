@@ -19,7 +19,7 @@ user-message > div {
   margin-left: var(--pill-inset);
 }
 
-assistant-message { margin-right: var(--pill-inset); }
+assistant-message { margin-right: 0; }
 
 /* Added by applyMessageStyleHooks() so we don't depend on utility classes. */
 .pi-assistant-body {

@@ -6,9 +6,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 8px 6px;
-  /* Reserve space for Office's ⓘ button (injected, ~36px wide, top-right) */
-  padding-right: 44px;
+  padding: 7px 20px 6px 8px;
 
   /* ── Liquid glass surface ── */
   background: transparent;
