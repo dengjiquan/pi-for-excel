@@ -94,6 +94,7 @@ interface PreparedFormatAreaCapture {
   address: string;
   rowCount: number;
   columnCount: number;
+  cellStyleResult?: OfficeExtension.ClientResult<Excel.CellProperties[][]>;
   columnFormats: Excel.RangeFormat[];
   rowFormats: Excel.RangeFormat[];
   mergedAreas?: Excel.RangeAreas;
@@ -152,6 +153,10 @@ async function captureFormatRangeStateWithSelection(
       mergedAreaAddresses: [],
       borders: {},
     };
+
+    if (selection.cellStyle === true) {
+      prepared.cellStyleResult = area.getCellProperties({ style: true });
+    }
 
     if (selection.numberFormat === true) {
       area.load("numberFormat");
@@ -242,6 +247,21 @@ async function captureFormatRangeStateWithSelection(
       rowCount: prepared.rowCount,
       columnCount: prepared.columnCount,
     };
+
+    if (selection.cellStyle === true) {
+      const cellStyles = prepared.cellStyleResult?.value.map((row) =>
+        row.map((cell) => cell.style),
+      );
+      const matrix = validateStringGrid(cellStyles, prepared.rowCount, prepared.columnCount);
+      if (!matrix) {
+        return {
+          supported: false,
+          reason: "Format checkpoint capture failed: cell-style matrix is invalid.",
+        };
+      }
+
+      areaState.cellStyles = matrix;
+    }
 
     if (selection.numberFormat === true) {
       const matrix = validateStringGrid(prepared.range.numberFormat, prepared.rowCount, prepared.columnCount);
@@ -463,6 +483,12 @@ async function captureFormatRangeStateWithSelection(
 }
 
 function applyFormatRangeStateToArea(range: Excel.Range, state: RecoveryFormatAreaState): void {
+  if (state.cellStyles) {
+    range.setCellProperties(
+      state.cellStyles.map((row) => row.map((style) => ({ style }))),
+    );
+  }
+
   if (state.numberFormat) {
     range.numberFormat = cloneStringGrid(state.numberFormat);
   }
@@ -596,6 +622,7 @@ export async function applyFormatCellsState(
       const { areaState, range } = loaded;
 
       const requiresExactShape =
+        typeof areaState.cellStyles !== "undefined" ||
         typeof areaState.numberFormat !== "undefined" ||
         typeof areaState.columnWidths !== "undefined" ||
         typeof areaState.rowHeights !== "undefined";

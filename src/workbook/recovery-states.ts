@@ -303,6 +303,7 @@ export type RecoveryModifyStructureState =
   | RecoveryColumnsPresentState;
 
 export interface RecoveryFormatSelection {
+  cellStyle?: boolean;
   numberFormat?: boolean;
   fillColor?: boolean;
   fontColor?: boolean;
@@ -335,6 +336,7 @@ export interface RecoveryFormatAreaState {
   address: string;
   rowCount: number;
   columnCount: number;
+  cellStyles?: string[][];
   numberFormat?: string[][];
   fillColor?: string;
   fontColor?: string;

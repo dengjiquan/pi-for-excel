@@ -473,6 +473,7 @@ void test("restore applies format-cells checkpoints and creates inverse checkpoi
 
   const restoredTargetState: RecoveryFormatRangeState = {
     selection: {
+      cellStyle: true,
       numberFormat: true,
       fillColor: true,
       bold: true,
@@ -486,6 +487,7 @@ void test("restore applies format-cells checkpoints and creates inverse checkpoi
         address: "Sheet1!A1:B1",
         rowCount: 1,
         columnCount: 2,
+        cellStyles: [["Input", "Input"]],
         numberFormat: [["0.00", "0.00"]],
         fillColor: "#FFFF00",
         bold: true,
@@ -504,6 +506,7 @@ void test("restore applies format-cells checkpoints and creates inverse checkpoi
 
   const currentFormatState: RecoveryFormatRangeState = {
     selection: {
+      cellStyle: true,
       numberFormat: true,
       fillColor: true,
       bold: true,
@@ -517,6 +520,7 @@ void test("restore applies format-cells checkpoints and creates inverse checkpoi
         address: "Sheet1!A1:B1",
         rowCount: 1,
         columnCount: 2,
+        cellStyles: [["Normal", "Normal"]],
         numberFormat: [["General", "General"]],
         fillColor: "#FFFFFF",
         bold: false,

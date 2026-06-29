@@ -441,12 +441,14 @@ const CONVENTIONS = `## Conventions
 ### Cell styles
 Apply named styles in format_cells using the \`style\` param. Compose as array.
 
+For Excel's native Cell Styles, use \`cell_style\` with one built-in style such as \`"Input"\`, \`"Output"\`, \`"Calculation"\`, \`"CheckCell"\`, \`"Note"\`, \`"WarningText"\`, \`"Good"\`, \`"Bad"\`, or \`"Neutral"\`. Prefer native Cell Styles when the user asks for Excel's built-in formatting. The native style is applied first; named styles and individual formatting params override it.
+
 **Built-in format styles:** "number", "integer", "currency", "percent", "ratio", "text".
 **Built-in structural styles:** "header", "total-row", "subtotal", "input", "blank-section".
 **Compose:** \`style: ["currency", "total-row"]\` → currency format + bold + top border.
 **Override:** add \`number_format_dp\`, \`currency_symbol\`, or any individual param.
 Right-align headers above number columns (\`horizontal_alignment: "Right"\`).
-Mark assumption/input cells with \`style: "input"\` (yellow fill) so they stand out as editable.
+Mark assumption/input cells with \`cell_style: "Input"\` so they use Excel's native Input style.
 
 Conventions may redefine built-in preset format strings and the header style.
 Custom presets (if configured) are valid style names in \`style\` and \`number_format\`.

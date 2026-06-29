@@ -77,6 +77,7 @@ function isRecoveryFormatSelection(value: unknown): value is RecoveryFormatRange
   if (!isRecord(value)) return false;
 
   const keys: Array<keyof RecoveryFormatRangeState["selection"]> = [
+    "cellStyle",
     "numberFormat",
     "fillColor",
     "fontColor",
@@ -138,6 +139,7 @@ function isRecoveryFormatAreaState(value: unknown): value is RecoveryFormatRange
   if (typeof value.rowCount !== "number") return false;
   if (typeof value.columnCount !== "number") return false;
 
+  if (value.cellStyles !== undefined && !isStringGrid(value.cellStyles)) return false;
   if (value.numberFormat !== undefined && !isStringGrid(value.numberFormat)) return false;
   if (value.fillColor !== undefined && typeof value.fillColor !== "string") return false;
   if (value.fontColor !== undefined && typeof value.fontColor !== "string") return false;
@@ -166,6 +168,11 @@ function isRecoveryFormatAreaState(value: unknown): value is RecoveryFormatRange
 
   if (Array.isArray(value.columnWidths) && value.columnWidths.length !== value.columnCount) {
     return false;
+  }
+
+  if (Array.isArray(value.cellStyles)) {
+    if (value.cellStyles.length !== value.rowCount) return false;
+    if (value.cellStyles.some((row) => row.length !== value.columnCount)) return false;
   }
 
   if (Array.isArray(value.rowHeights) && value.rowHeights.length !== value.rowCount) {

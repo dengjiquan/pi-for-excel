@@ -68,6 +68,13 @@ Concise record of recent tool behavior choices to avoid regressions. Update this
 - **Source of truth:** `src/conventions/defaults.ts` — format strings, styles, and house-style conventions are defined once and imported by tools + prompt.
 - **Rationale:** agents say `"currency"` instead of pasting fragile 40-char format strings. Composition reduces multi-param calls. See `.research/conventions-design.md` for full design.
 
+## Excel built-in Cell Styles (`format_cells.cell_style`)
+- **Purpose:** apply Excel's native Cell Styles instead of approximating them with individual colors/fonts/borders.
+- **Supported styles:** `Normal`, `Bad`, `Good`, `Neutral`, `Calculation`, `CheckCell`, `ExplanatoryText`, `Hlink`, `HlinkTrav`, `Input`, `LinkedCell`, `Note`, `Output`, `Total`, `WarningText`.
+- **Order:** native Cell Style first; Pi named styles and direct formatting params override it.
+- **Compatibility:** existing `style` presets remain unchanged. Use `cell_style` when the user explicitly wants Excel's built-in style gallery.
+- **Recovery:** capture the prior per-cell style plus the visible format properties overwritten by the native style.
+
 ## Individual border edges (`format_cells.border_top/bottom/left/right`)
 - **New params:** `border_top`, `border_bottom`, `border_left`, `border_right` — each accepts `thin | medium | thick | none`.
 - **Priority:** individual edge params > style-resolved edges > `borders` shorthand.

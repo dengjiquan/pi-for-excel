@@ -77,6 +77,13 @@ void test("system prompt lists the conventions tool", () => {
   assert.match(prompt, /\*\*conventions\*\*/);
 });
 
+void test("system prompt prefers native Excel Cell Styles for built-in formatting", () => {
+  const prompt = buildSystemPrompt();
+  assert.match(prompt, /cell_style/);
+  assert.match(prompt, /Excel's native Cell Styles/);
+  assert.match(prompt, /cell_style: "Input"/);
+});
+
 void test("system prompt includes workbook history recovery tool", () => {
   const prompt = buildSystemPrompt();
   assert.match(prompt, /\*\*workbook_history\*\*/);

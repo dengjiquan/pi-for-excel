@@ -217,6 +217,7 @@ export function cloneRecoveryModifyStructureState(state: RecoveryModifyStructure
 
 export function cloneRecoveryFormatSelection(selection: RecoveryFormatSelection): RecoveryFormatSelection {
   return {
+    cellStyle: selection.cellStyle,
     numberFormat: selection.numberFormat,
     fillColor: selection.fillColor,
     fontColor: selection.fontColor,
@@ -257,6 +258,7 @@ function cloneRecoveryFormatAreaState(area: RecoveryFormatAreaState): RecoveryFo
     address: area.address,
     rowCount: area.rowCount,
     columnCount: area.columnCount,
+    cellStyles: area.cellStyles ? cloneStringGrid(area.cellStyles) : undefined,
     numberFormat: area.numberFormat ? cloneStringGrid(area.numberFormat) : undefined,
     fillColor: area.fillColor,
     fontColor: area.fontColor,

@@ -307,7 +307,10 @@ void test("resume overlay surfaces recently closed tabs and taskpane wires reope
 
   assert.match(initSource, /getRecentlyClosedItems:\s*\(\)\s*=>\s*recentlyClosed\.snapshot\(\)/);
   assert.match(initSource, /onReopenRecentlyClosed:\s*async \(item\) =>/);
-  assert.match(initSource, /const reopenRecentlyClosedById = async \(recentlyClosedId: string\): Promise<boolean> =>/);
+  assert.match(
+    initSource,
+    /const reopenRecentlyClosedById = async \(\s*recentlyClosedId: string,?\s*\): Promise<boolean> =>/,
+  );
   assert.match(initSource, /recentlyClosed\.removeById\(recentlyClosedId\)/);
   assert.match(initSource, /if \(reopenResult === "failed"\) \{\s*recentlyClosed\.push\(item\);\s*\}/);
 });

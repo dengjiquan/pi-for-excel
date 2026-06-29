@@ -227,6 +227,9 @@ function humanizeFormatCells(p: Record<string, unknown>): ParamItem[] {
       : [str(p.style)];
     items.push({ label: "Style", value: names.join(" + ") });
   }
+  if (p.cell_style) {
+    items.push({ label: "Excel style", value: str(p.cell_style) });
+  }
 
   // Font properties — grouped into one row
   const fontParts: Array<TemplateResult | string> = [];

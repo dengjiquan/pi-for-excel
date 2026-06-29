@@ -31,6 +31,10 @@ import {
 } from "./format-cells-borders.js";
 import { getResolvedConventions } from "../conventions/store.js";
 import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
+import {
+  applyExcelCellStyle,
+  EXCEL_BUILT_IN_CELL_STYLES,
+} from "./format-cells-cell-style.js";
 
 const DEFAULT_FONT_NAME = "Arial";
 const DEFAULT_FONT_SIZE = 10;
@@ -109,6 +113,14 @@ const schema = Type.Object({
       },
     ),
   ),
+  cell_style: Type.Optional(
+    Type.String({
+      enum: [...EXCEL_BUILT_IN_CELL_STYLES],
+      description:
+        "Native Excel built-in Cell Style. Applied before named styles and direct format overrides. " +
+        "Examples: Input, Output, Calculation, CheckCell, Note, WarningText, Good, Bad, Neutral.",
+    }),
+  ),
   border_top: Type.Optional(Type.Union(
     [Type.Literal("thin"), Type.Literal("medium"), Type.Literal("thick"), Type.Literal("none")],
     { description: "Top border weight." },
@@ -175,18 +187,20 @@ function buildFormatCheckpointPlan(
   props: ResolvedFormatPropertiesForCheckpoint,
   hasNumberFormat: boolean,
 ): FormatCheckpointPlan {
+  const appliesCellStyle = params.cell_style !== undefined;
   const selection: RecoveryFormatSelection = {
-    numberFormat: hasNumberFormat || undefined,
-    fillColor: props.fillColor !== undefined || undefined,
-    fontColor: props.fontColor !== undefined || undefined,
-    bold: props.bold !== undefined || undefined,
-    italic: props.italic !== undefined || undefined,
-    underlineStyle: props.underline !== undefined || undefined,
-    fontName: props.fontName !== undefined || undefined,
-    fontSize: props.fontSize !== undefined || undefined,
-    horizontalAlignment: props.horizontalAlignment !== undefined || undefined,
-    verticalAlignment: props.verticalAlignment !== undefined || undefined,
-    wrapText: props.wrapText !== undefined || undefined,
+    cellStyle: appliesCellStyle || undefined,
+    numberFormat: appliesCellStyle || hasNumberFormat || undefined,
+    fillColor: appliesCellStyle || props.fillColor !== undefined || undefined,
+    fontColor: appliesCellStyle || props.fontColor !== undefined || undefined,
+    bold: appliesCellStyle || props.bold !== undefined || undefined,
+    italic: appliesCellStyle || props.italic !== undefined || undefined,
+    underlineStyle: appliesCellStyle || props.underline !== undefined || undefined,
+    fontName: appliesCellStyle || props.fontName !== undefined || undefined,
+    fontSize: appliesCellStyle || props.fontSize !== undefined || undefined,
+    horizontalAlignment: appliesCellStyle || props.horizontalAlignment !== undefined || undefined,
+    verticalAlignment: appliesCellStyle || props.verticalAlignment !== undefined || undefined,
+    wrapText: appliesCellStyle || props.wrapText !== undefined || undefined,
     columnWidth: params.column_width !== undefined || params.auto_fit === true || undefined,
     rowHeight: params.row_height !== undefined || params.auto_fit === true || undefined,
     mergedAreas: params.merge !== undefined || undefined,
@@ -204,7 +218,14 @@ function buildFormatCheckpointPlan(
     props.borderLeft !== undefined ||
     props.borderRight !== undefined;
 
-  if (hasShorthand && !hasParamEdges && !hasStyleEdges) {
+  if (appliesCellStyle) {
+    selection.borderTop = true;
+    selection.borderBottom = true;
+    selection.borderLeft = true;
+    selection.borderRight = true;
+    selection.borderInsideHorizontal = true;
+    selection.borderInsideVertical = true;
+  } else if (hasShorthand && !hasParamEdges && !hasStyleEdges) {
     selection.borderTop = true;
     selection.borderBottom = true;
     selection.borderLeft = true;
@@ -339,6 +360,14 @@ export function createFormatCellsTool(): AgentTool<typeof schema, FormatCellsDet
           const warnings: string[] = [...styleResult.warnings];
           const formatTarget = target.format;
           let columnWidthFormat: Excel.RangeFormat | null = null;
+
+          if (params.cell_style) {
+            const styleRanges = resolved.isMultiRange
+              ? resolved.target.areas.items
+              : [resolved.target];
+            applyExcelCellStyle(styleRanges, params.cell_style);
+            applied.push(`Excel cell style ${params.cell_style}`);
+          }
 
           // Report which styles were applied
           if (params.style) {

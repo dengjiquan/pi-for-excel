@@ -6,6 +6,10 @@ import {
   buildBorderInstructions,
   normalizeBorderParams,
 } from "../src/tools/format-cells-borders.ts";
+import {
+  applyExcelCellStyle,
+  EXCEL_BUILT_IN_CELL_STYLES,
+} from "../src/tools/format-cells-cell-style.ts";
 
 function firstText(result: { content: Array<{ type: string; text: string }> }): string {
   const block = result.content[0];
@@ -106,4 +110,13 @@ void test("format_cells rejects invalid border values instead of falling back", 
     () => normalizeBorderParams({ borders: "remove-all" }),
     /Invalid borders/u,
   );
+});
+
+void test("format_cells applies an Excel built-in Cell Style to every target area", () => {
+  const ranges = [{ style: "Normal" }, { style: "Normal" }];
+
+  applyExcelCellStyle(ranges, "Input");
+
+  assert.deepEqual(ranges, [{ style: "Input" }, { style: "Input" }]);
+  assert.ok(EXCEL_BUILT_IN_CELL_STYLES.includes("WarningText"));
 });

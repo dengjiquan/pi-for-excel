@@ -4,6 +4,7 @@ import type { RecoveryFormatAreaShape, RecoveryFormatSelection } from "./types.j
 
 export function hasSelectedFormatProperty(selection: RecoveryFormatSelection): boolean {
   return (
+    selection.cellStyle === true ||
     selection.numberFormat === true ||
     selection.fillColor === true ||
     selection.fontColor === true ||
@@ -68,6 +69,10 @@ export function estimateFormatCaptureCellCount(
 
   return areas.reduce((count, area) => {
     let areaCount = count;
+
+    if (selection.cellStyle === true) {
+      areaCount += area.rowCount * area.columnCount;
+    }
 
     if (selection.numberFormat === true) {
       areaCount += area.rowCount * area.columnCount;
