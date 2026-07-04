@@ -10,7 +10,8 @@ import { WELCOME_LOGIN_OVERLAY_ID } from "../ui/overlay-ids.js";
 import { showToast } from "../ui/toast.js";
 import { setActiveProviders } from "../compat/model-selector-patch.js";
 import {
-  DEFAULT_LOCAL_PROXY_URL,
+  DEFAULT_PROXY_IS_REMOTE,
+  DEFAULT_PROXY_URL,
   PROXY_HELPER_DOCS_URL,
   probeProxyReachability,
   resolveConfiguredProxyUrl,
@@ -32,7 +33,7 @@ async function testLocalHttpsProxy(proxyUrl: string): Promise<boolean> {
 }
 
 export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise<void> {
-  const { ALL_PROVIDERS, buildProviderRow } = await import("../ui/provider-login.js");
+  const { VISIBLE_PROVIDERS, buildProviderRow } = await import("../ui/provider-login.js");
 
   // Make OAuth flows usable even before the user can access /settings.
   try {
@@ -105,7 +106,10 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
 
     const proxyToggle = createElement("button", "pi-welcome-proxy-toggle");
     proxyToggle.type = "button";
-    proxyToggle.textContent = "Having login trouble? Configure local proxy";
+    const proxyToggleClosedLabel = DEFAULT_PROXY_IS_REMOTE
+      ? "Having login trouble? Check proxy settings"
+      : "Having login trouble? Configure local proxy";
+    proxyToggle.textContent = proxyToggleClosedLabel;
     proxyToggle.setAttribute("aria-expanded", "false");
 
     const proxyPanel = createElement("section", "pi-welcome-proxy");
@@ -114,7 +118,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
     const proxyTopRow = createElement("div", "pi-welcome-proxy__row");
 
     const proxyTitle = createElement("div", "pi-welcome-proxy__title");
-    proxyTitle.textContent = "Local HTTPS proxy";
+    proxyTitle.textContent = DEFAULT_PROXY_IS_REMOTE ? "Organisation proxy" : "Local HTTPS proxy";
 
     const proxyToggleLabel = createElement("label", "pi-welcome-proxy__toggle");
     const proxyEnabledEl = createElement("input", "pi-welcome-proxy__enabled");
@@ -138,7 +142,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
 
     const proxyHint = createElement("p", "pi-welcome-proxy__hint");
     const proxyCode = createElement("code");
-    proxyCode.textContent = DEFAULT_LOCAL_PROXY_URL;
+    proxyCode.textContent = DEFAULT_PROXY_URL;
 
     const proxyGuideLink = createElement("a");
     proxyGuideLink.href = PROXY_HELPER_DOCS_URL;
@@ -149,7 +153,9 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
     proxyHint.append(
       "Needed only when OAuth login is blocked by CORS. Keep this URL at ",
       proxyCode,
-      ", run a local HTTPS proxy, then enable this toggle. ",
+      DEFAULT_PROXY_IS_REMOTE
+        ? " (your organisation's proxy), then enable this toggle. "
+        : ", run a local HTTPS proxy, then enable this toggle. ",
       proxyGuideLink,
       ".",
     );
@@ -188,8 +194,8 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
       proxyPanel.hidden = !willOpen;
       proxyToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
       proxyToggle.textContent = willOpen
-        ? "Hide local proxy settings"
-        : "Having login trouble? Configure local proxy";
+        ? "Hide proxy settings"
+        : proxyToggleClosedLabel;
 
       if (willOpen) {
         proxyUrlEl.focus();
@@ -205,7 +211,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
         proxyUrlEl.value = resolveConfiguredProxyUrl(url);
       } catch {
         proxyEnabledEl.checked = false;
-        proxyUrlEl.value = DEFAULT_LOCAL_PROXY_URL;
+        proxyUrlEl.value = DEFAULT_PROXY_URL;
       }
     };
 
@@ -231,7 +237,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
 
     const expandedRef: { current: HTMLElement | null } = { current: null };
 
-    for (const provider of ALL_PROVIDERS) {
+    for (const provider of VISIBLE_PROVIDERS) {
       const row = buildProviderRow(provider, {
         isActive: false,
         expandedRef,
