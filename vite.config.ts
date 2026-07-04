@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vite";
+import { resolveDevOrigin } from "./scripts/generate-dev-manifest.mjs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "fs";
 import path from "path";
@@ -208,6 +209,52 @@ function buildBrowserAliases(): { find: string | RegExp; replacement: string }[]
 }
 
 // ============================================================================
+// Opt-in dev HTTPS proxy (portless) — see docs/portless.md
+// ============================================================================
+
+/**
+ * When the dev server runs behind a local HTTPS reverse proxy such as
+ * portless (https://portless.sh), TLS terminates at the proxy and Vite
+ * serves plain HTTP on a loopback port the proxy forwards to.
+ *
+ * Opt-in only: set DEV_HOST=<hostname> explicitly, or run via
+ * `npm run dev:portless` (portless injects PORTLESS_URL into the child
+ * process). With neither set, the default https://localhost:3000 behavior
+ * is unchanged.
+ */
+interface DevProxyConfig {
+  /** Public hostname the browser uses (e.g. "pi-excel.localhost"). */
+  host: string;
+  /** Public HTTPS port of the proxy (usually 443). */
+  clientPort: number;
+}
+
+function resolveDevProxy(): DevProxyConfig | null {
+  const devHost = process.env.DEV_HOST?.trim();
+  const portlessUrl = process.env.PORTLESS_URL?.trim();
+  if (!devHost && !portlessUrl) return null;
+
+  // Same strict validation as scripts/generate-dev-manifest.mjs (shared
+  // helper): https-only bare origin, no credentials/path/query/hash, and
+  // never the default https://localhost:3000. Invalid values fail loud
+  // instead of silently activating (or silently skipping) proxy mode.
+  const resolved = resolveDevOrigin({
+    env: { DEV_HOST: devHost, PORTLESS_URL: portlessUrl },
+  });
+  const url = new URL(resolved.origin);
+  return {
+    host: url.hostname,
+    clientPort: url.port ? Number.parseInt(url.port, 10) : 443,
+  };
+}
+
+/** Behind the proxy the port comes from PORT (portless-assigned); CLI --port wins over this either way. */
+function parseDevServerPort(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : 3000;
+}
+
+// ============================================================================
 // Vite config
 // ============================================================================
 
@@ -217,6 +264,8 @@ const certPath = path.resolve(__dirname, "cert.pem");
 
 const hasHttpsCerts = fs.existsSync(keyPath) && fs.existsSync(certPath);
 
+const devProxy = resolveDevProxy();
+
 export default defineConfig({
   plugins: [
     piAuthPlugin(),
@@ -224,14 +273,34 @@ export default defineConfig({
   ],
 
   server: {
-    // Must stay on :3000 because manifest hardcodes it.
-    // Bind IPv6 too: Excel's webview may resolve localhost → ::1 and fail if we only listen on 127.0.0.1.
-    host: "::",
-    strictPort: true,
-    port: 3000,
-    https: hasHttpsCerts
-      ? { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }
-      : undefined,
+    ...(devProxy
+      ? {
+          // Behind a local HTTPS proxy (portless): TLS terminates at the
+          // proxy, so Vite serves plain HTTP on loopback only. portless
+          // assigns the port via PORT / an injected --port flag.
+          host: "localhost",
+          strictPort: true,
+          port: parseDevServerPort(process.env.PORT),
+          // *.localhost is allowed by default; this covers custom TLDs (e.g. --tld test).
+          allowedHosts: [devProxy.host],
+          // Route the HMR websocket through the HTTPS proxy rather than
+          // straight at Vite's plain-HTTP port.
+          hmr: {
+            protocol: "wss",
+            host: devProxy.host,
+            clientPort: devProxy.clientPort,
+          },
+        }
+      : {
+          // Must stay on :3000 because manifest hardcodes it.
+          // Bind IPv6 too: Excel's webview may resolve localhost → ::1 and fail if we only listen on 127.0.0.1.
+          host: "::",
+          strictPort: true,
+          port: 3000,
+          https: hasHttpsCerts
+            ? { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }
+            : undefined,
+        }),
 
     proxy: {
       // OAuth token endpoints. Keep longer/more-specific prefixes before shorter ones.
