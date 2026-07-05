@@ -38,7 +38,6 @@ import { runCompactCommand } from "../commands/builtins/export.js";
 import { getFilesWorkspace } from "../files/workspace.js";
 import { ConnectionManager } from "../connections/manager.js";
 import { createAllTools } from "../tools/index.js";
-import type { SpreadsheetHost } from "../host/types.js";
 import { collectRequiredConnectionIds } from "../tools/connection-requirements.js";
 import {
   applyToolOutputTruncation,
@@ -127,8 +126,9 @@ import { showActionToast, showToast } from "../ui/toast.js";
 import { PiSidebar } from "../ui/pi-sidebar.js";
 import { createProxyBanner } from "../ui/proxy-banner.js";
 import { setActiveProviders } from "../compat/model-selector-patch.js";
+import { getCurrentSpreadsheetHost } from "../host/index.js";
 import { createWorkbookCoordinator } from "../workbook/coordinator.js";
-import { formatWorkbookLabel, getWorkbookContext } from "../workbook/context.js";
+import { formatWorkbookLabel, type WorkbookContext } from "../workbook/context.js";
 import {
   getManualFullWorkbookBackupStore,
   type ManualFullWorkbookBackup,
@@ -216,12 +216,11 @@ async function ensureDefaultProxyUrl(settings: ProxySettingsStore): Promise<void
 export async function initTaskpane(opts: {
   appEl: HTMLElement;
   errorRoot: HTMLElement;
-  host?: SpreadsheetHost;
 }): Promise<void> {
   const { appEl, errorRoot } = opts;
-  const host = opts.host;
 
   const changeTracker = new ChangeTracker();
+  const spreadsheetHost = getCurrentSpreadsheetHost();
 
   // 1. Storage
   const { providerKeys, sessions, settings, customProviders } = initAppStorage();
@@ -464,9 +463,9 @@ export async function initTaskpane(opts: {
     modelSwitchBehavior = await setStoredModelSwitchBehavior(settings, nextBehavior);
   };
 
-  const resolveWorkbookContext = async (): Promise<Awaited<ReturnType<typeof getWorkbookContext>>> => {
+  const resolveWorkbookContext = async (): Promise<WorkbookContext> => {
     try {
-      return host ? await host.getWorkbookContext() : await getWorkbookContext();
+      return await spreadsheetHost.getWorkbookContext();
     } catch {
       return {
         workbookId: null,
@@ -796,7 +795,7 @@ export async function initTaskpane(opts: {
   const refreshCapabilitiesForAllRuntimes = createAsyncCoalescer(runCapabilityRefreshPass);
 
   const reservedToolNames = new Set([
-    ...createAllTools({ hostKind: host?.kind }).map((tool) => tool.name),
+    ...createAllTools({ hostKind: spreadsheetHost.kind }).map((tool) => tool.name),
     ...getIntegrationToolNames(),
   ]);
   const connectionManager = new ConnectionManager({ settings });
@@ -934,7 +933,7 @@ export async function initTaskpane(opts: {
       runtimeActiveIntegrationIds.set(runtimeId, activeIntegrationIds);
 
       const coreTools = createAllTools({
-        hostKind: host?.kind,
+        hostKind: spreadsheetHost.kind,
         getExtensionManager: () => extensionManager,
         getSessionId: () => runtimeAgent?.sessionId ?? runtimeSessionId,
         skillReadCache: runtimeSkillReadCache,

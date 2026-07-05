@@ -12,9 +12,13 @@ import { render } from "lit";
 import { installFetchInterceptor } from "../auth/cors-proxy.js";
 import { installModelSelectorPatch } from "../compat/model-selector-patch.js";
 import { installProcessEnvShim } from "../compat/process-env-shim.js";
+import {
+  resolveSpreadsheetHostForBoot,
+  setCurrentSpreadsheetHost,
+} from "../host/index.js";
+import { t } from "../language/index.js";
 import { renderLoading, renderError } from "../ui/loading.js";
 import { getErrorMessage } from "../utils/errors.js";
-import { t } from "../language/index.js";
 
 import { initTaskpane } from "./init.js";
 
@@ -43,7 +47,7 @@ export function bootstrapTaskpane(): void {
   installFetchInterceptor();
   installModelSelectorPatch();
 
-  // Office bootstrap (with fallback for local dev)
+  // Host bootstrap (Office/WPS/browser fallback for local dev)
   let initialized = false;
 
   const runInit = () => {
@@ -94,21 +98,28 @@ export function bootstrapTaskpane(): void {
       });
   };
 
-  if (typeof Office === "undefined") {
-    console.warn(t("bootstrap.officeUnavailable"));
-    runInit();
-    return;
-  }
+  void resolveSpreadsheetHostForBoot({ officeReadyTimeoutMs: 3000 })
+    .then(({ host, readyInfo }) => {
+      setCurrentSpreadsheetHost(host);
 
-  void Office.onReady((info) => {
-    console.log(`[pi] Office.js ready: host=${info.host}, platform=${info.platform}`);
-    runInit();
-  });
+      if (readyInfo.reason === "office-ready") {
+        const nativeHost = readyInfo.nativeHost ?? "unknown";
+        const nativePlatform = readyInfo.nativePlatform ?? "unknown";
+        console.log(
+          `[pi] Office.js ready: host=${nativeHost}, platform=${nativePlatform}`,
+        );
+      } else if (readyInfo.reason === "wps-jsapi") {
+        console.log("[pi] WPS JSAPI detected — initializing WPS host");
+      } else if (readyInfo.reason === "office-timeout") {
+        console.warn("[pi] Office.js not ready after 3s — initializing without Excel");
+      } else {
+        console.warn(t("bootstrap.officeUnavailable"));
+      }
 
-  setTimeout(() => {
-    if (initialized) return;
-
-    console.warn("[pi] Office.js not ready after 3s — initializing without Excel");
-    runInit();
-  }, 3000);
+      runInit();
+    })
+    .catch((error: unknown) => {
+      console.warn("[pi] Host detection failed — initializing without Excel:", error);
+      runInit();
+    });
 }
