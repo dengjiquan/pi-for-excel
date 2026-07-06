@@ -14,7 +14,8 @@
  */
 
 import type { Agent } from "@earendil-works/pi-agent-core";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import { t } from "../language/index.js";
+import type { ImageContent } from "@earendil-works/pi-ai/compat";
 
 import { commandRegistry } from "../commands/types.js";
 import {
@@ -60,7 +61,7 @@ export function createActionQueue(opts: {
   const syncDisplay = () => {
     queueDisplay.setActionQueue(
       actions.map((a) => {
-        if (a.type === "prompt") return { type: "prompt", label: "Queued", text: a.text };
+        if (a.type === "prompt") return { type: "prompt", label: t("action-queue.queued"), text: a.text };
         return { type: "command", label: `/${a.name}`, text: a.args ? a.args : "" };
       }),
     );
@@ -70,8 +71,8 @@ export function createActionQueue(opts: {
 
   const runCompactWithIndicator = async () => {
     sidebar.setBusyIndicator(
-      "Compacting context…",
-      "Send messages and Pi will see them after compaction",
+      t("action-queue.compacting"),
+      t("action-queue.compactingHint"),
     );
     try {
       await opts.runCompact();
@@ -105,8 +106,8 @@ export function createActionQueue(opts: {
     // Special-case: show an explicit non-streaming indicator for compaction.
     if (name === "compact") {
       sidebar.setBusyIndicator(
-        "Compacting context…",
-        "Send messages and Pi will see them after compaction",
+        t("action-queue.compacting"),
+        t("action-queue.compactingHint"),
       );
       try {
         await cmd.execute(args);

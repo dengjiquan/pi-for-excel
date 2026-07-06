@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Local development manifest. Use this file, or manifest.local.xml, for a localhost shared-folder catalog. -->
 <OfficeApp
   xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -8,7 +7,7 @@
   xsi:type="TaskPaneApp">
 
   <Id>a1b2c3d4-e5f6-7890-abcd-ef1234567890</Id>
-  <Version>1.0.1.0</Version>
+  <Version>1.0.0.0</Version>
   <ProviderName>AI for Excel</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="AI for Excel" />
@@ -73,11 +72,11 @@
         <bt:Url id="TaskpaneUrl" DefaultValue="https://localhost:3000/src/taskpane.html" />
       </bt:Urls>
       <bt:ShortStrings>
-        <bt:String id="GroupLabel" DefaultValue="AI" />
-        <bt:String id="ButtonLabel" DefaultValue="Open AI" />
+        <bt:String id="GroupLabel" DefaultValue="Pi" />
+        <bt:String id="ButtonLabel" DefaultValue="Open Pi" />
       </bt:ShortStrings>
       <bt:LongStrings>
-        <bt:String id="ButtonDesc" DefaultValue="Open the AI for Excel assistant sidebar" />
+        <bt:String id="ButtonDesc" DefaultValue="Open the Pi AI assistant sidebar" />
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>

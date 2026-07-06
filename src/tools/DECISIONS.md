@@ -2,6 +2,17 @@
 
 Concise record of recent tool behavior choices to avoid regressions. Update this as we tweak tooling.
 
+## WPS registry seam and Phase 2 overrides (NEXSELL-370)
+- **Tool list:** keep `CORE_TOOL_NAMES` as the single ordered source of truth and keep core tool schemas/metadata stable across hosts.
+- **WPS Phase 2 override mechanism:** `host-selection.ts` owns `WPS_CORE_TOOL_EXECUTE_OVERRIDES`, a narrow execute-only map for WPS-backed core tools. Supported WPS tools are composed as `{ ...officeTool, execute: wpsExecute }`, so `name`/`label`/`description`/`parameters` remain byte-for-byte identical to the Office tool object for prompt-cache stability.
+- **Supported WPS core slice:** `get_workbook_overview`, `read_range`, and `write_cells` run against the synchronous WPS ET JSAPI. Other workbook tools keep the typed fail-fast wrapper.
+- **Local-only core tools:** `instructions`, `conventions`, and `skills` remain available because they operate on settings/skills storage. Workbook-scoped instructions use the WPS workbook identity when `ActiveWorkbook.FullName` is available.
+- **No backups on WPS:** `write_cells` preserves overwrite protection and read-back verification, but WPS automatic workbook backups/snapshots are not implemented. The WPS write result says this explicitly and sets recovery metadata to `not_available`; `workbook_history` remains fail-fast on WPS.
+- **Office-coupled non-core tools:** `execute_office_js` and `python_transform_range` drive Office.js/Excel directly, so `createAllTools()` wraps them with the same fail-fast handler on WPS. Local-bridge tools (`tmux`, `python_run`, `libreoffice_convert`, `files`, extensions manager) are host-independent and stay unwrapped.
+- **WPS direct JS tool:** `execute_wps_js` is registered only when `hostKind === "wps"`. It uses the same direct-JS approval gate and JSON serialization policy as `execute_office_js`, but runs synchronous WPS JSAPI code with `Application` in scope.
+- **Typed failure:** fail-fast wrappers throw `UnsupportedHostToolError` (`code: "unsupported_host_tool"`, with `hostKind` + `toolName`), so callers/tests/UI can distinguish "unsupported on this host" from implementation failures.
+- **Rationale:** preserving the tool list avoids prompt-cache/schema churn and keeps disclosure/UI mappings deterministic, while honest runtime failures prevent pretending unsupported WPS workbook features exist.
+
 ## Column width (`format_cells.column_width`)
 - **User-facing unit:** Excel character-width units (same as Excel UI).
 - **Conversion:** assume **Arial 10** and convert to points with `1 char ≈ 7.2 points`.
@@ -216,7 +227,9 @@ Concise record of recent tool behavior choices to avoid regressions. Update this
 ## Direct Office.js tool (`execute_office_js`)
 - **Availability:** always available (not behind `/experimental`), always registered via `createAllTools()`.
 - **Contract:** accepts `code` (async function body receiving `context: Excel.RequestContext`) plus a short user-facing `explanation`.
-- **Safety guards:** blocks nested `Excel.run(...)` usage (host already provides context), enforces explanation/code length limits, requires explicit user confirmation on every execution, and fails closed if confirmation UI is unavailable.
+- **Safety guards:** blocks nested `Excel.run(...)` usage (host already provides context), enforces explanation/code length limits, and fails closed if confirmation UI is unavailable when approval is required.
+- **Approval model:** Confirm mode prompts on every call. Auto mode runs pure Excel API code without a prompt (#347), but a static ambient-authority lint (`experimental-tool-gates/office-js-risk.ts`) forces per-call approval — in any mode — when code references browser capabilities beyond the Excel API (network egress, storage, DOM/global handles, workers, dynamic evaluation, `Office.*`, or realm escape via `constructor`). Flagged approvals include the detected identifiers in the prompt.
+- **Threat model:** submitted code executes in the taskpane page realm (blob module import) with ambient access to the realm that holds provider credentials, and workbook content is untrusted input injected into context every turn. The lint is a heuristic tripwire (raw-text scan, false positives cost one dialog); the durable fix is an isolated-realm runner with only a guarded workbook API bridged in (#605).
 - **Result policy:** tool output must be JSON-serializable; non-serializable results are returned as deterministic errors.
 - **Execution policy:** treated as `mutate/structure` to force conservative workbook-context refresh after execution.
 - **Rationale:** unlock advanced Office.js scenarios when structured tools are insufficient while preserving explicit consent.
@@ -285,18 +298,28 @@ Concise record of recent tool behavior choices to avoid regressions. Update this
 - **Optional explanation UX:** mutation tool cards expose an on-demand **Explain these changes** drawer that synthesizes a concise explanation + clickable citations from structured audit metadata, with bounded payload/text limits.
 - **Rationale:** improve user trust with concrete, navigable deltas while keeping implementation incremental and low-risk.
 
+## Charts tool (`charts`)
+- **Actions:** `list`, `create`, `update`, `delete`, `get_image` in one action-based core tool.
+- **Chart type scope:** v1 exposes common ExcelApi 1.1 chart families only (column/bar/line/area/pie/doughnut/scatter/radar), mapped from friendly names to Office.js `ChartType` values.
+- **Image contract:** `get_image` returns a short text receipt plus an image content block; base64 PNG bytes and dimensions live in `details.image`, not in text output.
+- **Backups:** `create` stores `chart_absent` (restore deletes the created chart); `update` stores `chart_present` with pre-update chart properties. If `update` changes `source_range`, restore cannot revert the prior data source because Office.js does not expose it, so the tool result explicitly notes this limitation. `delete` has no automatic backup in v1 for the same source-range reason and reports `no backup`.
+- **Restore identity:** `chart_absent` checkpoints capture the stable Office.js chart id at creation (best-effort — hosts without `Chart.id` still create charts). Restore locates the chart by id (rename-proof, never deletes an unrelated chart that reused the name). If a stored id cannot be verified at restore time, the restore fails safely without deleting anything; unique-name matching applies only to legacy states with no captured id. Chart restores return the post-restore identity so inverse (rollback) snapshots are addressed where the chart actually is after a rename-restore.
+- **Downgrade safety:** persisted `chart_state` snapshots omit the `beforeValues`/`beforeFormulas` grids so codecs predating the kind fail their range-grid check and drop the entry instead of misreading it as an empty range backup.
+- **Context impact:** `list`/`get_image` are read-only; `create`/`delete` invalidate structure context, while `update` is content impact.
+- **Rationale:** cover common chart workflows with typed params and visual verification while avoiding a false promise of faithful deleted-chart recreation.
+
 ## Workbook backups (`workbook_history`)
 - **Goal:** prefer low-friction workflows over pre-execution approval selectors by making rollback easy and reliable.
 - **Execution mode toggle:** `/yolo` switches between:
   - `YOLO` (default): mutate tools run without extra pre-execution confirmations.
   - `Safe`: mutate tools require pre-execution confirmation via runtime gate.
-- **Automatic backups:** successful `write_cells`, `fill_formula`, `python_transform_range`, `format_cells`, `conditional_format`, mutating `comments` actions, and supported `modify_structure` actions (`rename_sheet`, `hide_sheet`, `unhide_sheet`, `insert_rows`, `insert_columns`, `add_sheet`, and `duplicate_sheet` when the duplicate has no value data) store pre-mutation snapshots in local `workbook.recovery-snapshots.v1`.
+- **Automatic backups:** successful `write_cells`, `fill_formula`, `python_transform_range`, `format_cells`, `conditional_format`, mutating `comments` actions, `charts` create/update, and supported `modify_structure` actions (`rename_sheet`, `hide_sheet`, `unhide_sheet`, `insert_rows`, `insert_columns`, `add_sheet`, and `duplicate_sheet` when the duplicate has no value data) store pre-mutation snapshots in local `workbook.recovery-snapshots.v1`.
 - **Manual full-workbook fallback (`/backup`):** explicit user-triggered full-file captures are stored in Files workspace under `manual-backups/full-workbook/v1/...` and downloaded for restore. This remains separate from automatic per-mutation checkpoints.
 - **Safety limits:** backup capture is skipped for very large writes (> `MAX_RECOVERY_CELLS`) to avoid oversized local state.
 - **Workbook identity guardrails:** append/list/delete/clear/restore paths are scoped to the active workbook identity; restore rejects identity-less or cross-workbook backups.
 - **Save boundary behavior:** backups are intended as "in between saves" recovery points and are cleared after the workbook transitions from dirty → saved.
 - **Restore UX:** `workbook_history` can list/restore/delete/clear backups; restores also create an inverse backup (`restore_snapshot`) so users can undo a mistaken restore.
-- **Coverage signaling:** `modify_structure` and mutating `view_settings` actions explicitly report when no backup was created.
+- **Coverage signaling:** `modify_structure`, mutating `view_settings`, and `charts delete` actions explicitly report when no backup was created.
 - **Current `modify_structure` backup behavior:** captures/restores all `modify_structure` actions, including value-preserving checkpoints for destructive deletes (`delete_rows`, `delete_columns`, `delete_sheet`) by storing deleted value/formula data when capture is within recovery size limits.
 - **Restore safety gate for structure absence states:** restoring `sheet_absent` / `rows_absent` / `columns_absent` checkpoints remains blocked when target data exists, unless the checkpoint was explicitly generated with data-delete intent during a prior restore inversion (`allowDataDelete`).
 - **Current `format_cells` backup scope:** captures/restores core range-format properties (font/fill/number format/alignment/wrap/borders), row/column dimensions (`column_width`, `row_height`, `auto_fit`), and merge state (`merge`/`unmerge`).

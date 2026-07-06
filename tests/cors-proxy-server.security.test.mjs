@@ -5,9 +5,10 @@ import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
-const ORIGIN = "https://localhost:3000";
-const PROXY_SCRIPT_PATH = new URL("../scripts/cors-proxy-server.mjs", import.meta.url).pathname;
+const ORIGIN = "https://localhost:3141";
+const PROXY_SCRIPT_PATH = fileURLToPath(new URL("../scripts/cors-proxy-server.mjs", import.meta.url));
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -27,6 +28,23 @@ async function getFreePort() {
       });
     });
   });
+}
+
+async function stopChild(child) {
+  if (!child.killed) {
+    child.kill("SIGTERM");
+  }
+
+  const exited = Promise.race([
+    once(child, "exit"),
+    delay(2000).then(() => {
+      if (!child.killed) {
+        child.kill("SIGKILL");
+      }
+    }),
+  ]);
+
+  await exited.catch(() => {});
 }
 
 async function startProxy(extraEnv = {}) {
@@ -78,26 +96,71 @@ async function startProxy(extraEnv = {}) {
     }),
   ]);
 
-  const stop = async () => {
-    if (!child.killed) {
-      child.kill("SIGTERM");
-    }
-
-    const exited = Promise.race([
-      once(child, "exit"),
-      delay(2000).then(() => {
-        if (!child.killed) {
-          child.kill("SIGKILL");
-        }
-      }),
-    ]);
-
-    await exited.catch(() => {});
-  };
-
   return {
     port,
-    stop,
+    stop: () => stopChild(child),
+    getLogs: () => ({ stdout, stderr }),
+  };
+}
+
+async function startProxyOnDefaultPort(extraEnv = {}) {
+  const env = { ...process.env };
+  delete env.PORT;
+  Object.assign(env, {
+    HOST: "127.0.0.1",
+    ALLOWED_ORIGINS: ORIGIN,
+    ...extraEnv,
+  });
+
+  const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+
+  const ready = new Promise((resolve, reject) => {
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      const hasListeningLog = stdout.includes("CORS proxy listening on");
+      const hasTargetPolicyLog =
+        stdout.includes("Allowed target hosts")
+        || stdout.includes("target host allowlisting disabled");
+
+      if (hasListeningLog && hasTargetPolicyLog) {
+        resolve(undefined);
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    child.once("exit", (code, signal) => {
+      reject(new Error(`proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
+    });
+  });
+
+  await Promise.race([
+    ready,
+    delay(5000).then(() => {
+      throw new Error(`proxy start timeout\n${stdout}\n${stderr}`);
+    }),
+  ]);
+
+  const match = stdout.match(/CORS proxy listening on http:\/\/127\.0\.0\.1:(\d+)/);
+  if (!match) {
+    await stopChild(child);
+    throw new Error(`Could not parse proxy port from logs\n${stdout}\n${stderr}`);
+  }
+
+  return {
+    port: Number.parseInt(match[1], 10),
+    stop: () => stopChild(child),
     getLogs: () => ({ stdout, stderr }),
   };
 }
@@ -316,4 +379,216 @@ test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
   assert.equal(response.status, 403);
   const text = await response.text();
   assert.match(text, /blocked_target_not_allowlisted/);
+});
+
+test("proxy blocks requests without an allowed Origin header", async (t) => {
+  const proxy = await startProxy();
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const target = encodeURIComponent("https://api.openai.com/");
+
+  const noOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`);
+  assert.equal(noOrigin.status, 403);
+
+  const badOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: "https://evil.example.com" },
+  });
+  assert.equal(badOrigin.status, 403);
+});
+
+test("proxy /healthz responds without an Origin header and never proxies", async (t) => {
+  const proxy = await startProxy();
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
+  assert.equal(health.status, 200);
+  assert.equal(await health.text(), "ok");
+
+  // Query strings (including ?url=) must not turn /healthz into a proxy path.
+  const withUrl = await fetch(
+    `http://127.0.0.1:${proxy.port}/healthz?url=${encodeURIComponent("https://api.openai.com/")}`,
+  );
+  assert.equal(withUrl.status, 200);
+  assert.equal(await withUrl.text(), "ok");
+});
+
+test("proxy auto-selects a random port when default 3003 is busy and PORT is not set", async (t) => {
+  const first = await startProxyOnDefaultPort();
+  t.after(async () => {
+    await first.stop();
+  });
+
+  const second = await startProxyOnDefaultPort();
+  t.after(async () => {
+    await second.stop();
+  });
+
+  assert.notEqual(second.port, 3003);
+
+  const health = await fetch(`http://127.0.0.1:${second.port}/healthz`);
+  assert.equal(health.status, 200);
+  assert.equal(await health.text(), "ok");
+
+  const { stdout, stderr } = second.getLogs();
+  const listeningLogCount = stdout.match(/CORS proxy listening on/g)?.length ?? 0;
+  const settingsHintCount = stdout.match(/Update Pi for Excel \/settings → Proxy URL/g)?.length ?? 0;
+  assert.equal(listeningLogCount, 1);
+  assert.equal(settingsHintCount, 1);
+  assert.match(stderr, /Port 3003 is already in use; choosing a random available port instead\./);
+  assert.match(stdout, new RegExp(`CORS proxy listening on http://127\\.0\\.0\\.1:${second.port}`));
+  assert.match(stdout, /Update Pi for Excel \/settings → Proxy URL to http:\/\/127\.0\.0\.1:\d+/);
+});
+
+test("proxy boots with ALLOWED_CLIENT_CIDRS, warns, and still serves loopback", async (t) => {
+  const proxy = await startProxy({
+    ALLOWED_CLIENT_CIDRS: "10.96.0.0/13, 192.168.1.5",
+  });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
+  assert.equal(health.status, 200);
+
+  const { stdout } = proxy.getLogs();
+  assert.match(stdout, /WARNING: accepting non-loopback clients from: 10\.96\.0\.0\/13, 192\.168\.1\.5/);
+});
+
+test("proxy exits on invalid ALLOWED_CLIENT_CIDRS (fail closed)", async () => {
+  const port = await getFreePort();
+  const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      ALLOWED_ORIGINS: ORIGIN,
+      ALLOWED_CLIENT_CIDRS: "0.0.0.0/0",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const [code] = await Promise.race([
+    once(child, "exit"),
+    delay(5000).then(() => {
+      child.kill("SIGKILL");
+      throw new Error("proxy did not exit on invalid ALLOWED_CLIENT_CIDRS");
+    }),
+  ]);
+
+  assert.equal(code, 1);
+  assert.match(stderr, /Invalid ALLOWED_CLIENT_CIDRS entries: 0\.0\.0\.0\/0/);
+});
+
+test("proxy exits when TLS_KEY_PATH/TLS_CERT_PATH are missing files", async () => {
+  const port = await getFreePort();
+  const child = spawn(process.execPath, [PROXY_SCRIPT_PATH, "--https"], {
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      ALLOWED_ORIGINS: ORIGIN,
+      TLS_KEY_PATH: "/nonexistent/org.key",
+      TLS_CERT_PATH: "/nonexistent/org.pem",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const [code] = await Promise.race([
+    once(child, "exit"),
+    delay(5000).then(() => {
+      child.kill("SIGKILL");
+      throw new Error("proxy did not exit on missing TLS files");
+    }),
+  ]);
+
+  assert.equal(code, 1);
+  assert.match(stderr, /TLS key\/cert not found/);
+  assert.match(stderr, /\/nonexistent\/org\.key/);
+});
+
+test("configured ALLOWED_TARGET_HOSTS is enforced even with loopback/private overrides", async (t) => {
+  const target = await startMockTarget("hello");
+  const proxy = await startProxy({
+    ALLOWED_TARGET_HOSTS: "api.openai.com",
+    ALLOW_LOOPBACK_TARGETS: "1",
+    ALLOW_PRIVATE_TARGETS: "1",
+  });
+  t.after(async () => {
+    await proxy.stop();
+    await target.stop();
+  });
+
+  // Loopback target not in the configured allowlist → blocked despite override flags.
+  const blocked = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${encodeURIComponent(`http://127.0.0.1:${target.port}/`)}`,
+    { headers: { Origin: ORIGIN } },
+  );
+  assert.equal(blocked.status, 403);
+  assert.match(await blocked.text(), /blocked_target_not_allowlisted/);
+});
+
+test("allowlisted loopback target works with overrides on a configured allowlist", async (t) => {
+  const target = await startMockTarget("hello");
+  const proxy = await startProxy({
+    ALLOWED_TARGET_HOSTS: "127.0.0.1",
+    ALLOW_LOOPBACK_TARGETS: "1",
+  });
+  t.after(async () => {
+    await proxy.stop();
+    await target.stop();
+  });
+
+  const ok = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${encodeURIComponent(`http://127.0.0.1:${target.port}/`)}`,
+    { headers: { Origin: ORIGIN } },
+  );
+  assert.equal(ok.status, 200);
+  assert.equal(await ok.text(), "hello");
+});
+
+test("proxy exits on explicit ALLOWED_TARGET_HOSTS with no valid entries (fail closed)", async () => {
+  const port = await getFreePort();
+  const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      ALLOWED_ORIGINS: ORIGIN,
+      ALLOWED_TARGET_HOSTS: " ,, ://bad ,",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const [code] = await Promise.race([
+    once(child, "exit"),
+    delay(5000).then(() => {
+      child.kill("SIGKILL");
+      throw new Error("proxy did not exit on invalid ALLOWED_TARGET_HOSTS");
+    }),
+  ]);
+
+  assert.equal(code, 1);
+  assert.match(stderr, /ALLOWED_TARGET_HOSTS was set but contained no valid host entries/);
 });

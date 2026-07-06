@@ -6,14 +6,15 @@
  * Why this exists:
  * - Some provider OAuth/token endpoints (and some LLM APIs) block browser requests via CORS.
  * - In dev we rely on Vite's proxy. In production, you can run this locally and point
- *   Pi for Excel's proxy setting at it (default: https://localhost:3003).
+ *   Pi for Excel's proxy setting at it (default: https://localhost:3003; if
+ *   3003 is busy and PORT is not set, the helper chooses a random free port).
  *
  * Usage:
  *   npm run proxy:https   # HTTPS (recommended for Office webviews)
  *   npm run proxy         # HTTP  (may be blocked as mixed content)
  *
  * Proxy format:
- *   https://localhost:3003/?url=<target-url>
+ *   https://<listen-host>:<listen-port>/?url=<target-url>
  *
  * Example:
  *   curl 'https://localhost:3003/?url=https%3A%2F%2Fexample.com'
@@ -32,6 +33,10 @@ import {
   normalizeHost,
   parseAllowedTargetHosts,
 } from "./proxy-target-policy.mjs";
+import {
+  isAllowedClientAddress,
+  parseClientCidrAllowlist,
+} from "./proxy-client-policy.mjs";
 
 const args = new Set(process.argv.slice(2));
 const useHttps = args.has("--https") || process.env.HTTPS === "1" || process.env.HTTPS === "true";
@@ -42,12 +47,45 @@ if (useHttps && useHttp) {
   process.exit(1);
 }
 
+const DEFAULT_PORT = 3003;
 const HOST = process.env.HOST || (useHttps ? "localhost" : "127.0.0.1");
-const PORT = Number.parseInt(process.env.PORT || "3003", 10);
+const hasExplicitPort = typeof process.env.PORT === "string" && process.env.PORT.trim().length > 0;
+
+function parsePort(rawPort) {
+  const port = Number.parseInt(rawPort, 10);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`[pi-for-excel] Invalid PORT: ${rawPort}`);
+    console.error("[pi-for-excel] Expected an integer from 0 to 65535.");
+    process.exit(1);
+  }
+  return port;
+}
+
+const PORT = hasExplicitPort ? parsePort(process.env.PORT) : DEFAULT_PORT;
 
 const rootDir = path.resolve(process.cwd());
-const keyPath = path.join(rootDir, "key.pem");
-const certPath = path.join(rootDir, "cert.pem");
+// Central deployments (docs/central-proxy.md) can point at org-issued certs.
+const keyPath = process.env.TLS_KEY_PATH || path.join(rootDir, "key.pem");
+const certPath = process.env.TLS_CERT_PATH || path.join(rootDir, "cert.pem");
+
+// SECURITY: loopback-only by default. Central deployments must opt in to
+// specific IPv4 client ranges; invalid entries are fatal (fail closed).
+const allowedClientCidrs = (() => {
+  const raw = process.env.ALLOWED_CLIENT_CIDRS;
+  if (!raw || raw.trim().length === 0) return [];
+
+  const { cidrs, invalid } = parseClientCidrAllowlist(raw);
+  if (invalid.length > 0) {
+    console.error(`[pi-for-excel] Invalid ALLOWED_CLIENT_CIDRS entries: ${invalid.join(", ")}`);
+    console.error("[pi-for-excel] Expected comma-separated IPv4 CIDRs (e.g. 10.96.0.0/13) or bare IPv4 addresses. /0 is not allowed.");
+    process.exit(1);
+  }
+  if (cidrs.length === 0) {
+    console.error("[pi-for-excel] ALLOWED_CLIENT_CIDRS was set but contained no valid entries.");
+    process.exit(1);
+  }
+  return cidrs;
+})();
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -64,7 +102,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 // a browser tab on any origin can still call it unless we restrict CORS.
 // Default allowlist matches our dev + hosted origins; override via env var.
 const DEFAULT_ALLOWED_ORIGINS = new Set([
-  "https://localhost:3000",
+  "https://localhost:3141",
   "https://pi-for-excel.vercel.app",
 ]);
 
@@ -82,14 +120,6 @@ const allowedOrigins = (() => {
 
 function isAllowedOrigin(origin) {
   return typeof origin === "string" && allowedOrigins.has(origin);
-}
-
-function isLoopbackAddress(addr) {
-  if (!addr) return false;
-  if (addr === "::1" || addr === "0:0:0:0:0:0:0:1") return true;
-  if (addr.startsWith("127.")) return true;
-  if (addr.startsWith("::ffff:127.")) return true;
-  return false;
 }
 
 function envFlag(name) {
@@ -133,6 +163,16 @@ const hasConfiguredAllowedTargetHosts =
 const configuredAllowedTargetHosts = hasConfiguredAllowedTargetHosts
   ? parseAllowedTargetHosts(process.env.ALLOWED_TARGET_HOSTS)
   : new Set();
+
+// SECURITY: fail closed on explicit-but-unparseable ALLOWED_TARGET_HOSTS.
+// Falling back to the default allowlist would silently re-enable legacy
+// override semantics (loopback/private bypass, GitHub-enterprise path
+// bypass) that a configured central proxy relies on being off.
+if (hasConfiguredAllowedTargetHosts && configuredAllowedTargetHosts.size === 0) {
+  console.error("[pi-for-excel] ALLOWED_TARGET_HOSTS was set but contained no valid host entries.");
+  console.error("[pi-for-excel] Expected comma-separated hostnames or IP literals (e.g. api.deepseek.com,10.97.193.77).");
+  process.exit(1);
+}
 
 const allowedTargetHosts = (() => {
   if (allowAllTargetHosts) {
@@ -260,11 +300,21 @@ function buildOutboundHeaders(inHeaders) {
 
 const handler = async (req, res) => {
   const remote = req.socket?.remoteAddress;
-  if (!isLoopbackAddress(remote)) {
+  if (!isAllowedClientAddress(remote, allowedClientCidrs)) {
     res.statusCode = 403;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.end("forbidden");
-    console.warn(`[proxy] blocked non-loopback client: ${remote || "unknown"}`);
+    console.warn(`[proxy] blocked disallowed client: ${remote || "unknown"}`);
+    return;
+  }
+
+  // Health endpoint for load balancers / monitoring. Sits after the client
+  // address check but before origin enforcement (health checks send no
+  // Origin header). Never proxies anything.
+  if ((req.url || "").split("?")[0] === "/healthz") {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end("ok");
     return;
   }
 
@@ -345,6 +395,9 @@ const handler = async (req, res) => {
     allowLoopbackTargets,
     allowPrivateTargets,
     allowedHosts: effectiveAllowedTargetHosts,
+    // SECURITY: when the operator explicitly configured ALLOWED_TARGET_HOSTS,
+    // loopback/private override flags must not bypass it (central proxies).
+    requireAllowlistForOverriddenTargets: configuredAllowedTargetHosts.size > 0,
   });
 
   if (!targetPolicy.allowed) {
@@ -433,8 +486,11 @@ const server = (() => {
   }
 
   if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-    console.error("[pi-for-excel] HTTPS requested but key.pem/cert.pem not found in repo root.");
-    console.error("Generate them with mkcert (see README). Example: mkcert localhost");
+    console.error("[pi-for-excel] HTTPS requested but TLS key/cert not found:");
+    console.error(`  key:  ${keyPath}${fs.existsSync(keyPath) ? "" : "  (missing)"}`);
+    console.error(`  cert: ${certPath}${fs.existsSync(certPath) ? "" : "  (missing)"}`);
+    console.error("For local dev, generate key.pem/cert.pem with mkcert (see README). Example: mkcert localhost");
+    console.error("For central deployments, set TLS_KEY_PATH/TLS_CERT_PATH (see docs/central-proxy.md).");
     process.exit(1);
   }
 
@@ -447,11 +503,30 @@ const server = (() => {
   );
 })();
 
-server.listen(PORT, HOST, () => {
+function getListeningPort(fallbackPort) {
+  const address = server.address();
+  if (address && typeof address !== "string") {
+    return address.port;
+  }
+  return fallbackPort;
+}
+
+function logStartup(listeningPort) {
   const scheme = useHttps ? "https" : "http";
-  console.log(`[pi-for-excel] CORS proxy listening on ${scheme}://${HOST}:${PORT}`);
-  console.log(`[pi-for-excel] Format: ${scheme}://${HOST}:${PORT}/?url=<target-url>`);
+  const proxyUrl = `${scheme}://${HOST}:${listeningPort}`;
+  console.log(`[pi-for-excel] CORS proxy listening on ${proxyUrl}`);
+  console.log(`[pi-for-excel] Format: ${proxyUrl}/?url=<target-url>`);
+  if (listeningPort !== DEFAULT_PORT) {
+    console.log(`[pi-for-excel] Update Pi for Excel /settings → Proxy URL to ${proxyUrl}`);
+  }
   console.log(`[pi-for-excel] Allowed origins: ${Array.from(allowedOrigins).join(", ")}`);
+
+  if (allowedClientCidrs.length > 0) {
+    console.log(`[pi-for-excel] WARNING: accepting non-loopback clients from: ${allowedClientCidrs.map((c) => c.entry).join(", ")} (ALLOWED_CLIENT_CIDRS)`);
+    console.log("[pi-for-excel] Ensure network-level controls also restrict who can reach this proxy.");
+  } else {
+    console.log("[pi-for-excel] Client policy: loopback only");
+  }
 
   if (allowAllTargetHosts) {
     console.log("[pi-for-excel] WARNING: target host allowlisting disabled (ALLOW_ALL_TARGET_HOSTS=1)");
@@ -462,10 +537,6 @@ server.listen(PORT, HOST, () => {
     if (configuredAllowedTargetHosts.size === 0) {
       console.log("[pi-for-excel] GitHub enterprise OAuth/Copilot endpoints on custom domains are allowed by path.");
     }
-  }
-
-  if (hasConfiguredAllowedTargetHosts && configuredAllowedTargetHosts.size === 0) {
-    console.warn("[pi-for-excel] WARNING: ALLOWED_TARGET_HOSTS had no valid entries; using default allowlist.");
   }
 
   if (allowLoopbackTargets) {
@@ -479,4 +550,42 @@ server.listen(PORT, HOST, () => {
   if (strictTargetResolution) {
     console.log("[pi-for-excel] Strict DNS resolution enabled (STRICT_TARGET_RESOLUTION=1)");
   }
-});
+}
+
+function listen(port) {
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    server.off("error", onError);
+    server.off("listening", onListening);
+  };
+
+  const onError = (err) => {
+    cleanup();
+
+    if (err?.code === "EADDRINUSE" && !hasExplicitPort && port === DEFAULT_PORT) {
+      console.warn(`[pi-for-excel] Port ${DEFAULT_PORT} is already in use; choosing a random available port instead.`);
+      listen(0);
+      return;
+    }
+
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[pi-for-excel] Failed to listen on ${HOST}:${port}: ${message}`);
+    if (hasExplicitPort) {
+      console.error("[pi-for-excel] Choose a different port with PORT=0 (random) or PORT=<port>.");
+    }
+    process.exit(1);
+  };
+
+  const onListening = () => {
+    cleanup();
+    logStartup(getListeningPort(port));
+  };
+
+  server.once("error", onError);
+  server.once("listening", onListening);
+  server.listen(port, HOST);
+}
+
+listen(PORT);

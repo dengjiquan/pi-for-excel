@@ -1,5 +1,7 @@
 # AI for Excel
 
+English | [简体中文](./README.zh-CN.md)
+
 Open-source, multi-model AI sidebar add-in for Microsoft Excel. Powered by [Pi](https://pi.dev).
 
 AI for Excel is an AI agent that lives inside Excel. It reads your workbook, makes changes, and does research — using any model you choose. Bring your own API key or OAuth login for Anthropic, OpenAI, Google Gemini, or GitHub Copilot.
@@ -62,7 +64,7 @@ AI for Excel is an AI agent that lives inside Excel. It reads your workbook, mak
 
 1. Download [`manifest.prod.xml`](https://pi-for-excel.vercel.app/manifest.prod.xml)
 2. Add it to Excel — see [**install guide**](docs/install.md) for step-by-step instructions (macOS + Windows)
-3. Click **Open AI** in the ribbon
+3. Click **Open Pi** in the ribbon
 4. Connect a provider (API key or OAuth), or configure a custom OpenAI-compatible gateway in `/settings`
 5. Start chatting — try `What sheets do I have?` or `Summarize my current selection`
 
@@ -93,6 +95,12 @@ mv localhost.pem cert.pem
 npm run dev        # Vite dev server on https://localhost:3000
 ```
 
+> **Note:** this fork keeps the dev port at `3000` so existing Excel WebView sessions,
+> local startup scripts, and stored settings continue to use the same origin. Re-copy
+> `manifest.xml` into Excel's `wef` folder and fully restart Excel.
+
+> **Optional:** prefer a stable named URL (`https://pi-excel.localhost`, no mkcert, no fixed port)? See [docs/portless.md](./docs/portless.md) for the opt-in [portless](https://portless.sh) flow.
+
 Then sideload the dev manifest into Excel:
 
 **macOS** ([Microsoft docs](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-an-office-add-in-on-mac)):
@@ -101,27 +109,27 @@ cp manifest.xml ~/Library/Containers/com.microsoft.Excel/Data/Documents/wef/
 ```
 Then open Excel → **Insert** → **My Add-ins** → **AI for Excel**.
 
-**Windows** ([Microsoft docs](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing)):
+**Windows** ([Microsoft docs](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/create-a-network-shared-folder-catalog-for-task-pane-and-content-add-ins)):
 
-Open Excel → **Insert** → **My Add-ins** → **Upload My Add-in** → select `manifest.xml`.
+Windows desktop Excel can't upload a manifest directly — it installs from a trusted shared-folder catalog:
 
-For a Windows shared-folder catalog (for example `C:\OfficeAddins\Catalog`), copy `manifest.local.xml` into the catalog. It points to `https://localhost:3000` and preserves the same local browser storage origin.
+1. Share a local folder (folder **Properties** → **Sharing** → **Share**) and note its network path.
+2. In Excel: **File** → **Options** → **Trust Center** → **Trust Center Settings** → **Trusted Add-in Catalogs** → add the network path as **Catalog Url**, tick **Show in Menu**, restart Excel.
+3. Copy `manifest.xml` into the shared folder.
+4. **Home** → **Add-ins** → **Advanced** → **SHARED FOLDER** → **AI for Excel**.
 
-Manifest purposes:
+**Excel on the web** ([Microsoft docs](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing)):
 
-| File | Use | Source |
-|---|---|---|
-| `manifest.xml` | Standard local development | `https://localhost:3000` |
-| `manifest.local.xml` | Windows shared-folder catalog | `https://localhost:3000` |
-| `manifest.prod.xml` | Hosted production installation only | `https://pi-for-excel.vercel.app` |
+**Home** → **Add-ins** → **More Settings** → **Upload My Add-in** → select `manifest.xml`.
 
-Do not copy `manifest.prod.xml` over a local catalog manifest: it switches the taskpane to the hosted site, so locally stored sessions, skills, and scripts will appear missing.
+The dev manifest points to `https://localhost:3000`. The production manifest (`manifest.prod.xml`) points to the hosted Vercel deployment.
 
 ### Useful commands
 
 | Command | Description |
 |---|---|
 | `npm run dev` | Start Vite dev server (port 3000, HTTPS) |
+| `npm run dev:portless` | Opt-in: dev server behind portless — [docs/portless.md](./docs/portless.md) |
 | `npm run build` | Production build → `dist/` |
 | `npm run check` | Lint + typecheck + CSS theme checks |
 | `npm run typecheck` | TypeScript type checking only |
@@ -129,7 +137,7 @@ Do not copy `manifest.prod.xml` over a local catalog manifest: it switches the t
 | `npm run test:models` | Unit tests — model ordering |
 | `npm run test:context` | Unit tests — tools, context, sessions, extensions, integrations |
 | `npm run test:security` | Security policy tests — proxy, CORS, sandbox, OAuth |
-| `npm run proxy:https` | CORS proxy for OAuth flows (default `https://localhost:3003`) |
+| `npm run proxy:https` | CORS proxy for OAuth flows (default `https://localhost:3003`; auto-picks a random free port if the default is busy) |
 | `npm run validate` | Validate the Office add-in manifest |
 
 ### CORS proxy
@@ -137,8 +145,8 @@ Do not copy `manifest.prod.xml` over a local catalog manifest: it switches the t
 Some OAuth token endpoints are blocked by CORS inside Office webviews. If OAuth login fails:
 
 1. User setup command: `npx pi-for-excel-proxy` (or `curl -fsSL https://piforexcel.com/proxy | sh` if Node is missing)
-2. Dev/source setup command: `npm run proxy:https` (defaults to `https://localhost:3003`)
-3. In Pi → `/settings` → **Proxy** → enable and set the URL
+2. Dev/source setup command: `npm run proxy:https` (defaults to `https://localhost:3003`; if 3003 is busy, copy the random port printed in the terminal)
+3. In Pi → `/settings` → **Proxy** → enable and set the printed URL
 4. Retry login
 
 API-key auth generally works without the proxy.
@@ -261,7 +269,7 @@ Users install by downloading `manifest.prod.xml` and uploading it in Excel — t
 
 ## Credits
 
-- [Pi](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic) (Mario Zechner) — the agent framework powering this project. AI for Excel uses pi-agent-core, pi-ai, and pi-web-ui for the agent loop, LLM abstraction, and session storage.
+- [Pi](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic) (Mario Zechner) — the agent framework powering this project. Pi for Excel uses pi-agent-core, pi-ai, and pi-web-ui for the agent loop, LLM abstraction, and session storage.
 - [whimsical.ts](https://github.com/mitsuhiko/agent-stuff/blob/main/pi-extensions/whimsical.ts) by [@mitsuhiko](https://github.com/mitsuhiko) (Armin Ronacher) — the rotating "Working…" messages are adapted from his Pi extension, rewritten for a spreadsheet/finance audience.
 
 ## License

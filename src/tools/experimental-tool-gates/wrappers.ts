@@ -1,5 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
+import { assessOfficeJsCodeRisk } from "./office-js-risk.js";
 import {
   buildPythonBridgeGateErrorMessage,
   buildTmuxBridgeGateErrorMessage,
@@ -10,6 +11,7 @@ import {
 } from "./evaluation.js";
 import {
   EXECUTE_OFFICE_JS_TOOL_NAME,
+  EXECUTE_WPS_JS_TOOL_NAME,
   PYTHON_BRIDGE_ONLY_TOOL_NAMES,
   PYTHON_FALLBACK_TOOL_NAMES,
   TMUX_TOOL_NAME,
@@ -25,6 +27,7 @@ import type {
   PythonTransformRangeDetails,
   TmuxBridgeDetails,
 } from "../tool-details.js";
+import { isUnsupportedHostTool } from "../unsupported-host-tool.js";
 
 function isRecordObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -207,27 +210,44 @@ export function buildOfficeJsExecuteApprovalMessage(
     .find((line) => line.length > 0)
     ?? "(no code preview)";
 
-  return [
-    "Allow direct Office.js execution?",
+  const apiName = request.apiName ?? "Office.js";
+  const hostApiLabel = apiName === "WPS JSAPI" ? "the WPS JSAPI" : "the Excel API";
+  const lines = [
+    `Allow direct ${apiName} execution?`,
     "",
     `Action: ${explanation}`,
     `Code preview: ${firstLine}`,
-  ].join("\n");
+  ];
+
+  const riskIdentifiers = request.riskIdentifiers ?? [];
+  if (riskIdentifiers.length > 0) {
+    lines.push(
+      "",
+      `⚠️ Code references browser capabilities beyond ${hostApiLabel}: ${riskIdentifiers.join(", ")}.`,
+      "These can reach network, storage, or credentials — review the code before allowing.",
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function defaultRequestOfficeJsExecuteApproval(
   _request: OfficeJsExecuteApprovalRequest,
 ): Promise<boolean> {
   return Promise.reject(new Error(
-    "Office.js execution requires explicit user approval, but confirmation UI is unavailable.",
+    "Direct workbook JS execution requires explicit user approval, but confirmation UI is unavailable.",
   ));
 }
 
-function getOfficeJsExecuteApprovalRequest(params: unknown): OfficeJsExecuteApprovalRequest {
+function getDirectJsExecuteApprovalRequest(
+  params: unknown,
+  apiName: "Office.js" | "WPS JSAPI",
+): OfficeJsExecuteApprovalRequest {
   if (!isRecordObject(params)) {
     return {
       explanation: "",
       code: "",
+      apiName,
     };
   }
 
@@ -242,6 +262,7 @@ function getOfficeJsExecuteApprovalRequest(params: unknown): OfficeJsExecuteAppr
   return {
     explanation,
     code,
+    apiName,
   };
 }
 
@@ -270,9 +291,10 @@ function wrapTmuxToolWithHardGate(
   };
 }
 
-function wrapExecuteOfficeJsToolWithHardGate(
+function wrapDirectWorkbookJsToolWithHardGate(
   tool: AgentTool,
   dependencies: ExperimentalToolGateDependencies,
+  apiName: "Office.js" | "WPS JSAPI",
 ): AgentTool {
   const requestApproval =
     dependencies.requestOfficeJsExecuteApproval
@@ -283,12 +305,23 @@ function wrapExecuteOfficeJsToolWithHardGate(
     execute: async (toolCallId, params, signal, onUpdate) => {
       throwIfAborted(signal);
 
-      // Auto mode trusts Office.js — skip approval prompt.
+      const request = getDirectJsExecuteApprovalRequest(params, apiName);
+      const risk = assessOfficeJsCodeRisk(request.code);
+
+      // Auto mode trusts pure host JSAPI code — skip the approval prompt.
+      // Code referencing ambient browser authority (network, storage, global
+      // handles, dynamic evaluation) requires approval in every mode: direct
+      // workbook JS runs in the taskpane page realm, and workbook content is
+      // untrusted input.
       const mode = await (dependencies.getExecutionMode?.() ?? Promise.resolve("safe" as const));
-      if (mode !== "yolo") {
-        const approved = await requestApproval(getOfficeJsExecuteApprovalRequest(params));
+      if (mode !== "yolo" || risk.flagged) {
+        const approved = await requestApproval(
+          risk.flagged
+            ? { ...request, riskIdentifiers: risk.identifiers }
+            : request,
+        );
         if (!approved) {
-          throw new Error("Office.js execution cancelled by user.");
+          throw new Error(`${apiName} execution cancelled by user.`);
         }
       }
 
@@ -431,7 +464,10 @@ function wrapPythonBridgeOnlyToolWithApprovalGate(
  *   reachable bridge is present.
  * - `libreoffice_convert` strictly requires a configured + reachable bridge and
  *   approval (no Pyodide fallback).
- * - `execute_office_js` requires explicit user confirmation on every call.
+ * - `execute_office_js` and `execute_wps_js` prompt for confirmation on every
+ *   call in Confirm mode. In Auto mode, pure host JSAPI code runs without a
+ *   prompt, but code referencing ambient browser authority (network, storage,
+ *   globals, dynamic evaluation) still requires per-call approval.
  * - `files` has no gate — read, write, and delete are always available.
  */
 export function applyExperimentalToolGates(
@@ -441,13 +477,23 @@ export function applyExperimentalToolGates(
   const gatedTools: AgentTool[] = [];
 
   for (const tool of tools) {
+    if (isUnsupportedHostTool(tool)) {
+      gatedTools.push(tool);
+      continue;
+    }
+
     if (tool.name === TMUX_TOOL_NAME) {
       gatedTools.push(wrapTmuxToolWithHardGate(tool, dependencies));
       continue;
     }
 
     if (tool.name === EXECUTE_OFFICE_JS_TOOL_NAME) {
-      gatedTools.push(wrapExecuteOfficeJsToolWithHardGate(tool, dependencies));
+      gatedTools.push(wrapDirectWorkbookJsToolWithHardGate(tool, dependencies, "Office.js"));
+      continue;
+    }
+
+    if (tool.name === EXECUTE_WPS_JS_TOOL_NAME) {
+      gatedTools.push(wrapDirectWorkbookJsToolWithHardGate(tool, dependencies, "WPS JSAPI"));
       continue;
     }
 

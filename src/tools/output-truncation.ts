@@ -3,7 +3,7 @@ import type {
   AgentToolResult,
   AgentToolUpdateCallback,
 } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai/compat";
 
 import { isRecord } from "../utils/type-guards.js";
 import type {
@@ -22,6 +22,7 @@ const TAIL_TRUNCATION_TOOL_NAMES = new Set<string>([
   "tmux",
   "mcp",
   "execute_office_js",
+  "execute_wps_js",
 ]);
 
 export interface ToolOutputTruncationLimits {

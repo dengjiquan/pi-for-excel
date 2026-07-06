@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { completeSimple, getModel, getModels, type Api, type Model } from "@earendil-works/pi-ai";
+import { completeSimple, getModel, getModels, type Api, type Model } from "@earendil-works/pi-ai/compat";
 
 import { BROWSER_OAUTH_PROVIDERS, mapToApiProvider } from "../src/auth/provider-map.ts";
 import { rewriteDevProxyUrl } from "../src/auth/dev-rewrites.ts";
@@ -201,6 +201,28 @@ void test("pickDefaultModel matches the current OpenAI default-selection contrac
 
 void test("pickDefaultModel falls back to the preferred hardcoded OpenAI default", () => {
   const selected = pickDefaultModel([]);
+  assert.equal(selected.provider, "openai");
+  assert.equal(selected.id, "gpt-5.5");
+});
+
+void test("pickDefaultModel never picks an unusable provider while a configured provider has models (#553)", () => {
+  // Providers with registry models but no dedicated default-model rule used
+  // to fall through to openai/gpt-5.5, which the user has no credentials for.
+  for (const provider of ["github-copilot", "mistral", "groq", "xai", "deepseek"]) {
+    const models = getModels(provider as Parameters<typeof getModels>[0]);
+    assert.ok(models.length > 0, `expected registry models for ${provider}`);
+
+    const selected = pickDefaultModel([provider]);
+    assert.equal(
+      selected.provider,
+      provider,
+      `expected default model from ${provider}, got ${selected.provider}/${selected.id}`,
+    );
+  }
+});
+
+void test("pickDefaultModel tolerates unknown provider names", () => {
+  const selected = pickDefaultModel(["some-custom-gateway"]);
   assert.equal(selected.provider, "openai");
   assert.equal(selected.id, "gpt-5.5");
 });
@@ -486,9 +508,14 @@ void test("vite aliases Ajv packages to local stubs for CSP-safe Office builds",
     "expected ajv-formats alias to local no-op stub",
   );
   assert.notEqual(
-    content.indexOf("alias: buildBrowserAliasMap()"),
+    content.indexOf("alias: buildBrowserAliases()"),
     -1,
     "expected resolve.alias to use centralized browser alias helper",
+  );
+  assert.notEqual(
+    content.indexOf('{ find: /^@earendil-works\\/pi-ai$/, replacement: "@earendil-works/pi-ai/compat" }'),
+    -1,
+    "expected exact-match pi-ai \u2192 compat alias for pi-web-ui's legacy root imports",
   );
 });
 

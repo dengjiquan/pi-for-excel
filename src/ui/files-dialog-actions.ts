@@ -19,6 +19,7 @@ import {
 } from "./overlay-dialog.js";
 import { requestTextInputDialog } from "./text-input-dialog.js";
 import { showToast } from "./toast.js";
+import { t } from "../language/index.js";
 
 export interface FilesDialogDetailActionFileRef {
   path: string;
@@ -106,7 +107,7 @@ function openBlobInNewTab(blob: Blob, pendingWindow: Window | null): void {
  */
 async function copyTextToClipboard(text: string, fileName: string): Promise<void> {
   await navigator.clipboard.writeText(text);
-  showToast(`Copied ${fileName} to clipboard.`);
+  showToast(t("files-dialog-actions.toast.copied", { fileName }));
 }
 
 /**
@@ -130,46 +131,37 @@ async function editTextFileInDialog(options: {
   auditContext: FilesWorkspaceAuditContext;
 }): Promise<void> {
   closeOverlayById(FILES_TEXT_VIEWER_OVERLAY_ID);
-
   const dialog = createOverlayDialog({
     overlayId: FILES_TEXT_VIEWER_OVERLAY_ID,
     cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--l pi-files-text-viewer",
     restoreFocusOnClose: false,
     zIndex: NESTED_OVERLAY_Z_INDEX,
   });
-
   const { header } = createOverlayHeader({
     title: options.file.name,
     subtitle: options.file.path,
-    closeLabel: "Close file",
+    closeLabel: t("files-dialog-actions.closeFile"),
     onClose: dialog.close,
   });
-
   const body = document.createElement("div");
   body.className = "pi-overlay-body pi-files-text-viewer__body";
-
   const editor = document.createElement("textarea");
   editor.className = "pi-files-text-viewer__content pi-files-text-viewer__editor";
-  editor.value = "Loading…";
+  editor.value = t("files-dialog-actions.loading");
   editor.disabled = true;
-
   const actions = document.createElement("div");
   actions.className = "pi-files-text-viewer__actions";
-
   const cancelButton = document.createElement("button");
   cancelButton.type = "button";
   cancelButton.className = "pi-overlay-btn pi-overlay-btn--ghost";
-  cancelButton.textContent = "Cancel";
+  cancelButton.textContent = t("files-dialog-actions.cancel");
   cancelButton.addEventListener("click", dialog.close);
-
   const saveButton = document.createElement("button");
   saveButton.type = "button";
   saveButton.className = "pi-overlay-btn pi-overlay-btn--primary";
-  saveButton.textContent = "Save";
+  saveButton.textContent = t("files-dialog-actions.save");
   saveButton.disabled = true;
-
   actions.append(cancelButton, saveButton);
-
   body.append(editor, actions);
   dialog.card.append(header, body);
   dialog.mount();
@@ -181,36 +173,26 @@ async function editTextFileInDialog(options: {
       audit: options.auditContext,
       locationKind: options.fileRef.locationKind,
     });
-
     if (result.text === undefined || result.truncated) {
       throw new Error("File is too large to open in the viewer.");
     }
-
     editor.value = result.text;
     editor.disabled = false;
     saveButton.disabled = false;
-
     saveButton.addEventListener("click", () => {
       void (async () => {
         saveButton.disabled = true;
-        saveButton.textContent = "Saving…";
-
-        await options.workspace.writeTextFile(
-          options.file.path,
-          editor.value,
-          options.file.mimeType,
-          {
-            audit: options.auditContext,
-            locationKind: options.fileRef.locationKind,
-          },
-        );
-
-        showToast(`Saved ${options.file.name}.`);
+        saveButton.textContent = t("files-dialog-actions.saving");
+        await options.workspace.writeTextFile(options.file.path, editor.value, options.file.mimeType, {
+          audit: options.auditContext,
+          locationKind: options.fileRef.locationKind,
+        });
+        showToast(t("files-dialog-actions.toast.saved", { name: options.file.name }));
         dialog.close();
       })().catch((error: unknown) => {
         saveButton.disabled = false;
-        saveButton.textContent = "Save";
-        showToast(`Save failed: ${getErrorMessage(error)}`);
+        saveButton.textContent = t("files-dialog-actions.save");
+        showToast(t("files-dialog-actions.toast.saveFailed", { error: getErrorMessage(error) }));
       });
     });
   } catch (error: unknown) {
@@ -219,7 +201,7 @@ async function editTextFileInDialog(options: {
   }
 }
 
-async function openBinaryFileInBrowser(options: {
+async function openFileInBrowser(options: {
   file: WorkspaceFileEntry;
   fileRef: FilesDialogDetailActionFileRef;
   workspace: FilesDialogDetailActionsWorkspace;
@@ -228,6 +210,26 @@ async function openBinaryFileInBrowser(options: {
   const pendingWindow = window.open("", "_blank");
 
   try {
+    if (options.file.kind === "text") {
+      const result = await options.workspace.readFile(options.file.path, {
+        mode: "text",
+        maxChars: 16_000_000,
+        audit: options.auditContext,
+        locationKind: options.fileRef.locationKind,
+      });
+
+      if (result.text === undefined || result.truncated) {
+        throw new Error("File is too large to open in a browser tab.");
+      }
+
+      const blob = new Blob([result.text], {
+        type: resolveSafeBlobUrlMimeType(options.file.mimeType || "text/plain"),
+      });
+
+      openBlobInNewTab(blob, pendingWindow);
+      return;
+    }
+
     const result = await options.workspace.readFile(options.file.path, {
       mode: "base64",
       maxChars: 16_000_000,
@@ -258,44 +260,48 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
   const isBuiltIn = isFilesDialogBuiltInDoc(options.file);
 
   if (options.file.kind === "text") {
+    // Built-in docs: use clipboard + data-URI download instead of
+    // window.open / blob URLs which silently fail in the Office WebView.
+    // This add-in always runs inside the Office WebView (loaded via
+    // manifest.xml into Excel's sidebar), so this path covers all
+    // production usage. Dev-server testing in a browser is unaffected
+    // because built-in docs are only available via the workspace.
     const primaryButton = document.createElement("button");
     primaryButton.type = "button";
     primaryButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
-
-    if (isBuiltIn) {
-      primaryButton.textContent = "Copy content";
-      primaryButton.addEventListener("click", () => {
-        void (async () => {
-          const result = await options.workspace.readFile(options.file.path, {
-            mode: "text",
-            maxChars: 16_000_000,
-            audit: options.auditContext,
-            locationKind: options.fileRef.locationKind,
-          });
-          if (result.text === undefined) throw new Error("Could not read file.");
-          await copyTextToClipboard(result.text, options.file.name);
-        })().catch((error: unknown) => {
-          showToast(`Copy failed: ${getErrorMessage(error)}`);
-        });
-      });
-    } else {
-      primaryButton.textContent = "Edit";
-      primaryButton.addEventListener("click", () => {
+    primaryButton.textContent = isBuiltIn
+      ? t("files-dialog-actions.copyContent")
+      : t("files-dialog-actions.edit");
+    primaryButton.addEventListener("click", () => {
+      if (!isBuiltIn) {
         void editTextFileInDialog({
           file: options.file,
           fileRef: options.fileRef,
           workspace: options.workspace,
           auditContext: options.auditContext,
         }).catch((error: unknown) => {
-          showToast(`Open failed: ${getErrorMessage(error)}`);
+          showToast(t("files-dialog-actions.toast.openFailed", { error: getErrorMessage(error) }));
         });
+        return;
+      }
+      void (async () => {
+        const result = await options.workspace.readFile(options.file.path, {
+          mode: "text",
+          maxChars: 16_000_000,
+          audit: options.auditContext,
+          locationKind: options.fileRef.locationKind,
+        });
+        if (result.text === undefined) throw new Error("Could not read file.");
+        await copyTextToClipboard(result.text, options.file.name);
+      })().catch((error: unknown) => {
+        showToast(t("files-dialog-actions.toast.copyFailed", { error: getErrorMessage(error) }));
       });
-    }
+    });
 
     const downloadButton = document.createElement("button");
     downloadButton.type = "button";
     downloadButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
-    downloadButton.textContent = "Download";
+    downloadButton.textContent = t("files-dialog-actions.download");
     downloadButton.addEventListener("click", () => {
       void (async () => {
         const result = await options.workspace.readFile(options.file.path, {
@@ -311,37 +317,37 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
           resolveSafeBlobUrlMimeType(options.file.mimeType || "text/plain"),
         );
       })().catch((error: unknown) => {
-        showToast(`Download failed: ${getErrorMessage(error)}`);
+        showToast(t("files-dialog-actions.toast.downloadFailed", { error: getErrorMessage(error) }));
       });
     });
 
     actions.append(primaryButton, downloadButton);
   } else {
-    // Binary files still need the browser download/open path.
+    // Non-built-in files: use the standard blob URL approach.
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
-    openButton.textContent = "Open ↗";
+    openButton.textContent = t("files-dialog-actions.open");
     openButton.addEventListener("click", () => {
-      void openBinaryFileInBrowser({
+      void openFileInBrowser({
         file: options.file,
         fileRef: options.fileRef,
         workspace: options.workspace,
         auditContext: options.auditContext,
       }).catch((error: unknown) => {
-        showToast(`Open failed: ${getErrorMessage(error)}`);
+        showToast(t("files-dialog-actions.toast.openFailed", { error: getErrorMessage(error) }));
       });
     });
 
     const downloadButton = document.createElement("button");
     downloadButton.type = "button";
     downloadButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
-    downloadButton.textContent = "Download";
+    downloadButton.textContent = t("files-dialog-actions.download");
     downloadButton.addEventListener("click", () => {
       void options.workspace.downloadFile(options.file.path, {
         locationKind: options.fileRef.locationKind,
       }).catch((error: unknown) => {
-        showToast(`Download failed: ${getErrorMessage(error)}`);
+        showToast(t("files-dialog-actions.toast.downloadFailed", { error: getErrorMessage(error) }));
       });
     });
 
@@ -356,16 +362,16 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
   const renameButton = document.createElement("button");
   renameButton.type = "button";
   renameButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
-  renameButton.textContent = "Rename";
+  renameButton.textContent = t("files-dialog-actions.rename");
   renameButton.addEventListener("click", () => {
     void (async () => {
       const nextPathInput = await requestTextInputDialog({
-        title: "Rename file",
+        title: t("files-dialog-actions.renameFileTitle"),
         message: `${options.file.path} — leave off the extension to keep it.`,
         initialValue: options.file.path,
         placeholder: "folder/file.ext",
-        confirmLabel: "Rename",
-        cancelLabel: "Cancel",
+        confirmLabel: t("files-dialog-actions.rename"),
+        cancelLabel: t("files-dialog-actions.cancel"),
         restoreFocusOnClose: false,
       });
 
@@ -383,11 +389,11 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
         locationKind: options.fileRef.locationKind,
       });
 
-      showToast(`Renamed to ${nextPath}.`);
+      showToast(t("files-dialog-actions.toast.renamed", { path: nextPath }));
 
       await options.onAfterRename(nextPath, options.fileRef.locationKind);
     })().catch((error: unknown) => {
-      showToast(`Rename failed: ${getErrorMessage(error)}`);
+      showToast(t("files-dialog-actions.toast.renameFailed", { error: getErrorMessage(error) }));
     });
   });
 
@@ -397,14 +403,14 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "pi-overlay-btn pi-overlay-btn--danger pi-overlay-btn--compact";
-  deleteButton.textContent = "Delete";
+  deleteButton.textContent = t("files-dialog-actions.delete");
   deleteButton.addEventListener("click", () => {
     void (async () => {
       const confirmed = await requestConfirmationDialog({
-        title: "Delete file?",
+        title: t("files-dialog-actions.deleteFileTitle"),
         message: options.file.path,
-        confirmLabel: "Delete",
-        cancelLabel: "Cancel",
+        confirmLabel: t("files-dialog-actions.delete"),
+        cancelLabel: t("files-dialog-actions.cancel"),
         confirmButtonTone: "danger",
         restoreFocusOnClose: false,
       });
@@ -418,11 +424,11 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
         locationKind: options.fileRef.locationKind,
       });
 
-      showToast(`Deleted ${options.file.name}.`);
+      showToast(t("files-dialog-actions.toast.deleted", { name: options.file.name }));
 
       await options.onAfterDelete();
     })().catch((error: unknown) => {
-      showToast(`Delete failed: ${getErrorMessage(error)}`);
+      showToast(t("files-dialog-actions.toast.deleteFailed", { error: getErrorMessage(error) }));
     });
   });
 

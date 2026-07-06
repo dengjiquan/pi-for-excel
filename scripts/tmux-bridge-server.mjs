@@ -55,7 +55,7 @@ const keyPath = resolveOptionalEnvPath("PI_FOR_EXCEL_KEY_PATH") ?? path.join(cer
 const certPath = resolveOptionalEnvPath("PI_FOR_EXCEL_CERT_PATH") ?? path.join(certDir, "cert.pem");
 
 const DEFAULT_ALLOWED_ORIGINS = new Set([
-  "https://localhost:3000",
+  "https://localhost:3141",
   "https://pi-for-excel.vercel.app",
 ]);
 
@@ -994,6 +994,9 @@ server.listen(PORT, HOST, () => {
 
   if (authToken) {
     console.log("[pi-for-excel] auth: bearer token required for POST /v1/tmux");
+  } else {
+    console.warn("[pi-for-excel] auth: no bearer token configured — any local process on this machine can drive this bridge.");
+    console.warn("[pi-for-excel] recommended: set TMUX_BRIDGE_TOKEN=<secret> and mirror it in Pi via /experimental tmux-bridge-token <secret>");
   }
 
   if (backend.mode === "tmux") {

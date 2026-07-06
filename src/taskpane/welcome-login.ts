@@ -2,6 +2,8 @@
  * Welcome/login overlay shown when no providers are configured.
  */
 
+import { t, initLanguage, getLanguage } from "../language/index.js";
+
 import type { ProviderKeysStore } from "@earendil-works/pi-web-ui/dist/storage/stores/provider-keys-store.js";
 import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
 
@@ -10,7 +12,8 @@ import { WELCOME_LOGIN_OVERLAY_ID } from "../ui/overlay-ids.js";
 import { showToast } from "../ui/toast.js";
 import { setActiveProviders } from "../compat/model-selector-patch.js";
 import {
-  DEFAULT_LOCAL_PROXY_URL,
+  DEFAULT_PROXY_IS_REMOTE,
+  DEFAULT_PROXY_URL,
   PROXY_HELPER_DOCS_URL,
   probeProxyReachability,
   resolveConfiguredProxyUrl,
@@ -32,7 +35,7 @@ async function testLocalHttpsProxy(proxyUrl: string): Promise<boolean> {
 }
 
 export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise<void> {
-  const { ALL_PROVIDERS, buildProviderRow } = await import("../ui/provider-login.js");
+  const { VISIBLE_PROVIDERS, buildProviderRow } = await import("../ui/provider-login.js");
 
   // Make OAuth flows usable even before the user can access /settings.
   try {
@@ -80,33 +83,35 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
     const titleId = `${WELCOME_LOGIN_OVERLAY_ID}-title`;
     const subtitleId = `${WELCOME_LOGIN_OVERLAY_ID}-subtitle`;
 
-    const logo = createElement("img", "pi-welcome-logo");
-    logo.src = "/assets/icon-128.png";
-    logo.alt = "AI for Excel";
+    const logo = createElement("div", "pi-welcome-logo");
+    logo.textContent = "π";
 
     const title = createElement("h2", "pi-welcome-title");
     title.id = titleId;
-    title.textContent = "AI for Excel";
+    title.textContent = t("welcome.title");
 
     const subtitle = createElement("p", "pi-welcome-subtitle");
     subtitle.id = subtitleId;
-    subtitle.textContent = "Connect an AI provider to get started";
+    subtitle.textContent = t("welcome.subtitle");
 
     const intro = createElement("p", "pi-welcome-intro");
-    intro.textContent = "An AI agent that reads your spreadsheet, makes changes, and does the research — using models you already have.";
+    intro.textContent = t("welcome.intro");
 
     const providerSectionTitle = createElement("p", "pi-welcome-section-title");
-    providerSectionTitle.textContent = "Choose a provider";
+    providerSectionTitle.textContent = t("welcome.select_provider");
 
     const providerList = createElement("div", "pi-welcome-providers");
 
     const customGatewayButton = createElement("button", "pi-welcome-custom-gateway");
     customGatewayButton.type = "button";
-    customGatewayButton.textContent = "Use a custom OpenAI-compatible gateway";
+    customGatewayButton.textContent = t("welcome.custom_gateway");
 
     const proxyToggle = createElement("button", "pi-welcome-proxy-toggle");
     proxyToggle.type = "button";
-    proxyToggle.textContent = "Having login trouble? Configure local proxy";
+    const proxyToggleClosedLabel = DEFAULT_PROXY_IS_REMOTE
+      ? t("welcome.proxy.toggle_show_remote")
+      : t("welcome.proxy.toggle_show");
+    proxyToggle.textContent = proxyToggleClosedLabel;
     proxyToggle.setAttribute("aria-expanded", "false");
 
     const proxyPanel = createElement("section", "pi-welcome-proxy");
@@ -115,13 +120,15 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
     const proxyTopRow = createElement("div", "pi-welcome-proxy__row");
 
     const proxyTitle = createElement("div", "pi-welcome-proxy__title");
-    proxyTitle.textContent = "Local HTTPS proxy";
+    proxyTitle.textContent = DEFAULT_PROXY_IS_REMOTE
+      ? t("welcome.proxy.title_remote")
+      : t("welcome.proxy.title");
 
     const proxyToggleLabel = createElement("label", "pi-welcome-proxy__toggle");
     const proxyEnabledEl = createElement("input", "pi-welcome-proxy__enabled");
     proxyEnabledEl.type = "checkbox";
     const proxyToggleText = createElement("span");
-    proxyToggleText.textContent = "Enabled";
+    proxyToggleText.textContent = t("welcome.proxy.enabled");
     proxyToggleLabel.append(proxyEnabledEl, proxyToggleText);
 
     proxyTopRow.append(proxyTitle, proxyToggleLabel);
@@ -133,31 +140,84 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
 
     const proxySaveEl = createElement("button", "pi-welcome-proxy__save");
     proxySaveEl.type = "button";
-    proxySaveEl.textContent = "Save";
+    proxySaveEl.textContent = t("welcome.proxy.save");
 
     proxyUrlRow.append(proxyUrlEl, proxySaveEl);
 
     const proxyHint = createElement("p", "pi-welcome-proxy__hint");
     const proxyCode = createElement("code");
-    proxyCode.textContent = DEFAULT_LOCAL_PROXY_URL;
+    proxyCode.textContent = DEFAULT_PROXY_URL;
 
     const proxyGuideLink = createElement("a");
     proxyGuideLink.href = PROXY_HELPER_DOCS_URL;
     proxyGuideLink.target = "_blank";
     proxyGuideLink.rel = "noopener noreferrer";
-    proxyGuideLink.textContent = "Step-by-step guide";
+    proxyGuideLink.textContent = t("welcome.proxy.guide");
 
     proxyHint.append(
-      "Needed only when OAuth login is blocked by CORS. Keep this URL at ",
+      t("welcome.proxy.hint.prefix"),
       proxyCode,
-      ", run a local HTTPS proxy, then enable this toggle. ",
+      DEFAULT_PROXY_IS_REMOTE
+        ? t("welcome.proxy.hint.suffix_remote")
+        : t("welcome.proxy.hint.suffix"),
       proxyGuideLink,
-      ".",
+      t("welcome.proxy.hint.end"),
     );
 
     proxyPanel.append(proxyTopRow, proxyUrlRow, proxyHint);
 
+
+    // Language bar at the top
+    const langBar = createElement("div", "pi-welcome-lang-bar");
+    langBar.style.cssText = "display:flex;justify-content:flex-end;gap:4px;padding:4px 8px;";
+
+    const engBtn = createElement("button");
+    engBtn.type = "button";
+    engBtn.textContent = t("language.english");
+    engBtn.style.cssText = "font-size:11px;padding:2px 8px;border:1px solid #ccc;border-radius:4px;background:var(--pi-bg, #fff);cursor:pointer;";
+
+    const zhBtn = createElement("button");
+    zhBtn.type = "button";
+    zhBtn.textContent = "中文";
+    zhBtn.style.cssText = "font-size:11px;padding:2px 8px;border:1px solid #ccc;border-radius:4px;background:var(--pi-bg, #fff);cursor:pointer;";
+
+    const currentLang2 = getLanguage();
+    if (currentLang2 === "zh-CN") {
+      zhBtn.style.borderColor = "var(--color-accent, #3b82f6)";
+      zhBtn.style.color = "var(--color-accent, #3b82f6)";
+    } else {
+      engBtn.style.borderColor = "var(--color-accent, #3b82f6)";
+      engBtn.style.color = "var(--color-accent, #3b82f6)";
+    }
+
+    engBtn.addEventListener("click", () => {
+      if (getLanguage() === "en") return;
+      initLanguage("en");
+      void (async () => {
+        try {
+          const storage = getAppStorage();
+          await storage.settings.set("language", "en");
+          location.reload();
+        } catch { /* ignore */ }
+      })();
+    });
+
+    zhBtn.addEventListener("click", () => {
+      if (getLanguage() === "zh-CN") return;
+      initLanguage("zh-CN");
+      void (async () => {
+        try {
+          const storage = getAppStorage();
+          await storage.settings.set("language", "zh-CN");
+          location.reload();
+        } catch { /* ignore */ }
+      })();
+    });
+
+    langBar.append(engBtn, zhBtn);
+
     dialog.card.replaceChildren(
+      langBar,
       logo,
       title,
       subtitle,
@@ -180,7 +240,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
           void showSettingsDialog({ section: "custom-gateways" });
         })
         .catch(() => {
-          showToast("Couldn't open custom gateway settings.");
+          showToast(t("welcome.toast.cannot_open_settings"));
         });
     });
 
@@ -189,8 +249,8 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
       proxyPanel.hidden = !willOpen;
       proxyToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
       proxyToggle.textContent = willOpen
-        ? "Hide local proxy settings"
-        : "Having login trouble? Configure local proxy";
+        ? "Hide proxy settings"
+        : proxyToggleClosedLabel;
 
       if (willOpen) {
         proxyUrlEl.focus();
@@ -206,7 +266,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
         proxyUrlEl.value = resolveConfiguredProxyUrl(url);
       } catch {
         proxyEnabledEl.checked = false;
-        proxyUrlEl.value = DEFAULT_LOCAL_PROXY_URL;
+        proxyUrlEl.value = DEFAULT_PROXY_URL;
       }
     };
 
@@ -215,9 +275,9 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
         const storage = getAppStorage();
         await storage.settings.set("proxy.enabled", proxyEnabledEl.checked);
         await storage.settings.set("proxy.url", proxyUrlEl.value.trim());
-        showToast("Proxy settings saved");
+        showToast(t("welcome.toast.proxy_saved"));
       } catch {
-        showToast("Failed to save proxy settings");
+        showToast(t("welcome.toast.proxy_failed"));
       }
     };
 
@@ -232,7 +292,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
 
     const expandedRef: { current: HTMLElement | null } = { current: null };
 
-    for (const provider of ALL_PROVIDERS) {
+    for (const provider of VISIBLE_PROVIDERS) {
       const row = buildProviderRow(provider, {
         isActive: false,
         expandedRef,
@@ -241,7 +301,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
             const updated = await providerKeys.list();
             setActiveProviders(new Set(updated));
             document.dispatchEvent(new CustomEvent("pi:providers-changed"));
-            showToast(`${label} connected — try “Explain this workbook”.`, 3200);
+            showToast(t("welcome.toast.connected", { label }), 3200);
             closeOverlay();
           })();
         },
@@ -250,7 +310,7 @@ export async function showWelcomeLogin(providerKeys: ProviderKeysStore): Promise
             const updated = await providerKeys.list();
             setActiveProviders(new Set(updated));
             document.dispatchEvent(new CustomEvent("pi:providers-changed"));
-            showToast(`${label} disconnected`);
+            showToast(t("welcome.toast.disconnected", { label }));
           })();
         },
       });

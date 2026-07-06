@@ -38,8 +38,9 @@ const ALWAYS_MUTATE_TOOLS = new Set<string>([
   "conditional_format",
   // Bridge-assisted transform writes values back into the workbook.
   "python_transform_range",
-  // Arbitrary Office.js can mutate workbook content and structure.
+  // Arbitrary host JSAPI can mutate workbook content and structure.
   "execute_office_js",
+  "execute_wps_js",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,6 +63,11 @@ function classifyComments(params: unknown): ToolExecutionMode {
   return action === "read" ? "read" : "mutate";
 }
 
+function classifyCharts(params: unknown): ToolExecutionMode {
+  const action = getActionParam(params);
+  return action === "list" || action === "get_image" ? "read" : "mutate";
+}
+
 function classifyWorkbookHistory(params: unknown): ToolExecutionMode {
   const action = getActionParam(params);
   return action === "restore" ? "mutate" : "read";
@@ -70,6 +76,11 @@ function classifyWorkbookHistory(params: unknown): ToolExecutionMode {
 function isViewSettingsStructureAction(params: unknown): boolean {
   const action = getActionParam(params);
   return action === "hide_sheet" || action === "show_sheet" || action === "very_hide_sheet";
+}
+
+function isChartsStructureAction(params: unknown): boolean {
+  const action = getActionParam(params);
+  return action === "create" || action === "delete";
 }
 
 /**
@@ -87,6 +98,10 @@ export function getToolExecutionMode(toolName: string, params: unknown): ToolExe
 
   if (toolName === "comments") {
     return classifyComments(params);
+  }
+
+  if (toolName === "charts") {
+    return classifyCharts(params);
   }
 
   if (toolName === "workbook_history") {
@@ -111,11 +126,15 @@ export function getToolContextImpact(toolName: string, params: unknown): ToolCon
     return "structure";
   }
 
-  if (toolName === "execute_office_js") {
+  if (toolName === "execute_office_js" || toolName === "execute_wps_js") {
     return "structure";
   }
 
   if (toolName === "view_settings" && isViewSettingsStructureAction(params)) {
+    return "structure";
+  }
+
+  if (toolName === "charts" && isChartsStructureAction(params)) {
     return "structure";
   }
 

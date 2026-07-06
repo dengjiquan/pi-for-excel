@@ -15,7 +15,7 @@ import type { SessionData } from "@earendil-works/pi-web-ui/dist/storage/types.j
 
 import { createOfficeStreamFn } from "../auth/stream-proxy.js";
 import {
-  DEFAULT_LOCAL_PROXY_URL,
+  DEFAULT_PROXY_URL,
   PROXY_HELPER_DOCS_URL,
   isLoopbackProxyUrl,
   validateOfficeProxyUrl,
@@ -44,7 +44,9 @@ import {
   saveTruncatedToolOutputToWorkspace,
 } from "../tools/output-truncation.js";
 import { withConnectionPreflight } from "../tools/with-connection-preflight.js";
-import { migrateLegacyWebSearchApiKeysToConnectionStore } from "../tools/web-search-config.js";
+import {
+  migrateLegacyWebSearchApiKeysToConnectionStore,
+} from "../tools/web-search-config.js";
 import { migrateLegacyMcpTokensToConnectionStore } from "../tools/mcp-config.js";
 import {
   applyExperimentalToolGates,
@@ -56,10 +58,7 @@ import {
   withWorkbookCoordinator,
 } from "../tools/with-workbook-coordinator.js";
 import { registerBuiltins } from "../commands/builtins.js";
-import {
-  showExtensionsHubDialog,
-  type ExtensionsHubTab,
-} from "../commands/builtins/extensions-hub-overlay.js";
+import { showExtensionsHubDialog, type ExtensionsHubTab } from "../commands/builtins/extensions-hub-overlay.js";
 import { ExtensionRuntimeManager } from "../extensions/runtime-manager.js";
 import type { ResumeDialogTarget } from "../commands/builtins/resume-target.js";
 import {
@@ -73,7 +72,11 @@ import {
 import { configureSettingsDialogDependencies } from "../commands/builtins/settings-overlay.js";
 import { wireCommandMenu } from "../commands/command-menu.js";
 import { executeSlashCommand } from "../commands/slash-command-execution.js";
-import { getUserRules, getWorkbookRules, hasAnyRules } from "../rules/store.js";
+import {
+  getUserRules,
+  getWorkbookRules,
+  hasAnyRules,
+} from "../rules/store.js";
 import { createExecutionModeController } from "../execution/controller.js";
 import {
   PI_EXECUTION_MODE_CHANGED_EVENT,
@@ -93,15 +96,9 @@ import {
   INTEGRATION_IDS,
 } from "../integrations/catalog.js";
 import { PI_INTEGRATIONS_CHANGED_EVENT } from "../integrations/events.js";
-import {
-  getExternalToolsEnabled,
-  resolveConfiguredIntegrationIds,
-} from "../integrations/store.js";
+import { getExternalToolsEnabled, resolveConfiguredIntegrationIds } from "../integrations/store.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
-import {
-  probeLocalServices,
-  type LocalServiceEntry,
-} from "../tools/bridge-health.js";
+import { probeLocalServices, type LocalServiceEntry } from "../tools/bridge-health.js";
 import {
   buildAgentSkillPromptEntries,
   listAgentSkills,
@@ -114,6 +111,7 @@ import {
 import { loadDiscoverableAgentSkillsFromWorkspace } from "../skills/external-store.js";
 import { PI_SKILLS_CHANGED_EVENT } from "../skills/events.js";
 import { createSkillReadCache } from "../skills/read-cache.js";
+import { initLanguage, t } from "../language/index.js";
 import { initAppStorage } from "../storage/init-app-storage.js";
 import { renderError } from "../ui/loading.js";
 import { showFilesWorkspaceDialog } from "../ui/files-dialog.js";
@@ -128,23 +126,15 @@ import { showActionToast, showToast } from "../ui/toast.js";
 import { PiSidebar } from "../ui/pi-sidebar.js";
 import { createProxyBanner } from "../ui/proxy-banner.js";
 import { setActiveProviders } from "../compat/model-selector-patch.js";
+import { getCurrentSpreadsheetHost } from "../host/index.js";
 import { createWorkbookCoordinator } from "../workbook/coordinator.js";
-import {
-  formatWorkbookLabel,
-  getWorkbookContext,
-} from "../workbook/context.js";
+import { formatWorkbookLabel, type WorkbookContext } from "../workbook/context.js";
 import {
   getManualFullWorkbookBackupStore,
   type ManualFullWorkbookBackup,
 } from "../workbook/manual-full-backup.js";
-import {
-  getWorkbookRecoveryLog,
-  type WorkbookRecoverySnapshot,
-} from "../workbook/recovery-log.js";
-import {
-  readRetentionLimit,
-  writeRetentionLimit,
-} from "../workbook/recovery/log-store.js";
+import { getWorkbookRecoveryLog, type WorkbookRecoverySnapshot } from "../workbook/recovery-log.js";
+import { readRetentionLimit, writeRetentionLimit } from "../workbook/recovery/log-store.js";
 import {
   WorkbookSaveBoundaryMonitor,
   startWorkbookSaveBoundaryPolling,
@@ -152,16 +142,12 @@ import {
 
 import { createContextInjector } from "./context-injection.js";
 import { pickDefaultModel } from "./default-model.js";
-import {
-  getThinkingLevels,
-  installKeyboardShortcuts,
-} from "./keyboard-shortcuts.js";
+import { resolveRuntimeModelSwap } from "./runtime-model-reconcile.js";
+import { getThinkingLevels, installKeyboardShortcuts } from "./keyboard-shortcuts.js";
 import { createQueueDisplay } from "./queue-display.js";
 import { createActionQueue } from "./action-queue.js";
-import {
-  RecentlyClosedStack,
-  type RecentlyClosedItem,
-} from "./recently-closed.js";
+import { maybeStartBackgroundVerificationBridge } from "./background-verification-bridge.js";
+import { RecentlyClosedStack, type RecentlyClosedItem } from "./recently-closed.js";
 import { setupSessionPersistence } from "./sessions.js";
 import {
   loadWorkbookTabLayout,
@@ -173,7 +159,7 @@ import { injectStatusBar } from "./status-bar.js";
 import {
   parseStatusContextWarningSeverity,
   STATUS_CONTEXT_DESC_ATTR,
-  STATUS_CONTEXT_POPOVER_FALLBACK_DESCRIPTION,
+  getStatusContextPopoverFallbackDescription,
   STATUS_CONTEXT_TOKENS_ATTR,
   STATUS_CONTEXT_WARNING_ATTR,
   STATUS_CONTEXT_WARNING_SEVERITY_ATTR,
@@ -214,16 +200,14 @@ interface ProxySettingsStore {
   set(key: string, value: unknown): Promise<void>;
 }
 
-async function ensureDefaultProxyUrl(
-  settings: ProxySettingsStore,
-): Promise<void> {
+async function ensureDefaultProxyUrl(settings: ProxySettingsStore): Promise<void> {
   try {
     const proxyUrl = await settings.get<string>("proxy.url");
     if (typeof proxyUrl === "string" && proxyUrl.trim().length > 0) {
       return;
     }
 
-    await settings.set("proxy.url", DEFAULT_LOCAL_PROXY_URL);
+    await settings.set("proxy.url", DEFAULT_PROXY_URL);
   } catch {
     // ignore
   }
@@ -236,10 +220,18 @@ export async function initTaskpane(opts: {
   const { appEl, errorRoot } = opts;
 
   const changeTracker = new ChangeTracker();
+  const spreadsheetHost = getCurrentSpreadsheetHost();
 
   // 1. Storage
-  const { providerKeys, sessions, settings, customProviders } =
-    initAppStorage();
+  const { providerKeys, sessions, settings, customProviders } = initAppStorage();
+
+  // Initialize language from storage
+  try {
+    const lang = await settings.get<string>("language");
+    initLanguage(lang || "en");
+  } catch {
+    initLanguage("en");
+  }
 
   // Seed a predictable proxy default for OAuth flows.
   await ensureDefaultProxyUrl(settings);
@@ -261,8 +253,7 @@ export async function initTaskpane(opts: {
   // 1b. Auto-compaction (Pi defaults to enabled)
   let autoCompactEnabled = true;
   try {
-    autoCompactEnabled =
-      (await settings.get<boolean>("compaction.enabled")) ?? true;
+    autoCompactEnabled = (await settings.get<boolean>("compaction.enabled")) ?? true;
   } catch {
     autoCompactEnabled = true;
   }
@@ -277,9 +268,7 @@ export async function initTaskpane(opts: {
       proxyUrl.trim().length > 0 &&
       !isLoopbackProxyUrl(proxyUrl)
     ) {
-      showToast(
-        "Security warning: proxy URL is not localhost — it can see your tokens and prompts.",
-      );
+      showToast(t("init.securityWarning"));
     }
   } catch {
     // ignore
@@ -289,17 +278,13 @@ export async function initTaskpane(opts: {
   let availableProviders: string[] = [];
   let customProviderApiKeys = new Map<string, string | undefined>();
   let configuredCustomProviders: CustomProvider[] = [];
-  let defaultCustomModel: ReturnType<
-    typeof collectCustomProviderRuntimeInfo
-  >["defaultModel"] = null;
+  let defaultCustomModel: ReturnType<typeof collectCustomProviderRuntimeInfo>["defaultModel"] = null;
   let defaultModel = pickDefaultModel([], null);
 
   const refreshConfiguredProviders = async (): Promise<void> => {
     const combinedProviders = new Set<string>();
     let nextCustomApiKeys = new Map<string, string | undefined>();
-    let nextDefaultCustomModel: ReturnType<
-      typeof collectCustomProviderRuntimeInfo
-    >["defaultModel"] = null;
+    let nextDefaultCustomModel: ReturnType<typeof collectCustomProviderRuntimeInfo>["defaultModel"] = null;
 
     try {
       const configuredBuiltInProviders = await providerKeys.list();
@@ -314,9 +299,7 @@ export async function initTaskpane(opts: {
 
     try {
       nextConfiguredCustomProviders = await customProviders.getAll();
-      const customInfo = collectCustomProviderRuntimeInfo(
-        nextConfiguredCustomProviders,
-      );
+      const customInfo = collectCustomProviderRuntimeInfo(nextConfiguredCustomProviders);
       nextCustomApiKeys = customInfo.apiKeys;
       nextDefaultCustomModel = customInfo.defaultModel;
 
@@ -343,10 +326,7 @@ export async function initTaskpane(opts: {
         onProvidersChanged?.();
       })
       .catch((error: unknown) => {
-        console.warn(
-          "[auth] Provider refresh after settings change failed:",
-          error,
-        );
+        console.warn("[auth] Provider refresh after settings change failed:", error);
       });
   });
 
@@ -357,33 +337,28 @@ export async function initTaskpane(opts: {
 
   void credentialRestorePromise
     .then(() => {
-      void refreshConfiguredProviders().catch((error: unknown) => {
-        console.warn(
-          "[auth] Provider refresh after credential restore failed:",
-          error,
-        );
-      });
+      void refreshConfiguredProviders()
+        .then(() => {
+          // Reconcile any already-created runtimes with the restored
+          // providers (#553) — mirrors the pi:providers-changed path.
+          onProvidersChanged?.();
+        })
+        .catch((error: unknown) => {
+          console.warn("[auth] Provider refresh after credential restore failed:", error);
+        });
     })
     .catch((error: unknown) => {
       console.warn("[auth] Credential restore failed:", error);
     });
 
   try {
-    await awaitWithTimeout(
-      "Credential restore",
-      6000,
-      credentialRestorePromise,
-    );
+    await awaitWithTimeout("Credential restore", 6000, credentialRestorePromise);
   } catch (error: unknown) {
     console.warn("[auth] Credential restore skipped:", error);
   }
 
   try {
-    await awaitWithTimeout(
-      "Provider lookup",
-      3500,
-      refreshConfiguredProviders(),
-    );
+    await awaitWithTimeout("Provider lookup", 3500, refreshConfiguredProviders());
   } catch (error: unknown) {
     console.warn("[auth] Provider lookup failed during startup:", error);
   }
@@ -411,8 +386,7 @@ export async function initTaskpane(opts: {
 
       const rawUrl = await storage.settings.get("proxy.url");
       const trimmedUrl = typeof rawUrl === "string" ? rawUrl.trim() : "";
-      const candidateUrl =
-        trimmedUrl.length > 0 ? trimmedUrl : DEFAULT_LOCAL_PROXY_URL;
+      const candidateUrl = trimmedUrl.length > 0 ? trimmedUrl : DEFAULT_PROXY_URL;
 
       try {
         return validateOfficeProxyUrl(candidateUrl);
@@ -430,29 +404,20 @@ export async function initTaskpane(opts: {
   const sidebar = new PiSidebar();
   sidebar.emptyHints = [
     {
-      label: "Explain this workbook",
-      prompt:
-        "Read through the entire workbook — every sheet, its structure, formulas, and named ranges. Then write a clear overview and user manual for this workbook.\nCover: what the workbook does, how it's organized, the logic flow between sheets, where inputs live and where outputs are derived.\nIf it's a model: explain the key assumptions (and where to change them), the calculation logic, and how outputs depend on inputs.\nIf it's data: explain what the data represents, the key fields, any derived columns, and notable patterns or gaps.\nStructure your explanation like documentation — start with a summary, then walk through each sheet's role.",
+      label: t("hint.explain.label"),
+      prompt: t("hint.explain.prompt"),
     },
     {
-      label: "Quality check this workbook",
-      prompt:
-        "Review this workbook for errors and issues across logic, assumptions, and formatting:\n- Logic: broken or circular references, hardcoded numbers inside formulas, inconsistent formula patterns across rows/columns, missing links between sheets, #REF or #VALUE errors.\n- Assumptions: flag any key assumptions (e.g. growth rates, discount rates, margins) — are they reasonable? Are they clearly labelled and easy to find, or buried in formulas?\n- Formatting: inconsistent number formats within columns, missing or misaligned headers, unlabelled input cells, inconsistent decimal places or currency symbols, rows/columns that break the visual pattern.\nSummarize your findings as a prioritized list of recommendations, grouped by severity.",
+      label: t("hint.quality.label"),
+      prompt: t("hint.quality.prompt"),
     },
     {
-      label: "Build my cost model",
-      prompt:
-        "First, read through the entire workbook — every sheet, its structure, formulas, named ranges, and any existing data. Form a clear picture of what's already here and how it's organized.\nThis agent specializes in construction & engineering cost models (e.g., bill of quantities, estimates & budgets, unit-rate analysis, cost breakdown, tender pricing, settlement, cost-schedule, material-labor-machinery analysis, cost comparison), but it can also build general financial or operational models when needed.\nIf the workbook is blank or mostly empty: ask me what kind of model I need — for example a bill of quantities, budget/estimate, unit-rate buildup, cost breakdown structure, tender comparison, cost-schedule plan, or a financial model (DCF, three-statement, etc.) — then build it step by step, starting with the assumptions and basis (quantities, unit rates, overhead %, contingency, tax/fees, etc.).\nIf there's a partially complete model: explain the current structure, the logic flow, key assumptions (rates, quantities, markups), and what's missing or incomplete. Offer to extend or finish it.\nIf there's data but no model: explain what the data represents, suggest what could be modelled from it, and offer to build it.\nAlways keep assumptions and inputs clearly separated from calculations, label units and currencies, and make formulas traceable.",
+      label: t("hint.financial.label"),
+      prompt: t("hint.financial.prompt"),
     },
     {
-      label: "Tame the messy tables",
-      prompt:
-        'Read the whole workbook first — layout, merged cells, header rows, data — and figure out how each table is actually structured vs. how it should be.\nYou specialize in cleaning up "messy real-world tables" into tidy, analyzable data (one header row, one record per row, one value per cell). Common issues to fix:\n- Merged cells, multi-row headers, nested/hierarchical headers\n- Missing headers, or data misaligned with headers\n- One table wrongly split across sheets → merge it\n- Multiple tables crammed in one sheet → split them\n- Decorative titles, repeated headers, stray subtotal/blank rows\n- Inconsistent units, formats, or category labels\nWorkflow:\n1. Briefly diagnose what\'s wrong with each table.\n2. Propose the target clean structure and confirm anything ambiguous before changing it.\n3. Normalize: flatten headers into clear names, unmerge and fill values, add missing headers, split/merge tables, remove junk rows, standardize units and formats.\n4. Never lose data — keep the original on a "_raw" sheet, output the clean version separately, and flag anything uncertain instead of guessing.',
-    },
-    {
-      label: "Format this sheet",
-      prompt:
-        "Review this worksheet and infer the correct format for each cell from context, then apply formatting including:\n- Number formats (currency, percentages, dates, integers vs. decimals)\n- Font colour coding (e.g. blue for inputs, black for formulas)\n- Cell styles for inputs, outputs, and headers\n- Consistent headers and section labels\nEnsure formats are consistent: for example, if all other cells in a column use one decimal place, apply the same. If a row is bold or italicised, extend that to any unformatted cells in the row.\nAfter formatting, read back the sheet and verify your changes look correct.",
+      label: t("hint.format.label"),
+      prompt: t("hint.format.prompt"),
     },
   ];
 
@@ -472,8 +437,7 @@ export async function initTaskpane(opts: {
     showToast,
   });
 
-  const getExecutionMode = (): ExecutionMode =>
-    executionModeController.getMode();
+  const getExecutionMode = (): ExecutionMode => executionModeController.getMode();
 
   const setExecutionMode = async (mode: ExecutionMode): Promise<void> => {
     await executionModeController.setMode(mode);
@@ -491,25 +455,17 @@ export async function initTaskpane(opts: {
     }
   };
 
-  let modelSwitchBehavior: ModelSwitchBehavior =
-    await loadModelSwitchBehavior();
+  let modelSwitchBehavior: ModelSwitchBehavior = await loadModelSwitchBehavior();
 
   const getModelSwitchBehavior = (): ModelSwitchBehavior => modelSwitchBehavior;
 
-  const setModelSwitchBehavior = async (
-    nextBehavior: ModelSwitchBehavior,
-  ): Promise<void> => {
-    modelSwitchBehavior = await setStoredModelSwitchBehavior(
-      settings,
-      nextBehavior,
-    );
+  const setModelSwitchBehavior = async (nextBehavior: ModelSwitchBehavior): Promise<void> => {
+    modelSwitchBehavior = await setStoredModelSwitchBehavior(settings, nextBehavior);
   };
 
-  const resolveWorkbookContext = async (): Promise<
-    Awaited<ReturnType<typeof getWorkbookContext>>
-  > => {
+  const resolveWorkbookContext = async (): Promise<WorkbookContext> => {
     try {
-      return await getWorkbookContext();
+      return await spreadsheetHost.getWorkbookContext();
     } catch {
       return {
         workbookId: null,
@@ -545,22 +501,14 @@ export async function initTaskpane(opts: {
     let mergedSkills = bundledSkills;
 
     try {
-      const discoverableSkills =
-        await loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
-      mergedSkills = mergeAgentSkillDefinitions(
-        bundledSkills,
-        discoverableSkills,
-      );
+      const discoverableSkills = await loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
+      mergedSkills = mergeAgentSkillDefinitions(bundledSkills, discoverableSkills);
     } catch (error: unknown) {
-      console.warn(
-        "[skills] Failed to load discoverable workspace skills:",
-        error,
-      );
+      console.warn("[skills] Failed to load discoverable workspace skills:", error);
     }
 
     try {
-      const disabledSkillNames =
-        await loadDisabledSkillNamesFromSettings(settings);
+      const disabledSkillNames = await loadDisabledSkillNamesFromSettings(settings);
       const enabledSkills = filterAgentSkillsByEnabledState({
         skills: mergedSkills,
         disabledSkillNames,
@@ -584,18 +532,14 @@ export async function initTaskpane(opts: {
     await localServicesReady;
 
     const availableSkills = await resolveAvailableSkills();
-    const activeConnections = await connectionManager.listPromptEntries(
-      args.requiredConnectionIds,
-    );
+    const activeConnections = await connectionManager.listPromptEntries(args.requiredConnectionIds);
 
     try {
       const userRules = await getUserRules(settings);
       const workbookRules = await getWorkbookRules(settings, args.workbookId);
       setRulesActive(hasAnyRules({ userRules, workbookRules }));
       const conventions = await getResolvedConventions(settings);
-      const activeIntegrations = buildIntegrationPromptEntries(
-        args.activeIntegrationIds,
-      );
+      const activeIntegrations = buildIntegrationPromptEntries(args.activeIntegrationIds);
       return buildSystemPrompt({
         userInstructions: userRules,
         workbookInstructions: workbookRules,
@@ -632,36 +576,61 @@ export async function initTaskpane(opts: {
   const areRuntimeModelsEquivalent = (
     left: Agent["state"]["model"],
     right: Agent["state"]["model"],
-  ): boolean =>
+  ): boolean => (
     left.api === right.api &&
     left.id === right.id &&
     left.provider === right.provider &&
     left.baseUrl === right.baseUrl &&
     left.contextWindow === right.contextWindow &&
-    left.maxTokens === right.maxTokens;
+    left.maxTokens === right.maxTokens
+  );
 
-  const refreshRuntimeModelsFromCustomProviders = (): void => {
+  const reconcileRuntimeModelsWithProviders = (): void => {
     const activeRuntimeId = getActiveRuntime()?.runtimeId ?? null;
     let activeRuntimeChanged = false;
     let anyRuntimeChanged = false;
 
+    const markChanged = (runtimeId: string): void => {
+      anyRuntimeChanged = true;
+      if (runtimeId === activeRuntimeId) {
+        activeRuntimeChanged = true;
+      }
+    };
+
     for (const runtime of runtimeManager.listRuntimes()) {
-      const currentModel = runtime.agent.state.model;
-      const refreshedModel = resolveCustomProviderModel(
-        configuredCustomProviders,
-        currentModel,
-      );
-      if (
-        !refreshedModel ||
-        areRuntimeModelsEquivalent(currentModel, refreshedModel)
-      ) {
+      // Never mutate the model of a working session — same busy invariant as
+      // model switching (see applyModelSelection). A skipped runtime is
+      // reconciled on the next providers-changed / credential-restore pass;
+      // its in-flight work already captured the old model, and a
+      // credential-less provider fails fast anyway.
+      if (runtime.agent.state.isStreaming || runtime.actionQueue.isBusy()) {
         continue;
       }
 
-      runtime.agent.state.model = refreshedModel;
-      anyRuntimeChanged = true;
-      if (runtime.runtimeId === activeRuntimeId) {
-        activeRuntimeChanged = true;
+      const currentModel = runtime.agent.state.model;
+
+      // 1. Custom-provider models: pick up edited base URLs/limits in place.
+      const refreshedModel = resolveCustomProviderModel(configuredCustomProviders, currentModel);
+      if (refreshedModel && !areRuntimeModelsEquivalent(currentModel, refreshedModel)) {
+        runtime.agent.state.model = refreshedModel;
+        markChanged(runtime.runtimeId);
+        continue;
+      }
+
+      // 2. Unusable providers (#553): a runtime created before login (or whose
+      // provider was disconnected) points at a provider with no credentials.
+      // It cannot complete any request, so move it onto the refreshed default
+      // model instead of prompting for the wrong provider's API key.
+      const swap = resolveRuntimeModelSwap({
+        currentModel,
+        availableProviders,
+        defaultModel,
+        isBusy: runtime.agent.state.isStreaming || runtime.actionQueue.isBusy(),
+      });
+      if (swap && !areRuntimeModelsEquivalent(currentModel, swap.model)) {
+        runtime.agent.state.model = swap.model;
+        runtime.agent.state.thinkingLevel = swap.thinkingLevel;
+        markChanged(runtime.runtimeId);
       }
     }
 
@@ -674,7 +643,7 @@ export async function initTaskpane(opts: {
       requestAnimationFrame(() => sidebar.requestUpdate());
     }
   };
-  onProvidersChanged = refreshRuntimeModelsFromCustomProviders;
+  onProvidersChanged = reconcileRuntimeModelsWithProviders;
 
   const workbookRecoveryLog = getWorkbookRecoveryLog();
   const manualFullBackupStore = getManualFullWorkbookBackupStore();
@@ -686,25 +655,19 @@ export async function initTaskpane(opts: {
   });
 
   const saveBoundaryMonitor = new WorkbookSaveBoundaryMonitor({
-    clearBackupsForCurrentWorkbook: () =>
-      workbookRecoveryLog.clearForCurrentWorkbook(),
+    clearBackupsForCurrentWorkbook: () => workbookRecoveryLog.clearForCurrentWorkbook(),
   });
   const stopSaveBoundaryPolling = startWorkbookSaveBoundaryPolling({
     monitor: saveBoundaryMonitor,
   });
 
-  window.addEventListener(
-    "beforeunload",
-    () => {
-      stopSaveBoundaryPolling();
-    },
-    { once: true },
-  );
+  window.addEventListener("beforeunload", () => {
+    stopSaveBoundaryPolling();
+  }, { once: true });
 
   const restoreCheckpointById = async (snapshotId: string): Promise<void> => {
     const activeRuntime = getActiveRuntime();
-    const sessionId =
-      activeRuntime?.persistence.getSessionId() ?? crypto.randomUUID();
+    const sessionId = activeRuntime?.persistence.getSessionId() ?? crypto.randomUUID();
 
     const workbookId = await resolveWorkbookId();
     const coordinatorWorkbookId = workbookId ?? "workbook:unknown";
@@ -720,7 +683,7 @@ export async function initTaskpane(opts: {
     );
 
     const address = restored.result.address;
-    showToast(`Reverted ${address}`);
+    showToast(t("init.revertedAddress", { address }));
   };
 
   const toRecoveryCheckpointSummary = (
@@ -829,12 +792,10 @@ export async function initTaskpane(opts: {
     document.dispatchEvent(new CustomEvent("pi:status-update"));
   };
 
-  const refreshCapabilitiesForAllRuntimes = createAsyncCoalescer(
-    runCapabilityRefreshPass,
-  );
+  const refreshCapabilitiesForAllRuntimes = createAsyncCoalescer(runCapabilityRefreshPass);
 
   const reservedToolNames = new Set([
-    ...createAllTools().map((tool) => tool.name),
+    ...createAllTools({ hostKind: spreadsheetHost.kind }).map((tool) => tool.name),
     ...getIntegrationToolNames(),
   ]);
   const connectionManager = new ConnectionManager({ settings });
@@ -913,9 +874,7 @@ export async function initTaskpane(opts: {
       localServicesSnapshot = result;
       void refreshCapabilitiesForAllRuntimes();
     },
-    (error: unknown) => {
-      console.warn("[pi] Local services probe failed:", error);
-    },
+    (error: unknown) => { console.warn("[pi] Local services probe failed:", error); },
   );
 
   const normalizeApprovalMessage = (title: string, message: string): string => {
@@ -927,10 +886,7 @@ export async function initTaskpane(opts: {
     }
 
     let startIndex = 1;
-    while (
-      startIndex < lines.length &&
-      lines[startIndex]?.trim().length === 0
-    ) {
+    while (startIndex < lines.length && lines[startIndex]?.trim().length === 0) {
       startIndex += 1;
     }
 
@@ -948,7 +904,7 @@ export async function initTaskpane(opts: {
       title: args.title,
       message: normalizeApprovalMessage(args.title, args.message),
       confirmLabel: args.confirmLabel,
-      cancelLabel: "Cancel",
+      cancelLabel: t("confirm.cancel"),
       restoreFocusOnClose: true,
     });
   };
@@ -963,9 +919,7 @@ export async function initTaskpane(opts: {
 
     let runtimeAgent: Agent | null = null;
 
-    const buildRuntimeCapabilities = async (
-      sessionId: string,
-    ): Promise<{
+    const buildRuntimeCapabilities = async (sessionId: string): Promise<{
       tools: ReturnType<typeof withWorkbookCoordinator>;
       systemPrompt: string;
       extensionToolRevision: number;
@@ -979,6 +933,7 @@ export async function initTaskpane(opts: {
       runtimeActiveIntegrationIds.set(runtimeId, activeIntegrationIds);
 
       const coreTools = createAllTools({
+        hostKind: spreadsheetHost.kind,
         getExtensionManager: () => extensionManager,
         getSessionId: () => runtimeAgent?.sessionId ?? runtimeSessionId,
         skillReadCache: runtimeSkillReadCache,
@@ -987,21 +942,24 @@ export async function initTaskpane(opts: {
       const gatedCoreTools = await applyExperimentalToolGates(coreTools, {
         getExecutionMode: () => Promise.resolve(getExecutionMode()),
         requestOfficeJsExecuteApproval: (request) => {
+          const apiName = request.apiName ?? "Office.js";
           return requestRuntimeToolApproval({
-            title: "Allow direct Office.js execution?",
+            title: apiName === "WPS JSAPI"
+              ? t("init.confirm.wpsJsTitle")
+              : t("init.confirm.officeJsTitle"),
             message: buildOfficeJsExecuteApprovalMessage(request),
-            confirmLabel: "Allow once",
+            confirmLabel: t("init.confirm.allowOnce"),
           });
         },
         requestPythonBridgeApproval: (request) => {
           return requestRuntimeToolApproval({
-            title: "Allow local Python / LibreOffice execution?",
+            title: t("init.confirm.pythonTitle"),
             message: buildPythonBridgeApprovalMessage(
               request.toolName,
               request.bridgeUrl,
               request.params,
             ),
-            confirmLabel: "Allow bridge",
+            confirmLabel: t("init.confirm.allowBridge"),
           });
         },
       });
@@ -1036,9 +994,9 @@ export async function initTaskpane(opts: {
           getExecutionMode: () => Promise.resolve(getExecutionMode()),
           requestMutationApproval: (request) => {
             return requestRuntimeToolApproval({
-              title: "Allow workbook mutation in Safe mode?",
+              title: t("init.confirm.safeModeMutationTitle"),
               message: buildMutationApprovalMessage(request),
-              confirmLabel: "Allow once",
+              confirmLabel: t("init.confirm.allowOnce"),
             });
           },
         },
@@ -1050,8 +1008,7 @@ export async function initTaskpane(opts: {
 
       const tools = applyToolOutputTruncation(preflightTools, {
         // Scale caps with the active model's context window (#566).
-        limits: () =>
-          effectiveToolOutputLimits(runtimeAgent?.state.model.contextWindow),
+        limits: () => effectiveToolOutputLimits(runtimeAgent?.state.model.contextWindow),
         saveTruncatedOutput: saveTruncatedToolOutputToWorkspace,
       });
 
@@ -1069,8 +1026,7 @@ export async function initTaskpane(opts: {
     };
 
     const initialModel = getActiveRuntime()?.agent.state.model ?? defaultModel;
-    const initialCapabilities =
-      await buildRuntimeCapabilities(runtimeSessionId);
+    const initialCapabilities = await buildRuntimeCapabilities(runtimeSessionId);
 
     const agent = new Agent({
       initialState: {
@@ -1089,11 +1045,8 @@ export async function initTaskpane(opts: {
 
     runtimeAgent = agent;
     let currentRuntimeSystemPrompt = initialCapabilities.systemPrompt;
-    let currentRuntimeToolsFingerprint = createRuntimeToolFingerprint(
-      initialCapabilities.tools,
-    );
-    let currentExtensionToolRevision =
-      initialCapabilities.extensionToolRevision;
+    let currentRuntimeToolsFingerprint = createRuntimeToolFingerprint(initialCapabilities.tools);
+    let currentExtensionToolRevision = initialCapabilities.extensionToolRevision;
 
     const refreshRuntimeCapabilities = async () => {
       const nextSessionId = runtimeAgent?.sessionId ?? runtimeSessionId;
@@ -1177,14 +1130,9 @@ export async function initTaskpane(opts: {
     });
 
     const unsubscribeErrorTracking = agent.subscribe((ev) => {
-      const isActiveRuntime =
-        runtimeManager.getActiveRuntime()?.runtimeId === runtimeId;
+      const isActiveRuntime = runtimeManager.getActiveRuntime()?.runtimeId === runtimeId;
 
-      if (
-        ev.type === "message_start" &&
-        ev.message.role === "user" &&
-        isActiveRuntime
-      ) {
+      if (ev.type === "message_start" && ev.message.role === "user" && isActiveRuntime) {
         clearErrorBanner(errorRoot);
       }
 
@@ -1197,10 +1145,7 @@ export async function initTaskpane(opts: {
 
       const errorMessage = agent.state.errorMessage;
       if (errorMessage) {
-        const isAbort =
-          wasUserAbort ||
-          /abort/i.test(errorMessage) ||
-          /cancel/i.test(errorMessage);
+        const isAbort = wasUserAbort || /abort/i.test(errorMessage) || /cancel/i.test(errorMessage);
         if (!isAbort) {
           const err = errorMessage;
           if (findTrailingContextOverflowError(agent.state)) {
@@ -1213,10 +1158,10 @@ export async function initTaskpane(opts: {
           } else if (isLikelyCorsErrorMessage(err)) {
             showErrorBanner(
               errorRoot,
-              `Network error (likely CORS). If you're using OAuth, enable /settings → Proxy with ${DEFAULT_LOCAL_PROXY_URL} and retry. Guide: ${PROXY_HELPER_DOCS_URL}`,
+              `Network error (likely CORS). If you're using OAuth, enable /settings → Proxy with ${DEFAULT_PROXY_URL} and retry. Guide: ${PROXY_HELPER_DOCS_URL}`,
             );
           } else {
-            showErrorBanner(errorRoot, `LLM error: ${err}`);
+            showErrorBanner(errorRoot, t("init.llmError", { error: err }));
           }
         }
       } else {
@@ -1255,53 +1200,52 @@ export async function initTaskpane(opts: {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.warn("[pi] Failed to create a new runtime:", error);
-      showToast(`Couldn't open a new tab: ${message}`);
+      showToast(t("init.couldNotOpenNewTab", { message }));
       return null;
     }
   };
 
-  const restorePersistedTabLayout =
-    async (): Promise<SessionRuntime | null> => {
-      const workbookId = await resolveWorkbookId();
-      const savedLayout = await loadWorkbookTabLayout(settings, workbookId);
-      if (!savedLayout) return null;
+  const restorePersistedTabLayout = async (): Promise<SessionRuntime | null> => {
+    const workbookId = await resolveWorkbookId();
+    const savedLayout = await loadWorkbookTabLayout(settings, workbookId);
+    if (!savedLayout) return null;
 
-      const runtimesBySessionId = new Map<string, SessionRuntime>();
-      let firstRuntime: SessionRuntime | null = null;
+    const runtimesBySessionId = new Map<string, SessionRuntime>();
+    let firstRuntime: SessionRuntime | null = null;
 
-      for (const sessionId of savedLayout.sessionIds) {
-        const runtime = await createRuntime({
-          activate: false,
-          autoRestoreLatest: false,
-        });
+    for (const sessionId of savedLayout.sessionIds) {
+      const runtime = await createRuntime({
+        activate: false,
+        autoRestoreLatest: false,
+      });
 
-        const sessionData = await sessions.loadSession(sessionId);
-        if (sessionData) {
-          await runtime.persistence.applyLoadedSession(sessionData);
-        } else {
-          // Keep blank tabs durable across reloads.
-          await runtime.persistence.saveSession({ force: true });
-        }
-
-        if (!firstRuntime) {
-          firstRuntime = runtime;
-        }
-
-        if (!runtimesBySessionId.has(sessionId)) {
-          runtimesBySessionId.set(sessionId, runtime);
-        }
+      const sessionData = await sessions.loadSession(sessionId);
+      if (sessionData) {
+        await runtime.persistence.applyLoadedSession(sessionData);
+      } else {
+        // Keep blank tabs durable across reloads.
+        await runtime.persistence.saveSession({ force: true });
       }
 
-      if (!firstRuntime) return null;
+      if (!firstRuntime) {
+        firstRuntime = runtime;
+      }
 
-      const preferredActiveRuntime = savedLayout.activeSessionId
-        ? (runtimesBySessionId.get(savedLayout.activeSessionId) ?? null)
-        : null;
+      if (!runtimesBySessionId.has(sessionId)) {
+        runtimesBySessionId.set(sessionId, runtime);
+      }
+    }
 
-      const nextActiveRuntime = preferredActiveRuntime ?? firstRuntime;
-      runtimeManager.switchRuntime(nextActiveRuntime.runtimeId);
-      return nextActiveRuntime;
-    };
+    if (!firstRuntime) return null;
+
+    const preferredActiveRuntime = savedLayout.activeSessionId
+      ? runtimesBySessionId.get(savedLayout.activeSessionId) ?? null
+      : null;
+
+    const nextActiveRuntime = preferredActiveRuntime ?? firstRuntime;
+    runtimeManager.switchRuntime(nextActiveRuntime.runtimeId);
+    return nextActiveRuntime;
+  };
 
   const syncRuntimeAfterSessionLoad = (runtime: SessionRuntime): void => {
     runtime.queueDisplay.clear();
@@ -1312,22 +1256,16 @@ export async function initTaskpane(opts: {
     document.dispatchEvent(new CustomEvent("pi:status-update"));
   };
 
-  const replaceActiveRuntimeSession = async (
-    sessionData: SessionData,
-  ): Promise<void> => {
+  const replaceActiveRuntimeSession = async (sessionData: SessionData): Promise<void> => {
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
       return;
     }
 
-    const busy =
-      activeRuntime.agent.state.isStreaming ||
-      activeRuntime.actionQueue.isBusy();
+    const busy = activeRuntime.agent.state.isStreaming || activeRuntime.actionQueue.isBusy();
     if (busy) {
-      showToast(
-        "Current tab is busy — use open in new tab or wait for it to finish",
-      );
+      showToast(t("init.currentTabBusy"));
       return;
     }
 
@@ -1335,9 +1273,7 @@ export async function initTaskpane(opts: {
     syncRuntimeAfterSessionLoad(activeRuntime);
   };
 
-  const openSessionInNewTab = async (
-    sessionData: SessionData,
-  ): Promise<SessionRuntime> => {
+  const openSessionInNewTab = async (sessionData: SessionData): Promise<SessionRuntime> => {
     const runtime = await createRuntime({
       activate: true,
       autoRestoreLatest: false,
@@ -1348,9 +1284,7 @@ export async function initTaskpane(opts: {
     return runtime;
   };
 
-  const openResumePicker = async (
-    defaultTarget: ResumeDialogTarget = "new_tab",
-  ): Promise<void> => {
+  const openResumePicker = async (defaultTarget: ResumeDialogTarget = "new_tab"): Promise<void> => {
     await showResumeDialog({
       defaultTarget,
       onOpenInNewTab: async (sessionData: SessionData) => {
@@ -1376,31 +1310,27 @@ export async function initTaskpane(opts: {
 
   type ReopenRecentlyClosedResult = "reopened" | "missing" | "failed";
 
-  const reopenRecentlyClosedItem = async (
-    item: RecentlyClosedItem,
-  ): Promise<ReopenRecentlyClosedResult> => {
+  const reopenRecentlyClosedItem = async (item: RecentlyClosedItem): Promise<ReopenRecentlyClosedResult> => {
     try {
       const sessionData = await sessions.loadSession(item.sessionId);
       if (!sessionData) {
-        showToast("Couldn't reopen session");
+        showToast(t("init.couldNotReopenSession"));
         return "missing";
       }
 
       await openSessionInNewTab(sessionData);
-      showToast(`Reopened: ${formatSessionTitle(item.title)}`);
+      showToast(t("init.reopened", { title: formatSessionTitle(item.title) }));
       return "reopened";
     } catch {
-      showToast("Couldn't reopen session");
+      showToast(t("init.couldNotReopenSession"));
       return "failed";
     }
   };
 
-  const reopenRecentlyClosedById = async (
-    recentlyClosedId: string,
-  ): Promise<boolean> => {
+  const reopenRecentlyClosedById = async (recentlyClosedId: string): Promise<boolean> => {
     const item = recentlyClosed.removeById(recentlyClosedId);
     if (!item) {
-      showToast("Session is no longer in recently closed");
+      showToast(t("init.sessionNotInRecentlyClosed"));
       return false;
     }
 
@@ -1415,7 +1345,7 @@ export async function initTaskpane(opts: {
   const reopenLastClosed = async (): Promise<void> => {
     const item = recentlyClosed.popMostRecent();
     if (!item) {
-      showToast("No recently closed tab");
+      showToast(t("init.noRecentlyClosedTab"));
       return;
     }
 
@@ -1430,7 +1360,7 @@ export async function initTaskpane(opts: {
     const checkpoint = latest[0];
 
     if (!checkpoint) {
-      showToast("No backups for this workbook yet");
+      showToast(t("init.noBackupsYet"));
       return;
     }
 
@@ -1447,18 +1377,13 @@ export async function initTaskpane(opts: {
     return toManualFullBackupSummary(backup);
   };
 
-  const listManualFullBackups = async (
-    limit = 5,
-  ): Promise<
-    Array<{
-      id: string;
-      createdAt: number;
-      sizeBytes: number;
-    }>
-  > => {
+  const listManualFullBackups = async (limit = 5): Promise<Array<{
+    id: string;
+    createdAt: number;
+    sizeBytes: number;
+  }>> => {
     const safeLimit = Math.max(1, Math.min(20, Math.floor(limit)));
-    const backups =
-      await manualFullBackupStore.listForCurrentWorkbook(safeLimit);
+    const backups = await manualFullBackupStore.listForCurrentWorkbook(safeLimit);
     return backups.map((backup) => toManualFullBackupSummary(backup));
   };
 
@@ -1485,7 +1410,7 @@ export async function initTaskpane(opts: {
     optsForClose?: { showUndoToast?: boolean },
   ): Promise<boolean> => {
     if (runtimeManager.listRuntimes().length <= 1) {
-      showToast("Can't close the last tab");
+      showToast(t("init.cantCloseLastTab"));
       return false;
     }
 
@@ -1493,16 +1418,16 @@ export async function initTaskpane(opts: {
     if (!runtime) return false;
 
     if (runtime.lockState === "holding_lock") {
-      showToast("Wait for workbook changes to finish before closing this tab");
+      showToast(t("init.waitForChangesBeforeClose"));
       return false;
     }
 
     if (runtime.agent.state.isStreaming) {
       const proceed = await requestConfirmationDialog({
-        title: "Stop and close this tab?",
-        message: "Pi is still responding in this tab. Stop and close it?",
-        confirmLabel: "Stop and close",
-        cancelLabel: "Keep open",
+        title: t("init.confirm.stopAndCloseTitle"),
+        message: t("init.confirm.stopAndCloseMessage"),
+        confirmLabel: t("init.confirm.stopAndClose"),
+        cancelLabel: t("init.confirm.keepOpen"),
         confirmButtonTone: "danger",
       });
       if (!proceed) return false;
@@ -1513,9 +1438,8 @@ export async function initTaskpane(opts: {
 
     await runtime.persistence.saveSession({ force: true });
 
-    const closeTitle =
-      runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)
-        ?.title ?? formatSessionTitle(runtime.persistence.getSessionTitle());
+    const closeTitle = runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title
+      ?? formatSessionTitle(runtime.persistence.getSessionTitle());
 
     const closedItem: RecentlyClosedItem = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -1531,8 +1455,8 @@ export async function initTaskpane(opts: {
     const showUndoToast = optsForClose?.showUndoToast !== false;
     if (showUndoToast) {
       showActionToast({
-        message: `Closed ${closedItem.title}`,
-        actionLabel: "Undo",
+        message: t("init.closedTab", { title: closedItem.title }),
+        actionLabel: t("init.undo"),
         duration: 9000,
         onAction: () => {
           void reopenRecentlyClosedById(closedItem.id);
@@ -1546,18 +1470,17 @@ export async function initTaskpane(opts: {
   const renameRuntimeTab = async (runtimeId: string): Promise<void> => {
     const runtime = runtimeManager.getRuntime(runtimeId);
     if (!runtime) {
-      showToast("Session not found");
+      showToast(t("init.sessionNotFound"));
       return;
     }
 
     if (runtime.agent.state.isStreaming || runtime.actionQueue.isBusy()) {
-      showToast("Wait for this tab to finish before renaming");
+      showToast(t("init.waitBeforeRenaming"));
       return;
     }
 
-    const currentTitle =
-      runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)
-        ?.title ?? formatSessionTitle(runtime.persistence.getSessionTitle());
+    const currentTitle = runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title
+      ?? formatSessionTitle(runtime.persistence.getSessionTitle());
     const defaultTitle = runtime.persistence.hasExplicitTitle()
       ? runtime.persistence.getSessionTitle().trim()
       : currentTitle;
@@ -1573,21 +1496,16 @@ export async function initTaskpane(opts: {
     document.dispatchEvent(new CustomEvent("pi:status-update"));
 
     if (nextTitle.length === 0) {
-      showToast("Tab name reset");
+      showToast(t("init.tabNameReset"));
       return;
     }
 
-    showToast(`Renamed to ${nextTitle}`);
+    showToast(t("init.renamedTo", { title: nextTitle }));
   };
 
-  const resolveRuntimeTabTitle = (
-    runtimeId: string,
-    runtime: SessionRuntime,
-  ): string => {
-    return (
-      runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)
-        ?.title ?? formatSessionTitle(runtime.persistence.getSessionTitle())
-    );
+  const resolveRuntimeTabTitle = (runtimeId: string, runtime: SessionRuntime): string => {
+    return runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title
+      ?? formatSessionTitle(runtime.persistence.getSessionTitle());
   };
 
   type RuntimeModel = Agent["state"]["model"];
@@ -1602,12 +1520,9 @@ export async function initTaskpane(opts: {
       autoRestoreLatest: false,
     });
 
-    clonedRuntime.agent.state.messages = structuredClone(
-      args.sourceRuntime.agent.state.messages,
-    );
+    clonedRuntime.agent.state.messages = structuredClone(args.sourceRuntime.agent.state.messages);
     clonedRuntime.agent.state.model = args.targetModel;
-    clonedRuntime.agent.state.thinkingLevel =
-      args.sourceRuntime.agent.state.thinkingLevel;
+    clonedRuntime.agent.state.thinkingLevel = args.sourceRuntime.agent.state.thinkingLevel;
 
     await clonedRuntime.persistence.renameSession(args.targetTitle);
     clonedRuntime.queueDisplay.clear();
@@ -1624,15 +1539,12 @@ export async function initTaskpane(opts: {
   const duplicateRuntimeTab = async (runtimeId: string): Promise<void> => {
     const sourceRuntime = runtimeManager.getRuntime(runtimeId);
     if (!sourceRuntime) {
-      showToast("Session not found");
+      showToast(t("init.sessionNotFound"));
       return;
     }
 
-    if (
-      sourceRuntime.agent.state.isStreaming ||
-      sourceRuntime.actionQueue.isBusy()
-    ) {
-      showToast("Wait for this tab to finish before duplicating");
+    if (sourceRuntime.agent.state.isStreaming || sourceRuntime.actionQueue.isBusy()) {
+      showToast(t("init.waitBeforeDuplicating"));
       return;
     }
 
@@ -1645,25 +1557,22 @@ export async function initTaskpane(opts: {
       targetTitle: duplicateTitle,
     });
 
-    showToast(`Duplicated ${sourceTitle}`);
+    showToast(t("init.duplicated", { title: sourceTitle }));
   };
 
   const closeOtherRuntimes = async (runtimeId: string): Promise<void> => {
-    const tabsToClose = runtimeManager
-      .snapshotTabs()
+    const tabsToClose = runtimeManager.snapshotTabs()
       .filter((tab) => tab.runtimeId !== runtimeId)
       .map((tab) => tab.runtimeId);
 
     if (tabsToClose.length === 0) {
-      showToast("No other tabs");
+      showToast(t("init.noOtherTabs"));
       return;
     }
 
     let closedCount = 0;
     for (const tabId of tabsToClose) {
-      const closed = await closeRuntimeWithRecovery(tabId, {
-        showUndoToast: false,
-      });
+      const closed = await closeRuntimeWithRecovery(tabId, { showUndoToast: false });
       if (closed) {
         closedCount += 1;
       }
@@ -1672,11 +1581,11 @@ export async function initTaskpane(opts: {
     runtimeManager.switchRuntime(runtimeId);
 
     if (closedCount === 0) {
-      showToast("No tabs were closed");
+      showToast(t("init.noTabsWereClosed"));
       return;
     }
 
-    showToast(`Closed ${closedCount} other tab${closedCount === 1 ? "" : "s"}`);
+    showToast(t("init.closedOtherTabs", { count: closedCount }));
   };
 
   const moveRuntimeTab = (runtimeId: string, direction: -1 | 1): void => {
@@ -1684,15 +1593,13 @@ export async function initTaskpane(opts: {
     if (!moved) return;
 
     const directionLabel = direction < 0 ? "left" : "right";
-    showToast(`Moved tab ${directionLabel}`, 1200);
+    showToast(t("init.movedTab", { direction: directionLabel }), 1200);
   };
 
   workbookCoordinator.subscribe((event) => {
     if (event.operationType !== "write") return;
 
-    const runtime = runtimeManager.findRuntimeBySessionId(
-      event.context.sessionId,
-    );
+    const runtime = runtimeManager.findRuntimeBySessionId(event.context.sessionId);
     if (!runtime) return;
 
     if (event.type === "queued") {
@@ -1713,8 +1620,7 @@ export async function initTaskpane(opts: {
   const openExtensionsHub = (tab?: ExtensionsHubTab): void => {
     void showExtensionsHubDialog(
       {
-        getActiveSessionId: () =>
-          getActiveRuntime()?.persistence.getSessionId() ?? null,
+        getActiveSessionId: () => getActiveRuntime()?.persistence.getSessionId() ?? null,
         resolveWorkbookContext: async () => {
           const workbookContext = await resolveWorkbookContext();
           return {
@@ -1736,11 +1642,8 @@ export async function initTaskpane(opts: {
     await showRecoveryDialog({
       workbookLabel: formatWorkbookLabel(workbookContext),
       loadCheckpoints: async () => {
-        const checkpoints =
-          await workbookRecoveryLog.listForCurrentWorkbook(40);
-        return checkpoints.map((checkpoint) =>
-          toRecoveryCheckpointSummary(checkpoint),
-        );
+        const checkpoints = await workbookRecoveryLog.listForCurrentWorkbook(40);
+        return checkpoints.map((checkpoint) => toRecoveryCheckpointSummary(checkpoint));
       },
       onRestore: async (snapshotId: string) => {
         await restoreCheckpointById(snapshotId);
@@ -1774,26 +1677,20 @@ export async function initTaskpane(opts: {
     setModelSwitchBehavior,
   });
 
-  const applyModelSelection = async (
-    runtimeId: string,
-    nextModel: RuntimeModel,
-  ): Promise<void> => {
+  const applyModelSelection = async (runtimeId: string, nextModel: RuntimeModel): Promise<void> => {
     const runtime = runtimeManager.getRuntime(runtimeId);
     if (!runtime) {
-      showToast("Session not found");
+      showToast(t("init.sessionNotFound"));
       return;
     }
 
     const currentModel = runtime.agent.state.model;
-    if (
-      currentModel.provider === nextModel.provider &&
-      currentModel.id === nextModel.id
-    ) {
+    if (currentModel.provider === nextModel.provider && currentModel.id === nextModel.id) {
       return;
     }
 
     if (runtime.agent.state.isStreaming || runtime.actionQueue.isBusy()) {
-      showToast("Wait for this tab to finish before changing models");
+      showToast(t("init.waitBeforeChangingModels"));
       return;
     }
 
@@ -1817,13 +1714,13 @@ export async function initTaskpane(opts: {
       targetTitle: modelForkTitle,
     });
 
-    showToast(`Opened ${modelForkTitle} in a new tab`);
+    showToast(t("init.openedInNewTab", { title: modelForkTitle }));
   };
 
   const openModelSelector = (): void => {
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
       return;
     }
 
@@ -1834,10 +1731,7 @@ export async function initTaskpane(opts: {
       try {
         await refreshConfiguredProviders();
       } catch (error: unknown) {
-        console.warn(
-          "[auth] Failed to refresh providers before opening model selector:",
-          error,
-        );
+        console.warn("[auth] Failed to refresh providers before opening model selector:", error);
       }
 
       closeStatusPopover();
@@ -1854,7 +1748,7 @@ export async function initTaskpane(opts: {
     renameActiveSession: async (title: string) => {
       const activeRuntime = getActiveRuntime();
       if (!activeRuntime) {
-        showToast("No active session");
+        showToast(t("init.noActiveSession"));
         return;
       }
 
@@ -1872,9 +1766,8 @@ export async function initTaskpane(opts: {
       try {
         await revertLatestCheckpoint();
       } catch (error: unknown) {
-        const message =
-          error instanceof Error ? error.message : "Unknown error";
-        showToast(`Revert failed: ${message}`);
+        const message = error instanceof Error ? error.message : "Unknown error";
+        showToast(t("init.revertFailed", { message }));
       }
     },
     createManualFullBackup: async () => {
@@ -1911,13 +1804,11 @@ export async function initTaskpane(opts: {
 
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
       return;
     }
 
-    const busy =
-      activeRuntime.agent.state.isStreaming ||
-      activeRuntime.actionQueue.isBusy();
+    const busy = activeRuntime.agent.state.isStreaming || activeRuntime.actionQueue.isBusy();
     const result = executeSlashCommand({
       name,
       args,
@@ -1932,12 +1823,12 @@ export async function initTaskpane(opts: {
     }
 
     if (result === "busy-blocked") {
-      showToast(`Can't run /${name} while Pi is busy`);
+      showToast(t("init.cantRunBusy", { command: name }));
       return;
     }
 
     if (result === "missing-queue") {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
     }
   };
   document.addEventListener("pi:command-run", onCommandRun);
@@ -1946,7 +1837,7 @@ export async function initTaskpane(opts: {
     clearErrorBanner(errorRoot);
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
       return;
     }
     activeRuntime.actionQueue.enqueuePrompt(text, images);
@@ -2000,23 +1891,20 @@ export async function initTaskpane(opts: {
   sidebar.onFilesDrop = (files: File[]) => {
     const workspace = getFilesWorkspace();
 
-    void workspace
-      .importFiles(files, {
-        audit: { actor: "user", source: "input-drop" },
-      })
+    void workspace.importFiles(files, {
+      audit: { actor: "user", source: "input-drop" },
+    })
       .then((count) => {
         if (count <= 0) {
-          showToast("No files were imported.");
+          showToast(t("init.noFilesImported"));
           return;
         }
 
         const importedLabel = `${count} file${count === 1 ? "" : "s"}`;
-        showToast(`Imported ${importedLabel} into Files.`);
+        showToast(t("init.importedIntoFiles", { label: importedLabel }));
       })
       .catch((error: unknown) => {
-        showToast(
-          `Import failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
+        showToast(t("init.importFailed", { error: error instanceof Error ? error.message : t("init.unknownError") }));
       });
   };
   sidebar.onOpenResumePicker = () => {
@@ -2028,6 +1916,7 @@ export async function initTaskpane(opts: {
   sidebar.onOpenShortcuts = () => {
     showShortcutsDialog();
   };
+
 
   // Bootstrap from persisted tab layout; fallback to legacy single-runtime restore.
   const restoredRuntime = await restorePersistedTabLayout();
@@ -2049,10 +1938,7 @@ export async function initTaskpane(opts: {
     if (disclosureEl) {
       const messagesContainer = sidebar.querySelector(".pi-messages");
       if (messagesContainer) {
-        messagesContainer.parentElement?.insertBefore(
-          disclosureEl,
-          messagesContainer,
-        );
+        messagesContainer.parentElement?.insertBefore(disclosureEl, messagesContainer);
       }
     }
   }
@@ -2071,11 +1957,7 @@ export async function initTaskpane(opts: {
         const detail: unknown = event.detail;
         if (!isRecord(detail)) return;
         const state = detail.state;
-        if (
-          state === "detected" ||
-          state === "not-detected" ||
-          state === "unknown"
-        ) {
+        if (state === "detected" || state === "not-detected" || state === "unknown") {
           proxyBanner.update(state);
         }
       });
@@ -2093,16 +1975,9 @@ export async function initTaskpane(opts: {
   });
 
   try {
-    await awaitWithTimeout(
-      "Extension initialization",
-      5000,
-      extensionInitialization,
-    );
+    await awaitWithTimeout("Extension initialization", 5000, extensionInitialization);
   } catch (error: unknown) {
-    console.warn(
-      "[pi] Extension initialization did not complete during startup:",
-      error,
-    );
+    console.warn("[pi] Extension initialization did not complete during startup:", error);
   }
 
   // ── Keyboard shortcuts ──
@@ -2120,7 +1995,7 @@ export async function initTaskpane(opts: {
     onCloseActiveTab: () => {
       const activeRuntime = getActiveRuntime();
       if (!activeRuntime) {
-        showToast("No active session");
+        showToast(t("init.noActiveSession"));
         return;
       }
 
@@ -2173,9 +2048,7 @@ export async function initTaskpane(opts: {
   requestAnimationFrame(wireTextarea);
 
   const runSlashCommand = (name: string, args = ""): void => {
-    document.dispatchEvent(
-      new CustomEvent("pi:command-run", { detail: { name, args } }),
-    );
+    document.dispatchEvent(new CustomEvent("pi:command-run", { detail: { name, args } }));
   };
 
   const openThinkingPopoverFrom = (target: Element): void => {
@@ -2184,13 +2057,11 @@ export async function initTaskpane(opts: {
 
     const activeAgent = getActiveAgent();
     if (!activeAgent) {
-      showToast("No active session");
+      showToast(t("init.noActiveSession"));
       return;
     }
 
-    const description =
-      trigger.getAttribute("data-tooltip") ??
-      "Choose how deeply Pi reasons before responding.";
+    const description = trigger.getAttribute("data-tooltip") ?? "Choose how deeply Pi reasons before responding.";
 
     toggleThinkingPopover({
       anchor: trigger,
@@ -2209,17 +2080,13 @@ export async function initTaskpane(opts: {
     const trigger = target.closest(".pi-status-ctx--trigger");
     if (!trigger) return;
 
-    const description =
-      trigger.getAttribute(STATUS_CONTEXT_DESC_ATTR) ??
-      STATUS_CONTEXT_POPOVER_FALLBACK_DESCRIPTION;
+    const description = trigger.getAttribute(STATUS_CONTEXT_DESC_ATTR)
+      ?? getStatusContextPopoverFallbackDescription();
 
-    const tokenDetail =
-      trigger.getAttribute(STATUS_CONTEXT_TOKENS_ATTR) ?? undefined;
+    const tokenDetail = trigger.getAttribute(STATUS_CONTEXT_TOKENS_ATTR) ?? undefined;
 
     const warnText = trigger.getAttribute(STATUS_CONTEXT_WARNING_ATTR) ?? "";
-    const warnSeverity = trigger.getAttribute(
-      STATUS_CONTEXT_WARNING_SEVERITY_ATTR,
-    );
+    const warnSeverity = trigger.getAttribute(STATUS_CONTEXT_WARNING_SEVERITY_ATTR);
     let warning: { text: string; severity: "yellow" | "red" } | undefined;
     if (warnText.length > 0) {
       warning = {
@@ -2238,6 +2105,16 @@ export async function initTaskpane(opts: {
       },
     });
   };
+
+  // ── Dev-only background verification bridge ──
+  const backgroundVerificationBridge = maybeStartBackgroundVerificationBridge({
+    sidebar,
+    getWorkbookContext: resolveWorkbookContext,
+    getActiveRuntime,
+  });
+  if (backgroundVerificationBridge) {
+    window.addEventListener("pagehide", () => backgroundVerificationBridge.stop(), { once: true });
+  }
 
   // ── Status bar click handlers ──
   document.addEventListener("click", (e) => {

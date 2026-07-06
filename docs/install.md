@@ -1,5 +1,7 @@
 # Install Pi for Excel
 
+> 中文用户:简要中文安装与模型配置指南见 [README.zh-CN.md](../README.zh-CN.md)。
+
 No coding or dev tools required — just download one file and add it to Excel.
 
 ---
@@ -136,6 +138,8 @@ Typical symptoms:
 - `Load failed`
 - `Failed to fetch`
 
+> **Managed / org rollout?** Instead of a proxy on every machine, IT can host one central proxy for everyone — see [Org-hosted central CORS proxy](./central-proxy.md).
+
 ### What to do
 
 1. Run a local HTTPS proxy on the same machine as Excel (defaults to `https://localhost:3003`):
@@ -156,7 +160,7 @@ curl -fsSL https://piforexcel.com/proxy | sh
 
 2. In Pi, open `/settings` → **Proxy**:
    - enable **Proxy**
-   - set URL to `https://localhost:3003`
+   - set URL to the URL printed by the proxy (normally `https://localhost:3003`; if 3003 is busy, it will choose a random free port and print that URL)
 
 3. Retry OAuth login
 
@@ -165,7 +169,7 @@ Quick proxy sanity check (advanced):
 
 ```bash
 curl -k -i -s \
-  'https://localhost:3000/api-proxy/google-cloudcode/v1internal:streamGenerateContent?alt=sse' \
+  'https://localhost:3141/api-proxy/google-cloudcode/v1internal:streamGenerateContent?alt=sse' \
   -X POST -H 'content-type: application/json' -d '{}' | head
 ```
 
@@ -176,7 +180,8 @@ curl -k -i -s \
 Notes:
 - Keep the proxy URL on **HTTPS** (`https://...`), not HTTP.
 - API-key providers generally work without proxy.
-- If port `3003` is busy, run with another port and use that same URL in settings:
+- If port `3003` is busy, `npx pi-for-excel-proxy` automatically chooses a random free port. Copy the printed `https://localhost:<port>` URL into `/settings` → **Proxy**.
+- To force a specific port, set `PORT` and use that same URL in settings:
 
 ```bash
 PORT=3005 npx pi-for-excel-proxy

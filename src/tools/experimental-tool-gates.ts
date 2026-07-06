@@ -8,6 +8,7 @@
 export {
   DEFAULT_PYTHON_BRIDGE_URL,
   DEFAULT_TMUX_BRIDGE_URL,
+  EXECUTE_WPS_JS_TOOL_NAME,
   PYTHON_BRIDGE_APPROVED_URL_SETTING_KEY,
   PYTHON_BRIDGE_URL_SETTING_KEY,
   TMUX_BRIDGE_URL_SETTING_KEY,
@@ -34,3 +35,8 @@ export {
   buildOfficeJsExecuteApprovalMessage,
   buildPythonBridgeApprovalMessage,
 } from "./experimental-tool-gates/wrappers.js";
+
+export {
+  assessOfficeJsCodeRisk,
+  type OfficeJsCodeRiskAssessment,
+} from "./experimental-tool-gates/office-js-risk.js";

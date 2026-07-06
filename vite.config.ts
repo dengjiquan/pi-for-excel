@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vite";
+import { resolveDevOrigin } from "./scripts/generate-dev-manifest.mjs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "fs";
 import path from "path";
@@ -55,76 +56,16 @@ function piAuthPlugin(): Plugin {
   };
 }
 
-/**
- * Stub out the Amazon Bedrock provider in browser builds.
- *
- * pi-ai registers all built-in providers at import time, including Bedrock.
- * The Bedrock provider pulls in AWS SDK Node transports which break Vite's
- * production bundling for the browser.
- */
-function stubBedrockProviderPlugin(): Plugin {
-  const stubPath = path.resolve(__dirname, "src/stubs/amazon-bedrock.ts");
-
-  return {
-    name: "stub-bedrock-provider",
-    enforce: "pre",
-    resolveId(id, importer) {
-      // Register-builtins imports Bedrock via a relative path.
-      if (
-        id === "./amazon-bedrock.js" &&
-        importer &&
-        importer.includes("@earendil-works/pi-ai") &&
-        importer.includes("providers/register-builtins")
-      ) {
-        return stubPath;
-      }
-
-      // Safety: also catch resolved imports.
-      if (id.includes("@earendil-works/pi-ai") && id.endsWith("/providers/amazon-bedrock.js")) {
-        return stubPath;
-      }
-
-      return null;
-    },
-  };
-}
-
-/**
- * Stub out pi-ai's OAuth index in browser builds.
- *
- * pi-ai's main entrypoint re-exports the OAuth index, which includes Node-only
- * side effects and CLI-only providers. The Excel add-in uses a small, local
- * OAuth implementation and should not bundle these flows.
- */
-function stubPiAiOAuthIndexPlugin(): Plugin {
-  const stubPath = path.resolve(__dirname, "src/stubs/pi-ai-oauth.ts");
-
-  return {
-    name: "stub-pi-ai-oauth-index",
-    enforce: "pre",
-    resolveId(id, importer) {
-      const cleanId = id.split("?")[0];
-      const cleanImporter = importer?.split("?")[0];
-
-      // pi-ai's dist/index.js re-exports the OAuth index via a relative path.
-      if (
-        cleanId === "./utils/oauth/index.js" &&
-        cleanImporter &&
-        cleanImporter.includes("/node_modules/@earendil-works/pi-ai/") &&
-        cleanImporter.endsWith("/dist/index.js")
-      ) {
-        return stubPath;
-      }
-
-      // Safety: catch resolved ids too.
-      if (cleanId.includes("/node_modules/@earendil-works/pi-ai/") && cleanId.endsWith("/dist/utils/oauth/index.js")) {
-        return stubPath;
-      }
-
-      return null;
-    },
-  };
-}
+// NOTE: pi-ai 0.79-era stubBedrockProviderPlugin / stubPiAiOAuthIndexPlugin
+// were removed with the 0.80 bump: 0.80 lazy-loads the Node-only Bedrock
+// implementation behind a variable specifier (bundlers never see it — the
+// browser-safe unsupported stub is installed at runtime via
+// setBedrockProviderModule, see src/compat/bedrock-provider-stub.ts), and
+// neither dist/index.js nor dist/compat.js re-exports the OAuth index
+// anymore. Their resolved-id fallback branches had also become mis-fire
+// hazards: 0.80's providers/amazon-bedrock.js exports amazonBedrockProvider
+// and the public /oauth entrypoint resolves to dist/utils/oauth/index.js,
+// both incompatible with the old substitute modules.
 
 /**
  * Stub out pi-web-ui tool modules we don't ship in the Excel add-in.
@@ -250,6 +191,69 @@ function buildBrowserAliasMap(): Record<string, string> {
   };
 }
 
+/**
+ * Full browser alias list: the centralized alias map plus pattern-based
+ * aliases that need exact-match regexes.
+ */
+function buildBrowserAliases(): { find: string | RegExp; replacement: string }[] {
+  return [
+    ...Object.entries(buildBrowserAliasMap()).map(([find, replacement]) => ({ find, replacement })),
+
+    // pi-ai 0.80 moved the legacy global API (getModel/getModels/stream/…)
+    // to the "/compat" entrypoint. Our own code imports "/compat" directly;
+    // this alias covers pi-web-ui's dist modules, which still import the old
+    // root surface. Exact-match regex so "/compat" itself is untouched.
+    // Remove once pi-web-ui ships a pi-ai 0.80-native release.
+    { find: /^@earendil-works\/pi-ai$/, replacement: "@earendil-works/pi-ai/compat" },
+  ];
+}
+
+// ============================================================================
+// Opt-in dev HTTPS proxy (portless) — see docs/portless.md
+// ============================================================================
+
+/**
+ * When the dev server runs behind a local HTTPS reverse proxy such as
+ * portless (https://portless.sh), TLS terminates at the proxy and Vite
+ * serves plain HTTP on a loopback port the proxy forwards to.
+ *
+ * Opt-in only: set DEV_HOST=<hostname> explicitly, or run via
+ * `npm run dev:portless` (portless injects PORTLESS_URL into the child
+ * process). With neither set, the default https://localhost:3141 behavior
+ * is unchanged.
+ */
+interface DevProxyConfig {
+  /** Public hostname the browser uses (e.g. "pi-excel.localhost"). */
+  host: string;
+  /** Public HTTPS port of the proxy (usually 443). */
+  clientPort: number;
+}
+
+function resolveDevProxy(): DevProxyConfig | null {
+  const devHost = process.env.DEV_HOST?.trim();
+  const portlessUrl = process.env.PORTLESS_URL?.trim();
+  if (!devHost && !portlessUrl) return null;
+
+  // Same strict validation as scripts/generate-dev-manifest.mjs (shared
+  // helper): https-only bare origin, no credentials/path/query/hash, and
+  // never the default https://localhost:3141. Invalid values fail loud
+  // instead of silently activating (or silently skipping) proxy mode.
+  const resolved = resolveDevOrigin({
+    env: { DEV_HOST: devHost, PORTLESS_URL: portlessUrl },
+  });
+  const url = new URL(resolved.origin);
+  return {
+    host: url.hostname,
+    clientPort: url.port ? Number.parseInt(url.port, 10) : 443,
+  };
+}
+
+/** Behind the proxy the port comes from PORT (portless-assigned); CLI --port wins over this either way. */
+function parseDevServerPort(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : 3141;
+}
+
 // ============================================================================
 // Vite config
 // ============================================================================
@@ -260,23 +264,43 @@ const certPath = path.resolve(__dirname, "cert.pem");
 
 const hasHttpsCerts = fs.existsSync(keyPath) && fs.existsSync(certPath);
 
+const devProxy = resolveDevProxy();
+
 export default defineConfig({
   plugins: [
     piAuthPlugin(),
-    stubBedrockProviderPlugin(),
-    stubPiAiOAuthIndexPlugin(),
     stubPiWebUiBuiltinToolsPlugin(),
   ],
 
   server: {
-    // Must stay on :3000 because manifest hardcodes it.
-    // Bind IPv6 too: Excel's webview may resolve localhost → ::1 and fail if we only listen on 127.0.0.1.
-    host: "::",
-    strictPort: true,
-    port: 3000,
-    https: hasHttpsCerts
-      ? { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }
-      : undefined,
+    ...(devProxy
+      ? {
+          // Behind a local HTTPS proxy (portless): TLS terminates at the
+          // proxy, so Vite serves plain HTTP on loopback only. portless
+          // assigns the port via PORT / an injected --port flag.
+          host: "localhost",
+          strictPort: true,
+          port: parseDevServerPort(process.env.PORT),
+          // *.localhost is allowed by default; this covers custom TLDs (e.g. --tld test).
+          allowedHosts: [devProxy.host],
+          // Route the HMR websocket through the HTTPS proxy rather than
+          // straight at Vite's plain-HTTP port.
+          hmr: {
+            protocol: "wss",
+            host: devProxy.host,
+            clientPort: devProxy.clientPort,
+          },
+        }
+      : {
+          // Must stay on :3141 because manifest hardcodes it.
+          // Bind IPv6 too: Excel's webview may resolve localhost → ::1 and fail if we only listen on 127.0.0.1.
+          host: "::",
+          strictPort: true,
+          port: 3141,
+          https: hasHttpsCerts
+            ? { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }
+            : undefined,
+        }),
 
     proxy: {
       // OAuth token endpoints. Keep longer/more-specific prefixes before shorter ones.
@@ -307,7 +331,7 @@ export default defineConfig({
   esbuild: { target: "esnext" },
 
   resolve: {
-    alias: buildBrowserAliasMap(),
+    alias: buildBrowserAliases(),
     // Force a single `marked` instance so our safety patch
     // (installMarkedSafetyPatch) intercepts all .use() calls —
     // including markdown-block's. Without this, mini-lit bundles its

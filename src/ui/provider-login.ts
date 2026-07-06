@@ -12,6 +12,8 @@ import { isCorsError } from "@earendil-works/pi-web-ui/dist/utils/proxy-utils.js
 import { getOAuthProvider } from "../auth/oauth-provider-registry.js";
 import { clearOAuthCredentials, saveOAuthCredentials } from "../auth/oauth-storage.js";
 import {
+  DEFAULT_PROXY_IS_REMOTE,
+  DEFAULT_PROXY_URL,
   PROXY_HELPER_DOCS_URL,
   probeProxyReachability,
   resolveConfiguredProxyUrl,
@@ -19,6 +21,8 @@ import {
 import { PROVIDER_PROMPT_OVERLAY_ID, PROXY_GATE_OVERLAY_ID } from "./overlay-ids.js";
 import { closeOverlayById, createOverlayDialog } from "./overlay-dialog.js";
 import { getErrorMessage } from "../utils/errors.js";
+import { t } from "../language/index.js";
+import { filterProvidersByAllowlist, resolveAllowedProviderIds } from "./provider-allowlist.js";
 
 /**
  * Quick reachability check against the configured proxy URL.
@@ -57,14 +61,14 @@ function showProxyGateDialog(): Promise<boolean> {
 
     const title = document.createElement("h2");
     title.className = "pi-prompt-title";
-    title.textContent = "One more step before login";
+    title.textContent = t("provider.proxy_gate.title");
 
     const message = document.createElement("p");
     message.className = "pi-prompt-message";
     message.style.lineHeight = "1.5";
-    message.textContent =
-      "This login method needs a small helper running on your Mac. " +
-      "Open the Terminal app and paste this command:";
+    message.textContent = DEFAULT_PROXY_IS_REMOTE
+      ? t("provider.proxy_gate.message_remote")
+      : t("provider.proxy_gate.message");
 
     const codeRow = document.createElement("div");
     codeRow.style.cssText = "display:flex;align-items:center;gap:8px;margin:12px 0;";
@@ -78,12 +82,12 @@ function showProxyGateDialog(): Promise<boolean> {
 
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
-    copyBtn.textContent = "Copy";
+    copyBtn.textContent = t("provider.proxy_gate.copy");
     copyBtn.style.cssText = "padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer;";
     copyBtn.addEventListener("click", () => {
       void navigator.clipboard.writeText("npx pi-for-excel-proxy").then(() => {
-        copyBtn.textContent = "Copied!";
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+        copyBtn.textContent = t("provider.proxy_gate.copied");
+        setTimeout(() => { copyBtn.textContent = t("provider.proxy_gate.copy"); }, 1500);
       });
     });
 
@@ -92,9 +96,14 @@ function showProxyGateDialog(): Promise<boolean> {
     const hint = document.createElement("p");
     hint.className = "pi-prompt-helper";
     hint.style.lineHeight = "1.5";
-    hint.innerHTML =
-      "Wait until you see <strong>&ldquo;Proxy listening&rdquo;</strong> in Terminal, then click <strong>Retry</strong>. " +
-      `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">Step-by-step guide &rarr;</a>`;
+    if (DEFAULT_PROXY_IS_REMOTE) {
+      codeRow.style.display = "none";
+      hint.textContent = t("provider.proxy_gate.hint_remote", { url: DEFAULT_PROXY_URL });
+    } else {
+      hint.innerHTML =
+        `${t("provider.proxy_gate.hint_html")} ` +
+        `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+    }
 
     const actions = document.createElement("div");
     actions.className = "pi-prompt-actions";
@@ -102,12 +111,12 @@ function showProxyGateDialog(): Promise<boolean> {
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.className = "pi-prompt-cancel";
-    cancelBtn.textContent = "Cancel";
+    cancelBtn.textContent = t("provider.prompt.cancel");
 
     const retryBtn = document.createElement("button");
     retryBtn.type = "button";
     retryBtn.className = "pi-prompt-ok";
-    retryBtn.textContent = "Retry";
+    retryBtn.textContent = t("provider.proxy_gate.retry");
 
     actions.append(cancelBtn, retryBtn);
     dialog.card.append(title, message, codeRow, hint, actions);
@@ -123,7 +132,7 @@ function showProxyGateDialog(): Promise<boolean> {
 
     const doRetry = (): void => {
       if (settled) return;
-      retryBtn.textContent = "Checking…";
+      retryBtn.textContent = t("provider.proxy_gate.checking");
       retryBtn.style.opacity = "0.7";
 
       void (async () => {
@@ -145,11 +154,15 @@ function showProxyGateDialog(): Promise<boolean> {
           // fall through
         }
 
-        retryBtn.textContent = "Retry";
+        retryBtn.textContent = t("provider.proxy_gate.retry");
         retryBtn.style.opacity = "1";
-        hint.innerHTML =
-          "Helper not detected yet &mdash; make sure it says <strong>&ldquo;Proxy listening&rdquo;</strong> in Terminal, then try again. " +
-          `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">Step-by-step guide &rarr;</a>`;
+        if (DEFAULT_PROXY_IS_REMOTE) {
+          hint.textContent = t("provider.proxy_gate.not_detected_remote", { url: DEFAULT_PROXY_URL });
+        } else {
+          hint.innerHTML =
+            `${t("provider.proxy_gate.not_detected_html")} ` +
+            `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+        }
       })();
     };
 
@@ -188,21 +201,34 @@ export interface ProviderDef {
 export const ALL_PROVIDERS: ProviderDef[] = [
   // OAuth providers first (subscription / account-based flows)
   // Only list flows that are supported in-browser (PKCE/manual paste, no local callback server).
-  { id: "anthropic",          label: "Anthropic",                oauth: "anthropic",          desc: "Claude Pro/Max" },
-  { id: "openai-codex",       label: "OpenAI (ChatGPT)",         oauth: "openai-codex",       desc: "Plus/Pro subscription" },
-  { id: "google-gemini-cli",  label: "Google Code Assist",       oauth: "google-gemini-cli",  desc: "Gemini via Google account" },
-  { id: "google-antigravity", label: "Google Antigravity",       oauth: "google-antigravity", desc: "Gemini/Claude/GPT-OSS" },
-  { id: "github-copilot",     label: "GitHub Copilot",           oauth: "github-copilot" },
+  // desc holds a locale key (resolved via t() at render time in buildProviderRow).
+  { id: "anthropic",          label: /* brand */ "Anthropic",                oauth: "anthropic",          desc: "provider.desc.claude" },
+  { id: "openai-codex",       label: /* brand */ "OpenAI (ChatGPT)",         oauth: "openai-codex",       desc: "provider.desc.openai_sub" },
+  { id: "google-gemini-cli",  label: /* brand */ "Google Code Assist",       oauth: "google-gemini-cli",  desc: "provider.desc.gemini_account" },
+  { id: "google-antigravity", label: /* brand */ "Google Antigravity",       oauth: "google-antigravity", desc: "provider.desc.antigravity" },
+  { id: "github-copilot",     label: /* brand */ "GitHub Copilot",           oauth: "github-copilot" },
 
   // API key providers
-  { id: "openai",             label: "OpenAI (API)",             desc: "API key" },
-  { id: "google",             label: "Google Gemini (API)",      desc: "API key" },
-  { id: "deepseek",           label: "DeepSeek" },
-  { id: "amazon-bedrock",     label: "Amazon Bedrock" },
-  { id: "mistral",            label: "Mistral" },
-  { id: "groq",               label: "Groq" },
-  { id: "xai",                label: "xAI / Grok" },
+  { id: "openai",             label: /* brand */ "OpenAI (API)",             desc: "provider.desc.api_key" },
+  { id: "google",             label: /* brand */ "Google Gemini (API)",      desc: "provider.desc.api_key" },
+  { id: "deepseek",           label: /* brand */ "DeepSeek" },
+  { id: "amazon-bedrock",     label: /* brand */ "Amazon Bedrock" },
+  { id: "mistral",            label: /* brand */ "Mistral" },
+  { id: "groq",               label: /* brand */ "Groq" },
+  { id: "xai",                label: /* brand */ "xAI / Grok" },
 ];
+
+/**
+ * Providers to show in connect UIs. Equals ALL_PROVIDERS unless the build
+ * sets VITE_PI_ALLOWED_PROVIDERS (org deployments — see docs/central-proxy.md).
+ * UI-level filter only; enforcement lives at the proxy/network layer.
+ */
+export const VISIBLE_PROVIDERS: ProviderDef[] = filterProvidersByAllowlist(
+  ALL_PROVIDERS,
+  resolveAllowedProviderIds(
+    typeof import.meta.env === "undefined" ? undefined : import.meta.env.VITE_PI_ALLOWED_PROVIDERS,
+  ),
+);
 
 export interface ProviderRowCallbacks {
   onConnected: (row: HTMLElement, id: string, label: string) => void;
@@ -270,7 +296,7 @@ function normalizeApiKeyForProvider(
   raw: string,
 ): { ok: true; key: string } | { ok: false; error: string } {
   let key = raw.trim();
-  if (!key) return { ok: false, error: "API key is empty" };
+  if (!key) return { ok: false, error: t("provider.error.empty_key") };
 
   // Common copy/paste format: "Bearer <token>"
   if (/^bearer\s+/i.test(key)) {
@@ -282,36 +308,20 @@ function normalizeApiKeyForProvider(
     // OAuth access tokens are sk-ant-oat*, API keys are sk-ant-api*.
     const looksLikeAuthCode = key.includes("#") && !key.includes("sk-ant-");
     if (looksLikeAuthCode) {
-      return {
-        ok: false,
-        error:
-          "That looks like an OAuth authorization code (code#state). Use “Login with Anthropic” and paste it when prompted (don’t Save it as an API key).",
-      };
+      return { ok: false, error: t("provider.error.oauth_code_as_key") };
     }
   }
 
   if (providerId === "openai-codex" && looksLikeOAuthRedirectInput(key)) {
-    return {
-      ok: false,
-      error:
-        "That looks like an OAuth redirect URL/code. Use “Login with OpenAI (ChatGPT)” and paste it in the login prompt (don’t Save it as an API key).",
-    };
+    return { ok: false, error: t("provider.error.oauth_url_codex") };
   }
 
   if ((providerId === "google-gemini-cli" || providerId === "google-antigravity") && looksLikeOAuthRedirectInput(key)) {
-    return {
-      ok: false,
-      error:
-        "That looks like an OAuth redirect URL/code. Use “Login with Google …” and paste it in the login prompt (don’t Save it as an API key).",
-    };
+    return { ok: false, error: t("provider.error.oauth_url_google") };
   }
 
   if (providerId === "google" && looksLikeOAuthRedirectInput(key)) {
-    return {
-      ok: false,
-      error:
-        "That looks like an OAuth redirect URL/code. Use Google API key auth here, or use the dedicated Google OAuth login rows.",
-    };
+    return { ok: false, error: t("provider.error.oauth_url_google_api") };
   }
 
   return { ok: true, key };
@@ -333,11 +343,11 @@ function showDeviceCodeDialog(info: { userCode: string; verificationUri: string 
 
   const title = document.createElement("h2");
   title.className = "pi-prompt-title";
-  title.textContent = "Finish sign-in in your browser";
+  title.textContent = t("provider.device_code.title");
 
   const message = document.createElement("p");
   message.className = "pi-prompt-message";
-  message.textContent = "Enter this code on the verification page that just opened:";
+  message.textContent = t("provider.device_code.message");
 
   const codeRow = document.createElement("div");
   codeRow.style.cssText = "display:flex;align-items:center;gap:8px;margin:12px 0;";
@@ -351,12 +361,12 @@ function showDeviceCodeDialog(info: { userCode: string; verificationUri: string 
 
   const copyBtn = document.createElement("button");
   copyBtn.type = "button";
-  copyBtn.textContent = "Copy";
+  copyBtn.textContent = t("provider.proxy_gate.copy");
   copyBtn.style.cssText = "padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer;";
   copyBtn.addEventListener("click", () => {
     void navigator.clipboard.writeText(info.userCode).then(() => {
-      copyBtn.textContent = "Copied!";
-      setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+      copyBtn.textContent = t("provider.proxy_gate.copied");
+      setTimeout(() => { copyBtn.textContent = t("provider.proxy_gate.copy"); }, 1500);
     });
   });
 
@@ -364,7 +374,7 @@ function showDeviceCodeDialog(info: { userCode: string; verificationUri: string 
 
   const helper = document.createElement("p");
   helper.className = "pi-prompt-helper";
-  helper.textContent = `If no window opened, visit ${info.verificationUri} and enter the code there.`;
+  helper.textContent = t("provider.device_code.helper", { uri: info.verificationUri });
 
   dialog.card.append(title, message, codeRow, helper);
   dialog.mount();
@@ -426,7 +436,7 @@ function promptForSelect(opts: {
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.className = "pi-prompt-cancel";
-    cancelBtn.textContent = "Cancel";
+    cancelBtn.textContent = t("provider.prompt.cancel");
     cancelBtn.addEventListener("click", () => settle(undefined));
     actions.append(cancelBtn);
 
@@ -443,12 +453,40 @@ function promptForSelect(opts: {
   });
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  const clipboard = navigator.clipboard;
+  if (clipboard?.writeText) {
+    try {
+      await clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to legacy copy for WebViews/insecure dev origins.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard copy failed");
+  }
+}
+
 function promptForText(opts: {
   title: string;
   message: string;
   placeholder?: string;
   helperText?: string;
   submitLabel?: string;
+  externalUrl?: string;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
     closeOverlayById(PROVIDER_PROMPT_OVERLAY_ID);
@@ -477,21 +515,25 @@ function promptForText(opts: {
     input.autocomplete = "off";
     input.setAttribute("aria-label", opts.title);
 
+    const externalUrlEl = document.createElement("div");
+    externalUrlEl.className = "pi-prompt-external-url";
+    externalUrlEl.hidden = true;
+
     const actions = document.createElement("div");
     actions.className = "pi-prompt-actions";
 
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.className = "pi-prompt-cancel";
-    cancelBtn.textContent = "Cancel";
+    cancelBtn.textContent = t("provider.prompt.cancel");
 
     const okBtn = document.createElement("button");
     okBtn.type = "button";
     okBtn.className = "pi-prompt-ok";
-    okBtn.textContent = opts.submitLabel ?? "Continue";
+    okBtn.textContent = opts.submitLabel ?? t("provider.prompt.continue");
 
     actions.append(cancelBtn, okBtn);
-    dialog.card.append(titleEl, messageEl, helperEl, input, actions);
+    dialog.card.append(titleEl, messageEl, helperEl, externalUrlEl, input, actions);
 
     if (opts.helperText) {
       helperEl.textContent = opts.helperText;
@@ -500,6 +542,31 @@ function promptForText(opts: {
 
     if (opts.placeholder) {
       input.placeholder = opts.placeholder;
+    }
+
+    if (opts.externalUrl) {
+      const openLink = document.createElement("a");
+      openLink.className = "pi-prompt-external-url__open";
+      openLink.href = opts.externalUrl;
+      openLink.target = "_blank";
+      openLink.rel = "noopener noreferrer";
+      openLink.textContent = t("provider.prompt.openLoginPage");
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "pi-prompt-external-url__copy";
+      copyBtn.textContent = t("provider.prompt.copyLoginLink");
+      copyBtn.addEventListener("click", () => {
+        void copyTextToClipboard(opts.externalUrl ?? "").then(() => {
+          copyBtn.textContent = t("provider.prompt.copied");
+          setTimeout(() => {
+            copyBtn.textContent = t("provider.prompt.copyLoginLink");
+          }, 1500);
+        });
+      });
+
+      externalUrlEl.append(openLink, copyBtn);
+      externalUrlEl.hidden = false;
     }
 
     let settled = false;
@@ -570,12 +637,12 @@ export function buildProviderRow(
   const storage = getAppStorage();
 
   const keyPlaceholder = id === "anthropic"
-    ? "sk-ant-api… or sk-ant-oat…"
+    ? t("provider.placeholder.anthropic")
     : id === "openai-codex"
-      ? "ChatGPT OAuth access token"
+      ? t("provider.placeholder.chatgpt")
       : id === "google-gemini-cli" || id === "google-antigravity"
-        ? "Google OAuth credential JSON"
-        : "Enter API key";
+        ? t("provider.placeholder.google_oauth")
+        : t("provider.placeholder.api_key");
 
   const row = document.createElement("div");
   row.className = "pi-login-row";
@@ -583,25 +650,25 @@ export function buildProviderRow(
     <button class="pi-welcome-provider pi-login-trigger">
       <span class="pi-login-meta">
         <span class="pi-login-label">${label}</span>
-        ${desc ? `<span class="pi-login-desc">${desc}</span>` : ""}
+        ${desc ? `<span class="pi-login-desc">${t(desc)}</span>` : ""}
       </span>
       <span class="pi-login-status ${isActive ? "is-connected" : ""}">
-        ${isActive ? "✓ connected" : "set up →"}
+        ${isActive ? t("provider.connected") : t("provider.set_up")}
       </span>
     </button>
     <div class="pi-login-detail" hidden>
-      <button class="pi-login-disconnect" type="button" ${isActive ? "" : "hidden"}>Disconnect ${label}</button>
+      <button class="pi-login-disconnect" type="button" ${isActive ? "" : "hidden"}>${t("provider.disconnect", { label })}</button>
       ${oauth ? `
-        <button class="pi-login-oauth">Login with ${label}</button>
+        <button class="pi-login-oauth">${t("provider.login_with", { label })}</button>
         <div class="pi-login-divider">
           <div class="pi-login-divider__line"></div>
-          <span class="pi-login-divider__text">or enter API key</span>
+          <span class="pi-login-divider__text">${t("provider.or_api_key")}</span>
           <div class="pi-login-divider__line"></div>
         </div>
       ` : ""}
       <div class="pi-login-key-row">
-        <input class="pi-login-key" type="password" placeholder="${keyPlaceholder}" aria-label="API key for ${label}" autocomplete="off" spellcheck="false" />
-        <button class="pi-login-save">Save</button>
+        <input class="pi-login-key" type="password" placeholder="${keyPlaceholder}" aria-label="${t("provider.keyAria", { label })}" autocomplete="off" spellcheck="false" />
+        <button class="pi-login-save">${t("provider.save")}</button>
       </div>
       <p class="pi-login-error" hidden></p>
     </div>
@@ -621,7 +688,7 @@ export function buildProviderRow(
 
   const setConnectedState = (connected: boolean): void => {
     if (statusEl) {
-      statusEl.textContent = connected ? "✓ connected" : "set up →";
+      statusEl.textContent = connected ? t("provider.connected") : t("provider.set_up");
       statusEl.classList.toggle("is-connected", connected);
     }
 
@@ -649,7 +716,7 @@ export function buildProviderRow(
   if (oauthBtn) {
     oauthBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      oauthBtn.textContent = "Opening login…";
+      oauthBtn.textContent = t("provider.opening_login");
       oauthBtn.style.opacity = "0.7";
       void (async () => {
         errorEl.hidden = true;
@@ -671,7 +738,7 @@ export function buildProviderRow(
               const userRetried = await showProxyGateDialog();
               if (!userRetried) {
                 // User cancelled — reset button and bail.
-                oauthBtn.textContent = `Login with ${label}`;
+                oauthBtn.textContent = t("provider.login_with", { label });
                 oauthBtn.style.opacity = "1";
                 return;
               }
@@ -679,11 +746,13 @@ export function buildProviderRow(
           }
 
           const deviceCodeDialogRef: { close: (() => void) | null } = { close: null };
+          const authUrlRef: { current: string | null } = { current: null };
 
           let cred;
           try {
             cred = await oauthProvider.login({
               onAuth: (info) => {
+                authUrlRef.current = info.url;
                 // Prevent the OAuth page from gaining a handle to the add-in window.
                 const w = window.open(info.url, "_blank", "noopener,noreferrer");
                 if (w) w.opener = null;
@@ -697,25 +766,26 @@ export function buildProviderRow(
               },
               onSelect: (prompt) =>
                 promptForSelect({
-                  title: `Login with ${label}`,
+                  title: t("provider.login_with", { label }),
                   message: prompt.message,
                   options: prompt.options,
                 }),
               onPrompt: async (prompt) => {
                 const helperText = id === "anthropic"
-                  ? "After completing login, your browser may show a localhost page that cannot be reached — that's normal. Copy the full URL from the browser address bar and paste it here."
+                  ? t("provider.oauth.helper.anthropic")
                   : id === "openai-codex"
-                    ? "After login, your browser will show a page that says \"can't be reached\" \u2014 that's normal! Copy the full URL from the browser address bar and paste it here."
+                    ? t("provider.oauth.helper.openai")
                     : id === "google-gemini-cli" || id === "google-antigravity"
-                      ? "After sign-in, your browser will show a page that says \"can't be reached\" \u2014 that's normal! Copy the full URL from the browser address bar and paste it here."
+                      ? t("provider.oauth.helper.google")
                       : undefined;
 
                 const value = await promptForText({
-                  title: `Login with ${label}`,
+                  title: t("provider.login_with", { label }),
                   message: prompt.message,
                   placeholder: prompt.placeholder || "",
                   helperText,
-                  submitLabel: "Continue",
+                  submitLabel: t("provider.prompt.continue"),
+                  externalUrl: authUrlRef.current ?? undefined,
                 });
 
                 if (id === "anthropic") {
@@ -749,18 +819,21 @@ export function buildProviderRow(
             (typeof msg === "string" && /load failed|failed to fetch|cors|cross-origin|networkerror/i.test(msg));
 
           if (isLikelyCors) {
-            errorEl.innerHTML =
-              "Login couldn't connect — this provider needs a helper running on your Mac. " +
-              "Open Terminal and run: <code style=\"padding:2px 5px;border-radius:4px;" +
-              "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4)\">" +
-              "npx pi-for-excel-proxy</code>, then try again. " +
-              `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">Step-by-step guide →</a>`;
+            if (DEFAULT_PROXY_IS_REMOTE) {
+              errorEl.textContent = t("provider.cors_error_remote", { url: DEFAULT_PROXY_URL });
+            } else {
+              errorEl.innerHTML =
+                `${t("provider.cors_error")} <code style="padding:2px 5px;border-radius:4px;` +
+                "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4)\">" +
+                `npx pi-for-excel-proxy</code>${t("provider.cors_error.retry")} ` +
+                `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+            }
           } else {
-            errorEl.textContent = msg || "Login failed";
+            errorEl.textContent = msg || t("provider.login_failed");
           }
           errorEl.hidden = false;
         } finally {
-          oauthBtn.textContent = `Login with ${label}`;
+          oauthBtn.textContent = t("provider.login_with", { label });
           oauthBtn.style.opacity = "1";
         }
       })();
@@ -772,7 +845,7 @@ export function buildProviderRow(
     disconnectBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       void (async () => {
-        disconnectBtn.textContent = "Disconnecting…";
+        disconnectBtn.textContent = t("provider.disconnecting");
         disconnectBtn.disabled = true;
         disconnectBtn.style.opacity = "0.7";
         errorEl.hidden = true;
@@ -786,10 +859,10 @@ export function buildProviderRow(
           onDisconnected?.(row, id, label);
         } catch (err: unknown) {
           const msg = getErrorMessage(err);
-          errorEl.textContent = msg ? `Failed to disconnect: ${msg}` : "Failed to disconnect";
+          errorEl.textContent = msg ? t("provider.disconnect_failed_msg", { msg }) : t("provider.disconnect_failed");
           errorEl.hidden = false;
         } finally {
-          disconnectBtn.textContent = `Disconnect ${label}`;
+          disconnectBtn.textContent = t("provider.disconnect", { label });
           disconnectBtn.disabled = false;
           disconnectBtn.style.opacity = "1";
         }
@@ -810,7 +883,7 @@ export function buildProviderRow(
     }
 
     const key = normalized.key;
-    saveBtn.textContent = "Testing…";
+    saveBtn.textContent = t("provider.testing");
     saveBtn.style.opacity = "0.7";
     errorEl.hidden = true;
     try {
@@ -821,10 +894,10 @@ export function buildProviderRow(
       expandedRef.current = null;
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
-      errorEl.textContent = msg ? `Failed to save key: ${msg}` : "Failed to save key";
+      errorEl.textContent = msg ? t("provider.save_failed_msg", { msg }) : t("provider.save_failed");
       errorEl.hidden = false;
     } finally {
-      saveBtn.textContent = "Save";
+      saveBtn.textContent = t("provider.save");
       saveBtn.style.opacity = "1";
     }
   })(); });

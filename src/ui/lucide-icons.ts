@@ -8,6 +8,7 @@
  */
 
 import { iconDOM } from "@mariozechner/mini-lit";
+import { t } from "../language/index.js";
 import type { IconNode } from "lucide";
 import {
   AlertTriangle,
@@ -83,7 +84,7 @@ export function createCopyButton(options: CopyButtonOptions): HTMLButtonElement 
   const {
     text,
     className = "pi-copy-btn",
-    title = "Copy to clipboard",
+    title = t("copy.toClipboard"),
     onCopied,
   } = options;
 
@@ -102,8 +103,8 @@ export function createCopyButton(options: CopyButtonOptions): HTMLButtonElement 
 
   const renderCopiedIcon = (): void => {
     button.replaceChildren(lucide(Check));
-    button.title = "Copied!";
-    button.setAttribute("aria-label", "Copied!");
+    button.title = t("copy.copied");
+    button.setAttribute("aria-label", t("copy.copied"));
   };
 
   button.addEventListener("click", () => {
