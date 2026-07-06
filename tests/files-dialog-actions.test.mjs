@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { createFilesDialogDetailActions } from "../src/ui/files-dialog-actions.ts";
@@ -237,4 +238,9 @@ test("rename dialog appears above the files workspace", () => {
   } finally {
     restore();
   }
+});
+
+test("file detail ignores audit-only workspace events to prevent render loops", () => {
+  const source = readFileSync(new URL("../src/ui/files-dialog.ts", import.meta.url), "utf8");
+  assert.match(source, /detail\?\.reason === "audit"\) return/);
 });

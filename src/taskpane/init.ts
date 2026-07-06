@@ -416,6 +416,10 @@ export async function initTaskpane(opts: {
       prompt: t("hint.financial.prompt"),
     },
     {
+      label: t("hint.messy.label"),
+      prompt: t("hint.messy.prompt"),
+    },
+    {
       label: t("hint.format.label"),
       prompt: t("hint.format.prompt"),
     },

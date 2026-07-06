@@ -123,6 +123,16 @@ void test("every static t(\"...\") call site references an existing key", () => 
   assert.deepEqual(missing, [], `t() call sites with unknown keys: ${missing.join(", ")}`);
 });
 
+void test("home hints keep the construction cost and messy-table workflows", () => {
+  assert.equal(en["hint.financial.label"], "Build my cost model");
+  assert.match(en["hint.financial.prompt"], /construction & engineering cost models/);
+  assert.equal(en["hint.messy.label"], "Tame the messy tables");
+  assert.match(en["hint.messy.prompt"], /messy real-world tables/);
+
+  const initSource = readFileSync(join(root, "src", "taskpane", "init.ts"), "utf8");
+  assert.match(initSource, /t\("hint\.messy\.prompt"\)/);
+});
+
 void test("common UI text sinks use locale keys instead of hardcoded English", () => {
   // This is a deliberately low-noise guard for the UI surfaces agents most
   // often edit: DOM text sinks, button/config-row helpers, dialog labels, and

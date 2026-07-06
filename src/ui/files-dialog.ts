@@ -6,6 +6,7 @@ import { base64ToBytes } from "../files/encoding.js";
 import { formatBytes } from "../files/mime.js";
 import {
   FILES_WORKSPACE_CHANGED_EVENT,
+  type FilesWorkspaceChangedDetail,
   type WorkspaceBackendStatus,
   type WorkspaceFileEntry,
   type WorkspaceFileLocationKind,
@@ -975,7 +976,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     });
   };
 
-  const onWorkspaceChanged: EventListener = () => {
+  const onWorkspaceChanged: EventListener = (event) => {
+    const detail = (event as CustomEvent<FilesWorkspaceChangedDetail>).detail;
+    if (detail?.reason === "audit") return;
+
     void (async () => {
       try {
         await refreshWorkspaceState();
