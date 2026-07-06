@@ -124,7 +124,10 @@ function Start-PiServices {
   Start-PiService -Name "Pi for Excel web app" -Command "npm run dev"
   Wait-Port -Port 3000 -Name "Pi for Excel web app"
 
-  Start-PiService -Name "Pi for Excel proxy" -Command "`$env:HOST='127.0.0.1'; npm run proxy:https"
+  # ponytail: local dev serves the taskpane on :3000 (npm run dev = vite --port 3000),
+  # but upstream's cors-proxy default only trusts :3141. Trust both so the
+  # proxy-status probe isn't 403'd as a disallowed origin (→ false "Proxy not running").
+  Start-PiService -Name "Pi for Excel proxy" -Command "`$env:HOST='127.0.0.1'; `$env:ALLOWED_ORIGINS='https://localhost:3000,https://localhost:3141'; npm run proxy:https"
   Wait-Port -Port 3003 -Name "Pi for Excel proxy"
 
   # Python bridge (optional — skip gracefully if Python is not installed)
