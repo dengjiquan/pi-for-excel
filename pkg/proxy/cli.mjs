@@ -2,6 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -15,6 +16,10 @@ const appDir = path.join(homeDir, ".pi-for-excel");
 const certDir = path.join(appDir, "certs");
 const keyPath = path.join(certDir, "key.pem");
 const certPath = path.join(certDir, "cert.pem");
+const DEFAULT_PROXY_PORT = "3003";
+const DEFAULT_PROXY_URL = `https://localhost:${DEFAULT_PROXY_PORT}`;
+const PROXY_HEALTH_HEADER = "x-pi-for-excel-proxy";
+const PROXY_HEALTH_VALUE = "1";
 
 function commandExists(command) {
   const whichCommand = process.platform === "win32" ? "where" : "which";
@@ -56,7 +61,7 @@ function supportsMkcertCli(command) {
   return result.status === 0 && !result.signal;
 }
 
-function resolveMkcertCommand() {
+function findMkcertCommand() {
   const candidates = [];
 
   if (process.platform === "darwin") {
@@ -76,6 +81,15 @@ function resolveMkcertCommand() {
     if (supportsMkcertCli(candidate)) {
       return candidate;
     }
+  }
+
+  return null;
+}
+
+function resolveMkcertCommand() {
+  const existingCommand = findMkcertCommand();
+  if (existingCommand) {
+    return existingCommand;
   }
 
   if (process.platform === "darwin") {
@@ -164,6 +178,105 @@ function resolveProxyConfig() {
   };
 }
 
+function probeHttpsHealth(urlString, trustedCa) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    const req = https.request(
+      urlString,
+      {
+        method: "GET",
+        ca: trustedCa,
+        servername: "localhost",
+        timeout: 800,
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          body += chunk;
+          if (body.length > 32) {
+            req.destroy();
+            finish({ healthy: false, compatible: false });
+          }
+        });
+        res.on("end", () => {
+          const healthy = res.statusCode === 200 && body.trim() === "ok";
+          finish({
+            healthy,
+            compatible: healthy && res.headers[PROXY_HEALTH_HEADER] === PROXY_HEALTH_VALUE,
+          });
+        });
+      },
+    );
+
+    req.on("timeout", () => {
+      req.destroy();
+      finish({ healthy: false, compatible: false });
+    });
+    req.on("error", () => finish({ healthy: false, compatible: false }));
+    req.end();
+  });
+}
+
+async function exitIfDefaultProxyAlreadyRunning(proxyConfig) {
+  const portWasRequested = typeof process.env.PORT === "string" && process.env.PORT.trim().length > 0;
+  const hostWasRequested = typeof process.env.HOST === "string" && process.env.HOST.trim().length > 0;
+  if (!proxyConfig.usesHttps || portWasRequested || hostWasRequested) {
+    return;
+  }
+
+  const mkcertCommand = findMkcertCommand();
+  if (!mkcertCommand) {
+    return;
+  }
+
+  const caRootResult = spawnSync(mkcertCommand, ["-CAROOT"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (caRootResult.error || caRootResult.status !== 0 || caRootResult.signal) {
+    return;
+  }
+
+  const caRoot = caRootResult.stdout.trim();
+  if (!caRoot) {
+    return;
+  }
+
+  let trustedCa;
+  try {
+    trustedCa = fs.readFileSync(path.join(caRoot, "rootCA.pem"));
+  } catch {
+    return;
+  }
+
+  const [localhostProbe, ipv4Probe] = await Promise.all([
+    probeHttpsHealth(`${DEFAULT_PROXY_URL}/healthz`, trustedCa),
+    probeHttpsHealth(`https://127.0.0.1:${DEFAULT_PROXY_PORT}/healthz`, trustedCa),
+  ]);
+
+  if (localhostProbe.compatible && ipv4Probe.compatible) {
+    console.log(`[pi-for-excel-proxy] Proxy already running at ${DEFAULT_PROXY_URL}`);
+    console.log("[pi-for-excel-proxy] Nothing else to start — keep the existing proxy terminal open.");
+    process.exit(0);
+  }
+
+  if (localhostProbe.compatible || ipv4Probe.compatible) {
+    console.error("[pi-for-excel-proxy] Port 3003 has a partial/stale pi-for-excel proxy listener.");
+    console.error(`[pi-for-excel-proxy] ${DEFAULT_PROXY_URL}/healthz: ${localhostProbe.compatible ? "compatible" : "failed"}`);
+    console.error(`[pi-for-excel-proxy] https://127.0.0.1:${DEFAULT_PROXY_PORT}/healthz: ${ipv4Probe.compatible ? "compatible" : "failed"}`);
+    console.error("[pi-for-excel-proxy] Stop old pi-for-excel proxy processes, then run npx pi-for-excel-proxy again.");
+    console.error("[pi-for-excel-proxy] Or set PORT=<free-port> and copy that URL into Pi for Excel /settings → Proxy.");
+    process.exit(1);
+  }
+}
+
 function startProxy(proxyArgs) {
   fs.mkdirSync(certDir, { recursive: true });
   console.log(`[pi-for-excel-proxy] Using certificate directory: ${certDir}`);
@@ -212,6 +325,7 @@ if (!fs.existsSync(proxyScriptPath)) {
 
 const proxyConfig = resolveProxyConfig();
 if (proxyConfig.usesHttps) {
+  await exitIfDefaultProxyAlreadyRunning(proxyConfig);
   ensureCertificates();
 }
 startProxy(proxyConfig.proxyArgs);

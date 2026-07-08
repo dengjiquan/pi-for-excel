@@ -516,7 +516,16 @@ test("proxy /healthz responds without an Origin header and never proxies", async
 
   const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
   assert.equal(health.status, 200);
+  assert.equal(health.headers.get("x-pi-for-excel-proxy"), "1");
   assert.equal(await health.text(), "ok");
+
+  const browserHealth = await fetch(`http://127.0.0.1:${proxy.port}/healthz`, {
+    headers: { Origin: ORIGIN },
+  });
+  assert.equal(browserHealth.status, 200);
+  assert.equal(browserHealth.headers.get("access-control-allow-origin"), ORIGIN);
+  assert.equal(browserHealth.headers.get("x-pi-for-excel-proxy"), "1");
+  assert.equal(await browserHealth.text(), "ok");
 
   // Query strings (including ?url=) must not turn /healthz into a proxy path.
   const withUrl = await fetch(
