@@ -61,7 +61,7 @@ void test("execute_office_js blocks nested Excel.run usage", async () => {
 });
 
 void test("execute_office_js reports non-serializable result payloads", async () => {
-  const circular: { self?: unknown } = {};
+  const circular: { self?: DynamicValue } = {};
   circular.self = circular;
 
   const tool = createExecuteOfficeJsTool({
@@ -86,10 +86,6 @@ void test("format_cells border shorthand none is normalized and clears all edges
 
   assert.deepEqual(borderParams, {
     shorthand: "none",
-    top: undefined,
-    bottom: undefined,
-    left: undefined,
-    right: undefined,
   });
 
   assert.deepEqual(instructions, {

@@ -7,26 +7,32 @@
  * to duplicate imports.
  */
 
-import { iconDOM } from "@mariozechner/mini-lit";
+import { iconDOM } from "./icons.js";
 import { t } from "../language/index.js";
 import type { IconNode } from "lucide";
 import {
   AlertTriangle,
+  Archive,
   Check,
   ClipboardList,
   Copy,
   FileSpreadsheet,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
   Image,
+  Keyboard,
   Link,
   NotebookPen,
   Package,
   Paperclip,
   Plug,
   Puzzle,
+  Ruler,
   Search,
+  Server,
+  ShieldCheck,
   Terminal,
   Upload,
   Zap,
@@ -41,21 +47,27 @@ export function lucide(glyph: IconNode): SVGElement {
 
 export {
   AlertTriangle,
+  Archive,
   Check,
   ClipboardList,
   Copy,
   FileSpreadsheet,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
   Image,
+  Keyboard,
   Link,
   NotebookPen,
   Package,
   Paperclip,
   Plug,
   Puzzle,
+  Ruler,
   Search,
+  Server,
+  ShieldCheck,
   Terminal,
   Upload,
   Zap,
@@ -80,7 +92,9 @@ let resetCopyTimeout: ReturnType<typeof setTimeout> | undefined;
  * Create a copy button that copies text to clipboard on click.
  * Shows a check icon briefly after successful copy.
  */
-export function createCopyButton(options: CopyButtonOptions): HTMLButtonElement {
+export function createCopyButton(
+  options: CopyButtonOptions,
+): HTMLButtonElement {
   const {
     text,
     className = "pi-copy-btn",

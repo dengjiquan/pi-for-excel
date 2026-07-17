@@ -19,10 +19,10 @@
 }
 
 .pi-empty__logo {
-  display: block;
-  width: 58px;
-  height: 58px;
-  object-fit: contain;
+  font-size: var(--text-display);
+  font-weight: 700;
+  color: var(--pi-green);
+  font-family: var(--font-sans);
   margin-bottom: 4px;
   opacity: 0.24;
 }

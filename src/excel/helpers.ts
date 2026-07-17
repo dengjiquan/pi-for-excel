@@ -57,7 +57,7 @@ export function getRange(context: Excel.RequestContext, ref: string): { sheet: E
 /** Build a fully-qualified address like "Sheet1!A1:B5" */
 export function qualifiedAddress(sheetName: string, address: string): string {
   // Strip sheet prefix if already in the address
-  const clean = address.includes("!") ? address.split("!")[1] : address;
+  const clean = address.includes("!") ? address.slice(address.indexOf("!") + 1) : address;
   const escaped = sheetName.replace(/'/g, "''");
   const needsQuote = /[\s']/.test(sheetName);
   const quoted = needsQuote ? `'${escaped}'` : sheetName;
@@ -90,10 +90,17 @@ export function letterToCol(letters: string): number {
 
 /** Parse cell address "B3" → { col: 1, row: 3 } (col is 0-indexed, row is 1-indexed) */
 export function parseCell(cell: string): { col: number; row: number } {
-  const clean = cell.includes("!") ? cell.split("!")[1] : cell;
+  const clean = cell.includes("!") ? cell.slice(cell.indexOf("!") + 1) : cell;
   const match = clean.match(/^\$?([A-Z]+)\$?(\d+)$/i);
   if (!match) throw new Error(`Invalid cell address: ${cell}`);
-  return { col: letterToCol(match[1].toUpperCase()), row: parseInt(match[2], 10) };
+
+  const colLetters = match[1];
+  const rowDigits = match[2];
+  if (colLetters === undefined || rowDigits === undefined) {
+    throw new Error(`Invalid cell address: ${cell}`);
+  }
+
+  return { col: letterToCol(colLetters.toUpperCase()), row: parseInt(rowDigits, 10) };
 }
 
 /** Build cell address from 0-indexed col and 1-indexed row */
@@ -123,7 +130,7 @@ export function cellAtOffset(rangeStart: string, rowOffset: number, colOffset: n
 // Guarded API calls
 // ============================================================================
 
-function isOfficeItemNotFound(error: unknown): boolean {
+function isOfficeItemNotFound(error: DynamicValue): boolean {
   if (typeof error !== "object" || error === null) return false;
 
   if ("code" in error && typeof error.code === "string") {
@@ -157,7 +164,7 @@ export async function getDirectPrecedentsSafe(
     // a comma-separated list of address blocks.
     return precedents.addresses
       .map((s) => s.split(",").map((x) => x.trim()).filter(Boolean));
-  } catch (error: unknown) {
+  } catch (error) {
     if (isOfficeItemNotFound(error)) {
       return [];
     }
@@ -183,7 +190,7 @@ export async function getDirectDependentsSafe(
     await context.sync();
     return dependents.addresses
       .map((s) => s.split(",").map((x) => x.trim()).filter(Boolean));
-  } catch (error: unknown) {
+  } catch (error) {
     if (isOfficeItemNotFound(error)) {
       return [];
     }
@@ -192,7 +199,7 @@ export async function getDirectDependentsSafe(
 }
 
 /** Pad a 2D array so all rows have the same length */
-export function padValues(values: unknown[][]): { padded: unknown[][]; rows: number; cols: number } {
+export function padValues(values: DynamicValue[][]): { padded: DynamicValue[][]; rows: number; cols: number } {
   const rows = values.length;
   const cols = Math.max(...values.map((r) => r.length));
   const padded = values.map((row) => {

@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { t } from "../language/index.js";
 
 import type { StatusContextWarningSeverity } from "./status-context.js";
+import { getThinkingLevelHint, getThinkingLevelLabel } from "./thinking-display.js";
 
 export type StatusCommandName = "compact" | "new";
 
@@ -34,33 +35,42 @@ interface ContextPopoverOptions {
   onRunCommand: (command: StatusCommandName) => void;
 }
 
-function getThinkingLevelLabels(): Record<ThinkingLevel, string> {
-  return {
-    off: t("status.thinking.off"),
-    minimal: t("status.thinking.min"),
-    low: t("status.thinking.low"),
-    medium: t("status.thinking.medium"),
-    high: t("status.thinking.high"),
-    xhigh: t("status.thinking.max"),
-  };
-}
-
-function getThinkingLevelHints(): Record<ThinkingLevel, string> {
-  return {
-    off: t("status.thinking.offHint"),
-    minimal: t("status.thinking.minimalHint"),
-    low: t("status.thinking.lowHint"),
-    medium: t("status.thinking.mediumHint"),
-    high: t("status.thinking.highHint"),
-    xhigh: t("status.thinking.xhighHint"),
-  };
-}
-
 let activePopover: ActivePopoverState | null = null;
 
 function clamp(value: number, min: number, max: number): number {
   if (max < min) return min;
   return Math.min(Math.max(value, min), max);
+}
+
+interface StatusPopoverLayoutInput {
+  anchor: Pick<DOMRect, "bottom" | "right" | "top">;
+  viewportWidth: number;
+  viewportHeight: number;
+  popoverWidth: number;
+  popoverHeight: number;
+}
+
+export interface StatusPopoverLayout {
+  left: number;
+  top: number;
+  maxHeight: number;
+}
+
+export function resolveStatusPopoverLayout(input: StatusPopoverLayoutInput): StatusPopoverLayout {
+  const inset = 8;
+  const maxHeight = Math.max(0, input.viewportHeight - inset * 2);
+  const boundedHeight = Math.min(input.popoverHeight, maxHeight);
+  const maxLeft = Math.max(inset, input.viewportWidth - input.popoverWidth - inset);
+  const left = clamp(input.anchor.right - input.popoverWidth, inset, maxLeft);
+
+  const preferredTop = input.anchor.top - boundedHeight - inset;
+  const fallbackTop = input.anchor.bottom + inset;
+  const maxTop = Math.max(inset, input.viewportHeight - boundedHeight - inset);
+  const top = preferredTop >= inset
+    ? preferredTop
+    : clamp(fallbackTop, inset, maxTop);
+
+  return { left, top, maxHeight };
 }
 
 function normalizeDescription(text: string): string {
@@ -84,22 +94,19 @@ function positionPopover(popover: HTMLDivElement, anchor: Element): void {
   popover.style.left = "0px";
   popover.style.top = "0px";
   popover.style.visibility = "hidden";
+  popover.style.maxHeight = `${Math.max(0, viewportHeight - 16)}px`;
 
-  const popoverWidth = popover.offsetWidth;
-  const popoverHeight = popover.offsetHeight;
+  const layout = resolveStatusPopoverLayout({
+    anchor: anchorRect,
+    viewportWidth,
+    viewportHeight,
+    popoverWidth: popover.offsetWidth,
+    popoverHeight: popover.offsetHeight,
+  });
 
-  const maxLeft = Math.max(8, viewportWidth - popoverWidth - 8);
-  const left = clamp(anchorRect.right - popoverWidth, 8, maxLeft);
-
-  const preferredTop = anchorRect.top - popoverHeight - 8;
-  const fallbackTop = anchorRect.bottom + 8;
-  const maxTop = Math.max(8, viewportHeight - popoverHeight - 8);
-  const top = preferredTop >= 8
-    ? preferredTop
-    : clamp(fallbackTop, 8, maxTop);
-
-  popover.style.left = `${left}px`;
-  popover.style.top = `${top}px`;
+  popover.style.left = `${layout.left}px`;
+  popover.style.top = `${layout.top}px`;
+  popover.style.maxHeight = `${layout.maxHeight}px`;
   popover.style.visibility = "visible";
 }
 
@@ -208,11 +215,11 @@ export function toggleThinkingPopover(opts: ThinkingPopoverOptions): void {
 
     const label = document.createElement("span");
     label.className = "pi-status-popover__item-label";
-    label.textContent = getThinkingLevelLabels()[level];
+    label.textContent = getThinkingLevelLabel(level);
 
     const hint = document.createElement("span");
     hint.className = "pi-status-popover__item-hint";
-    hint.textContent = getThinkingLevelHints()[level];
+    hint.textContent = getThinkingLevelHint(level);
 
     body.append(label, hint);
 

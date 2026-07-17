@@ -13,7 +13,7 @@
 
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { html, LitElement } from "lit";
-import { icon } from "@mariozechner/mini-lit";
+import { icon } from "./icons.js";
 import { customElement, property, state, query } from "lit/decorators.js";
 import { FileText, X } from "lucide";
 
@@ -26,6 +26,11 @@ import {
   type PastedImage,
 } from "./pasted-images.js";
 import { showToast } from "./toast.js";
+import {
+  getSendText,
+  resolveInputAutoGrowHeight,
+  shouldSendOnEnter,
+} from "./pi-input-behavior.js";
 
 const PLACEHOLDER_HINT_KEYS = [
   "input.placeholder.ask",
@@ -33,6 +38,14 @@ const PLACEHOLDER_HINT_KEYS = [
   "input.placeholder.edit",
   "input.placeholder.summarize",
 ];
+
+function getPlaceholderHintKey(index: number): string {
+  return (
+    PLACEHOLDER_HINT_KEYS[index] ??
+    PLACEHOLDER_HINT_KEYS[0] ??
+    "input.placeholder.ask"
+  );
+}
 
 @customElement("pi-input")
 export class PiInput extends LitElement {
@@ -45,9 +58,11 @@ export class PiInput extends LitElement {
   @state() private _isProcessingPaste = false;
   @query("textarea") private _textarea!: HTMLTextAreaElement;
 
-  private _placeholderTimer?: ReturnType<typeof setInterval>;
+  private _placeholderTimer: ReturnType<typeof setInterval> | undefined;
 
-  get value(): string { return this._value; }
+  get value(): string {
+    return this._value;
+  }
   set value(v: string) {
     this._value = v;
     if (this._textarea) {
@@ -56,7 +71,9 @@ export class PiInput extends LitElement {
     }
   }
 
-  getTextarea(): HTMLTextAreaElement { return this._textarea; }
+  getTextarea(): HTMLTextAreaElement {
+    return this._textarea;
+  }
 
   clear(): void {
     this._value = "";
@@ -67,21 +84,43 @@ export class PiInput extends LitElement {
     }
   }
 
-  focus(): void { this._textarea?.focus(); }
+  override focus(): void {
+    this._textarea?.focus();
+  }
 
-  protected override createRenderRoot() { return this; }
+  protected override createRenderRoot() {
+    return this;
+  }
+
+  private _readTextareaValue(): string {
+    return this._textarea?.value ?? this._value;
+  }
+
+  private _syncValueFromTextarea(): string {
+    const nextValue = this._readTextareaValue();
+    if (nextValue !== this._value) {
+      this._value = nextValue;
+    }
+    return nextValue;
+  }
 
   private _onInput = (e: Event) => {
-    this._value = (e.target as HTMLTextAreaElement).value;
+    if (e.target instanceof HTMLTextAreaElement) {
+      this._value = e.target.value;
+    } else {
+      this._syncValueFromTextarea();
+    }
     this._autoGrow();
     this.dispatchEvent(new Event("input", { bubbles: true }));
   };
 
   private _onKeydown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
+      const value = this._syncValueFromTextarea();
       if (this.isStreaming) return;
-      if (!this._value.trim() && this._pastedImages.length === 0) return;
-      if (this._value.startsWith("/")) return;
+      if (getSendText(value) === null && this._pastedImages.length === 0)
+        return;
+      if (value.startsWith("/")) return;
       e.preventDefault();
       this._send();
       return;
@@ -97,7 +136,10 @@ export class PiInput extends LitElement {
   private _onPaste = (event: ClipboardEvent) => {
     const items = Array.from(event.clipboardData?.items ?? []);
     const imageFiles = items
-      .filter((item) => item.kind === "file" && item.type.toLowerCase().startsWith("image/"))
+      .filter(
+        (item) =>
+          item.kind === "file" && item.type.toLowerCase().startsWith("image/"),
+      )
       .map((item) => item.getAsFile())
       .filter((file): file is File => file !== null);
 
@@ -110,12 +152,20 @@ export class PiInput extends LitElement {
     }
 
     this._isProcessingPaste = true;
-    void Promise.all(imageFiles.map((file, index) => readPastedImage(file, this._pastedImages.length + index)))
+    void Promise.all(
+      imageFiles.map((file, index) =>
+        readPastedImage(file, this._pastedImages.length + index),
+      ),
+    )
       .then((images) => {
         this._pastedImages = [...this._pastedImages, ...images];
       })
       .catch((error: unknown) => {
-        showToast(error instanceof Error ? error.message : t("input.images.pasteFailed"));
+        showToast(
+          error instanceof Error
+            ? error.message
+            : t("input.images.pasteFailed"),
+        );
       })
       .finally(() => {
         this._isProcessingPaste = false;
@@ -150,10 +200,12 @@ export class PiInput extends LitElement {
   private _dispatchFiles(files: File[]): void {
     if (files.length === 0) return;
 
-    this.dispatchEvent(new CustomEvent<{ files: File[] }>("pi-files-drop", {
-      bubbles: true,
-      detail: { files },
-    }));
+    this.dispatchEvent(
+      new CustomEvent<{ files: File[] }>("pi-files-drop", {
+        bubbles: true,
+        detail: { files },
+      }),
+    );
   }
 
   private _onDrop = (event: DragEvent) => {
@@ -167,26 +219,60 @@ export class PiInput extends LitElement {
     this._dispatchFiles(files);
   };
 
-  private _openFilesWorkspace = () => {
+  private _openFilesWorkspace = (event?: Event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
     this.dispatchEvent(new CustomEvent("pi-open-files", { bubbles: true }));
   };
 
+  private _onActionMouseDown = (event: MouseEvent) => {
+    event.preventDefault();
+  };
+
+  private _onSendClick = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    this._send();
+  };
+
+  private _onAbortClick = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    this.dispatchEvent(new CustomEvent("pi-abort", { bubbles: true }));
+  };
+
   private _send() {
-    const text = this._value.trim();
-    if ((!text && this._pastedImages.length === 0) || this._isProcessingPaste) return;
+    const text = getSendText(this._syncValueFromTextarea());
+    if (text === null && this._pastedImages.length === 0) return;
+    if (this._isProcessingPaste) return;
 
     const images: ImageContent[] = toImageContent(this._pastedImages);
-    this.dispatchEvent(new CustomEvent("pi-send", {
-      bubbles: true,
-      detail: { text, images },
-    }));
+    this.dispatchEvent(
+      new CustomEvent("pi-send", {
+        bubbles: true,
+        detail: { text: text ?? "", images },
+      }),
+    );
   }
 
   private _autoGrow() {
     const ta = this._textarea;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = Math.min(ta.scrollHeight, window.innerHeight * 0.4) + "px";
+    const height = resolveInputAutoGrowHeight({
+      scrollHeight: ta.scrollHeight,
+      viewportHeight: window.innerHeight,
+      cssMaxHeight: this._getTextareaCssMaxHeight(ta),
+    });
+    ta.style.height = `${height}px`;
+  }
+
+  private _getTextareaCssMaxHeight(ta: HTMLTextAreaElement): number {
+    if (typeof window.getComputedStyle !== "function") return Number.NaN;
+    const computed = window.getComputedStyle(ta).maxHeight;
+    if (!computed || computed === "none") return Number.NaN;
+    const parsed = Number.parseFloat(computed);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
   }
 
   override connectedCallback() {
@@ -194,19 +280,26 @@ export class PiInput extends LitElement {
     // Rotate placeholder hints every 8s (mostly default, occasionally slash hint)
     this._placeholderTimer = setInterval(() => {
       if (this.isStreaming || this._value) return; // don't rotate while typing or streaming
-      this._placeholderIndex = (this._placeholderIndex + 1) % PLACEHOLDER_HINT_KEYS.length;
+      this._placeholderIndex =
+        (this._placeholderIndex + 1) % PLACEHOLDER_HINT_KEYS.length;
     }, 8000);
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
-    if (this._placeholderTimer) { clearInterval(this._placeholderTimer); this._placeholderTimer = undefined; }
+    if (this._placeholderTimer) {
+      clearInterval(this._placeholderTimer);
+      this._placeholderTimer = undefined;
+    }
   }
 
-  override firstUpdated() { this._textarea?.focus(); }
+  override firstUpdated() {
+    this._textarea?.focus();
+  }
 
   override render() {
-    const hasContent = this._value.trim().length > 0 || this._pastedImages.length > 0;
+    const hasContent =
+      this._value.trim().length > 0 || this._pastedImages.length > 0;
 
     return html`
       <div
@@ -219,64 +312,104 @@ export class PiInput extends LitElement {
         <button
           class="pi-input-btn pi-input-btn--attach"
           type="button"
+          @mousedown=${this._onActionMouseDown}
           @click=${this._openFilesWorkspace}
           aria-label=${t("input.attach.aria")}
           title=${t("input.attach.aria")}
         >
           ${icon(FileText, "sm")}
         </button>
-        ${this._pastedImages.length > 0
-          ? html`
-            <div class="pi-input-images" aria-label=${t("input.images.aria")}>
-              ${this._pastedImages.map((image) => html`
-                <div class="pi-input-image">
-                  <img
-                    src=${`data:${image.mimeType};base64,${image.data}`}
-                    alt=${image.fileName}
-                    title=${image.fileName}
-                  />
-                  <button
-                    type="button"
-                    class="pi-input-image__remove"
-                    @click=${() => this._removePastedImage(image.id)}
-                    aria-label=${t("input.images.removeAria", { fileName: image.fileName })}
-                    title=${t("input.images.remove")}
-                  >
-                    ${icon(X, "xs")}
-                  </button>
+        ${
+          this._pastedImages.length > 0
+            ? html`
+                <div
+                  class="pi-input-images"
+                  aria-label=${t("input.images.aria")}
+                >
+                  ${this._pastedImages.map(
+                    (image) => html`
+                      <div class="pi-input-image">
+                        <img
+                          src=${`data:${image.mimeType};base64,${image.data}`}
+                          alt=${image.fileName}
+                          title=${image.fileName}
+                        />
+                        <button
+                          type="button"
+                          class="pi-input-image__remove"
+                          @click=${() => this._removePastedImage(image.id)}
+                          aria-label=${t("input.images.removeAria", { fileName: image.fileName })}
+                          title=${t("input.images.remove")}
+                        >
+                          ${icon(X, "xs")}
+                        </button>
+                      </div>
+                    `,
+                  )}
                 </div>
-              `)}
-            </div>
-          `
-          : null}
+              `
+            : null
+        }
         <textarea
           class="pi-input-textarea"
           .value=${this._value}
-          placeholder=${this.isStreaming ? t("input.streaming.placeholder") : t(PLACEHOLDER_HINT_KEYS[this._placeholderIndex])}
+          placeholder=${this.isStreaming ? t("input.streaming.placeholder") : t(getPlaceholderHintKey(this._placeholderIndex))}
           rows="1"
           aria-label=${t("input.chat.aria")}
           autocomplete="off"
           @input=${this._onInput}
+          @change=${this._onInput}
+          @keyup=${this._onInput}
           @keydown=${this._onKeydown}
           @paste=${this._onPaste}
         ></textarea>
-        ${this._isDragOver
-          ? html`<div class="pi-input-drop-hint">${t("input.drop.hint")}</div>`
-          : null}
-        ${this.isStreaming
-          ? html`
-            <button class="pi-input-btn pi-input-btn--abort" @click=${() => this.dispatchEvent(new CustomEvent("pi-abort", { bubbles: true }))} aria-label=${t("input.stop.aria")}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-            </button>`
-          : html`
-            <button
-              class="pi-input-btn pi-input-btn--send ${hasContent ? "" : "is-disabled"}"
-              @click=${() => this._send()}
-              aria-label=${t("input.send.aria")}
-              ?disabled=${!hasContent || this._isProcessingPaste}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-            </button>`
+        ${
+          this._isDragOver
+            ? html`<div class="pi-input-drop-hint">
+                ${t("input.drop.hint")}
+              </div>`
+            : null
+        }
+        ${
+          this.isStreaming
+            ? html` <button
+                class="pi-input-btn pi-input-btn--abort"
+                type="button"
+                @mousedown=${this._onActionMouseDown}
+                @click=${this._onAbortClick}
+                aria-label=${t("input.stop.aria")}
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <rect x="4" y="4" width="16" height="16" rx="2" />
+                </svg>
+              </button>`
+            : html` <button
+                class="pi-input-btn pi-input-btn--send ${hasContent ? "" : "is-disabled"}"
+                type="button"
+                @mousedown=${this._onActionMouseDown}
+                @click=${this._onSendClick}
+                aria-label=${t("input.send.aria")}
+                aria-disabled=${hasContent && !this._isProcessingPaste ? "false" : "true"}
+              >
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M5 12h14" />
+                  <path d="m12 5 7 7-7 7" />
+                </svg>
+              </button>`
         }
       </div>
     `;

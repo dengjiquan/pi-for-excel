@@ -1,6 +1,9 @@
+function isConditionalFormatHandlersBasicPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Basic conditional-format rule handlers shared by recovery capture/apply flow. */
 
-import { isRecord } from "../../utils/type-guards.js";
 import {
   isRecoveryConditionalCellValueOperator,
   isRecoveryConditionalPresetCriterion,
@@ -47,13 +50,39 @@ function captureRuleFormatting(format: Excel.ConditionalRangeFormat): {
   italic?: boolean;
   underline?: boolean;
 } {
-  return {
-    fillColor: normalizeOptionalString(format.fill.color),
-    fontColor: normalizeOptionalString(format.font.color),
-    bold: normalizeOptionalBoolean(format.font.bold),
-    italic: normalizeOptionalBoolean(format.font.italic),
-    underline: normalizeUnderline(format.font.underline),
-  };
+  const formatting: {
+    fillColor?: string;
+    fontColor?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+  } = {};
+
+  const fillColor = normalizeOptionalString(format.fill.color);
+  if (fillColor !== undefined) formatting.fillColor = fillColor;
+  const fontColor = normalizeOptionalString(format.font.color);
+  if (fontColor !== undefined) formatting.fontColor = fontColor;
+  const bold = normalizeOptionalBoolean(format.font.bold);
+  if (bold !== undefined) formatting.bold = bold;
+  const italic = normalizeOptionalBoolean(format.font.italic);
+  if (italic !== undefined) formatting.italic = italic;
+  const underline = normalizeUnderline(format.font.underline);
+  if (underline !== undefined) formatting.underline = underline;
+
+  return formatting;
+}
+
+export function attachConditionalFormatCaptureContext(
+  rule: RecoveryConditionalFormatRule,
+  captureContext: ConditionalFormatRuleCaptureContext,
+): RecoveryConditionalFormatRule {
+  if (captureContext.stopIfTrue !== undefined) {
+    rule.stopIfTrue = captureContext.stopIfTrue;
+  }
+  if (captureContext.appliesToAddress !== undefined) {
+    rule.appliesToAddress = captureContext.appliesToAddress;
+  }
+  return rule;
 }
 
 function applyRuleFormatting(format: Excel.ConditionalRangeFormat, rule: RecoveryConditionalFormatRule): void {
@@ -101,13 +130,11 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
 
       return {
         supported: true,
-        rule: {
+        rule: attachConditionalFormatCaptureContext({
           type: "custom",
-          stopIfTrue: captureContext.stopIfTrue,
           formula,
-          appliesToAddress: captureContext.appliesToAddress,
           ...captureRuleFormatting(conditionalFormat.custom.format),
-        },
+        }, captureContext),
       };
     },
     apply(range, targetAddress, rule) {
@@ -134,7 +161,7 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
     },
     capture(conditionalFormat, captureContext) {
       const ruleData = conditionalFormat.cellValue.rule;
-      const operator = isRecord(ruleData) ? ruleData.operator : undefined;
+      const operator = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.operator : undefined;
 
       if (!isRecoveryConditionalCellValueOperator(operator)) {
         return {
@@ -143,8 +170,8 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
         };
       }
 
-      const formula1 = isRecord(ruleData) ? ruleData.formula1 : undefined;
-      const formula2 = isRecord(ruleData) ? ruleData.formula2 : undefined;
+      const formula1 = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.formula1 : undefined;
+      const formula2 = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.formula2 : undefined;
 
       if (typeof formula1 !== "string") {
         return {
@@ -155,15 +182,13 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
 
       return {
         supported: true,
-        rule: {
+        rule: attachConditionalFormatCaptureContext({
           type: "cell_value",
-          stopIfTrue: captureContext.stopIfTrue,
           operator,
           formula1,
-          formula2: typeof formula2 === "string" ? formula2 : undefined,
-          appliesToAddress: captureContext.appliesToAddress,
+          ...(typeof formula2 === "string" ? { formula2 } : {}),
           ...captureRuleFormatting(conditionalFormat.cellValue.format),
-        },
+        }, captureContext),
       };
     },
     apply(range, targetAddress, rule) {
@@ -199,7 +224,7 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
     },
     capture(conditionalFormat, captureContext) {
       const ruleData = conditionalFormat.textComparison.rule;
-      const operator = isRecord(ruleData) ? ruleData.operator : undefined;
+      const operator = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.operator : undefined;
 
       if (!isRecoveryConditionalTextOperator(operator)) {
         return {
@@ -208,7 +233,7 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
         };
       }
 
-      const text = isRecord(ruleData) ? ruleData.text : undefined;
+      const text = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.text : undefined;
       if (typeof text !== "string") {
         return {
           supported: false,
@@ -218,14 +243,12 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
 
       return {
         supported: true,
-        rule: {
+        rule: attachConditionalFormatCaptureContext({
           type: "text_comparison",
-          stopIfTrue: captureContext.stopIfTrue,
           textOperator: operator,
           text,
-          appliesToAddress: captureContext.appliesToAddress,
           ...captureRuleFormatting(conditionalFormat.textComparison.format),
-        },
+        }, captureContext),
       };
     },
     apply(range, targetAddress, rule) {
@@ -257,8 +280,8 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
     },
     capture(conditionalFormat, captureContext) {
       const ruleData = conditionalFormat.topBottom.rule;
-      const topBottomType = isRecord(ruleData) ? ruleData.type : undefined;
-      const rank = isRecord(ruleData) ? ruleData.rank : undefined;
+      const topBottomType = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.type : undefined;
+      const rank = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.rank : undefined;
 
       if (!isRecoveryConditionalTopBottomCriterionType(topBottomType)) {
         return {
@@ -276,14 +299,12 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
 
       return {
         supported: true,
-        rule: {
+        rule: attachConditionalFormatCaptureContext({
           type: "top_bottom",
-          stopIfTrue: captureContext.stopIfTrue,
           topBottomType,
           rank,
-          appliesToAddress: captureContext.appliesToAddress,
           ...captureRuleFormatting(conditionalFormat.topBottom.format),
-        },
+        }, captureContext),
       };
     },
     apply(range, targetAddress, rule) {
@@ -315,7 +336,7 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
     },
     capture(conditionalFormat, captureContext) {
       const ruleData = conditionalFormat.preset.rule;
-      const criterion = isRecord(ruleData) ? ruleData.criterion : undefined;
+      const criterion = isConditionalFormatHandlersBasicPayloadShape(ruleData) ? ruleData.criterion : undefined;
 
       if (!isRecoveryConditionalPresetCriterion(criterion)) {
         return {
@@ -326,13 +347,11 @@ export const BASIC_CONDITIONAL_FORMAT_RULE_HANDLERS = {
 
       return {
         supported: true,
-        rule: {
+        rule: attachConditionalFormatCaptureContext({
           type: "preset_criteria",
-          stopIfTrue: captureContext.stopIfTrue,
           presetCriterion: criterion,
-          appliesToAddress: captureContext.appliesToAddress,
           ...captureRuleFormatting(conditionalFormat.preset.format),
-        },
+        }, captureContext),
       };
     },
     apply(range, targetAddress, rule) {

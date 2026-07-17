@@ -156,7 +156,7 @@ function buildConnectionErrorDetails(args: {
     connectionTitle: args.snapshot.title,
     status: args.status ?? args.snapshot.status,
     setupHint: args.snapshot.setupHint,
-    reason: args.reason,
+    ...(args.reason !== undefined ? { reason: args.reason } : {}),
   };
 }
 
@@ -170,6 +170,10 @@ function renderHttpAuthValueTemplate(args: {
 
   while (match) {
     const placeholderRaw = match[1];
+    if (placeholderRaw === undefined) {
+      throw new Error("httpAuth.valueTemplate contains an invalid placeholder.");
+    }
+
     const placeholder = placeholderRaw.trim();
     if (placeholder.length === 0) {
       throw new Error("httpAuth.valueTemplate contains an empty placeholder.");
@@ -265,14 +269,14 @@ export function buildRuntimeManagerActivationBridge(
   };
 
   const storageGet = (key: string) => getExtensionStorageValue(settings, entry.id, key);
-  const storageSet = (key: string, value: unknown) => setExtensionStorageValue(settings, entry.id, key, value);
+  const storageSet = (key: string, value: DynamicValue) => setExtensionStorageValue(settings, entry.id, key, value);
   const storageDelete = (key: string) => deleteExtensionStorageValue(settings, entry.id, key);
   const storageKeys = () => listExtensionStorageKeys(settings, entry.id);
 
   const injectAgentContext = (content: string): void => {
     const agent = getRequiredActiveAgent();
     agent.state.messages.push(buildExtensionMessage("agent.injectContext content", content));
-    void Promise.resolve(afterInjectAgentContext?.()).catch((error: unknown) => {
+    void Promise.resolve(afterInjectAgentContext?.()).catch((error: DynamicValue) => {
       console.warn("[pi] Failed to sync extension-injected context:", error);
     });
   };
@@ -319,8 +323,8 @@ export function buildRuntimeManagerActivationBridge(
       .map((snapshot) => ({
         connectionId: snapshot.connectionId,
         status: snapshot.status,
-        lastValidatedAt: snapshot.lastValidatedAt,
-        lastError: snapshot.lastError,
+        ...(snapshot.lastValidatedAt !== undefined ? { lastValidatedAt: snapshot.lastValidatedAt } : {}),
+        ...(snapshot.lastError !== undefined ? { lastError: snapshot.lastError } : {}),
       }));
   };
 
@@ -332,8 +336,8 @@ export function buildRuntimeManagerActivationBridge(
     return {
       connectionId: snapshot.connectionId,
       status: snapshot.status,
-      lastValidatedAt: snapshot.lastValidatedAt,
-      lastError: snapshot.lastError,
+      ...(snapshot.lastValidatedAt !== undefined ? { lastValidatedAt: snapshot.lastValidatedAt } : {}),
+      ...(snapshot.lastError !== undefined ? { lastError: snapshot.lastError } : {}),
     };
   };
 
@@ -416,7 +420,7 @@ export function buildRuntimeManagerActivationBridge(
       throw createConnectionFetchError(buildConnectionErrorDetails({
         snapshot,
         errorCode: mapStatusToConnectionErrorCode(snapshot.status),
-        reason: snapshot.lastError,
+        ...(snapshot.lastError !== undefined ? { reason: snapshot.lastError } : {}),
       }));
     }
 
@@ -470,7 +474,7 @@ export function buildRuntimeManagerActivationBridge(
         definition,
         secrets,
       });
-    } catch (error: unknown) {
+    } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw createConnectionFetchError(buildConnectionErrorDetails({
         snapshot,
@@ -485,10 +489,10 @@ export function buildRuntimeManagerActivationBridge(
     };
 
     const requestOptions: HttpRequestOptions = {
-      method: options?.method,
+      ...(options?.method !== undefined ? { method: options.method } : {}),
       headers: mergedHeaders,
-      body: options?.body,
-      timeoutMs: options?.timeoutMs,
+      ...(options?.body !== undefined ? { body: options.body } : {}),
+      ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       connection: normalizedConnectionId,
     };
 

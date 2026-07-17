@@ -33,7 +33,7 @@ export type GoogleOAuthFlowConfig = {
   ) => Promise<string>;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isGoogleBrowserOauthCorePayloadShape(value: DynamicValue): value is DynamicObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -49,41 +49,52 @@ function createState(): string {
   return out;
 }
 
+function createParsedAuthorizationInput(
+  code: string | null | undefined,
+  state: string | null | undefined,
+): ParsedAuthorizationInput {
+  const parsed: ParsedAuthorizationInput = {};
+  if (code !== null && code !== undefined) {
+    parsed.code = code;
+  }
+  if (state !== null && state !== undefined) {
+    parsed.state = state;
+  }
+  return parsed;
+}
+
 function parseAuthorizationInput(input: string): ParsedAuthorizationInput {
   const value = input.trim();
   if (!value) return {};
 
   try {
     const url = new URL(value);
-    return {
-      code: url.searchParams.get("code") ?? undefined,
-      state: url.searchParams.get("state") ?? undefined,
-    };
+    return createParsedAuthorizationInput(
+      url.searchParams.get("code"),
+      url.searchParams.get("state"),
+    );
   } catch {
     // not a URL
   }
 
   if (value.includes("#")) {
-    const [code, state] = value.split("#", 2);
-    return { code, state };
+    const parts = value.split("#", 2);
+    return createParsedAuthorizationInput(parts[0], parts[1]);
   }
 
   if (value.includes("code=")) {
     const params = new URLSearchParams(value.startsWith("?") ? value.slice(1) : value);
-    return {
-      code: params.get("code") ?? undefined,
-      state: params.get("state") ?? undefined,
-    };
+    return createParsedAuthorizationInput(params.get("code"), params.get("state"));
   }
 
   return { code: value };
 }
 
 function parseTokenPayload(
-  payload: unknown,
+  payload: DynamicValue,
   fallbackRefreshToken?: string,
 ): GoogleTokenPayload | null {
-  if (!isRecord(payload)) {
+  if (!isGoogleBrowserOauthCorePayloadShape(payload)) {
     return null;
   }
 
@@ -187,8 +198,8 @@ async function getUserEmail(accessToken: string): Promise<string | undefined> {
       return undefined;
     }
 
-    const payload: unknown = await response.json();
-    if (!isRecord(payload)) {
+    const payload: DynamicValue = await response.json();
+    if (!isGoogleBrowserOauthCorePayloadShape(payload)) {
       return undefined;
     }
 
@@ -226,8 +237,8 @@ async function loginGoogleOAuth(
   callbacks.onAuth({
     url: authUrl.toString(),
     instructions:
-      "After sign-in, your browser will show a page that says \"can't be reached\" \u2014 that's expected! " +
-      "Copy the full URL from the browser address bar and paste it back in AI for Excel.",
+      "After sign-in, Pi for Excel will try to capture the localhost callback automatically if the local proxy is running. " +
+      "If it does not continue, copy the full callback URL from the browser address bar and paste it back in Pi for Excel.",
   });
 
   if (callbacks.signal?.aborted) {
@@ -257,13 +268,16 @@ async function loginGoogleOAuth(
 
   const projectId = await config.discoverProject(tokens.accessToken, callbacks);
 
-  return {
+  const credentials: OAuthCredentials = {
     refresh: tokens.refreshToken,
     access: tokens.accessToken,
     expires: Date.now() + tokens.expiresInSeconds * 1000 - 5 * 60 * 1000,
     projectId,
-    email,
   };
+  if (email !== undefined) {
+    credentials.email = email;
+  }
+  return credentials;
 }
 
 async function refreshGoogleOAuth(
@@ -282,13 +296,16 @@ async function refreshGoogleOAuth(
 
   const tokens = await refreshAccessToken(config, refreshToken);
 
-  return {
+  const refreshed: OAuthCredentials = {
     refresh: tokens.refreshToken,
     access: tokens.accessToken,
     expires: Date.now() + tokens.expiresInSeconds * 1000 - 5 * 60 * 1000,
     projectId,
-    email: credentials.email,
   };
+  if (credentials.email !== undefined) {
+    refreshed.email = credentials.email;
+  }
+  return refreshed;
 }
 
 export function createGoogleBrowserOAuthProvider(

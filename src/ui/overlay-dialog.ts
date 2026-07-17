@@ -15,6 +15,23 @@ const overlayClosers = new WeakMap<HTMLElement, () => void>();
 
 export const NESTED_OVERLAY_Z_INDEX = 300;
 
+/**
+ * Register a close handler for an overlay element that is not built through
+ * `createOverlayDialog` (e.g. the settings shell), so `closeOverlayById`
+ * routes through its cleanup path instead of removing the node directly.
+ */
+export function registerOverlayCloser(
+  overlay: HTMLElement,
+  close: () => void,
+): void {
+  overlayClosers.set(overlay, close);
+}
+
+/** Remove a previously registered overlay close handler. */
+export function unregisterOverlayCloser(overlay: HTMLElement): void {
+  overlayClosers.delete(overlay);
+}
+
 export function closeOverlayById(overlayId: string): boolean {
   const existing = document.getElementById(overlayId);
   if (!(existing instanceof HTMLElement)) {
@@ -102,13 +119,17 @@ export interface OverlayButtonOptions {
   type?: "button" | "submit" | "reset";
 }
 
-export function createOverlayButton(options: OverlayButtonOptions): HTMLButtonElement {
+export function createOverlayButton(
+  options: OverlayButtonOptions,
+): HTMLButtonElement {
   const button = document.createElement("button");
 
   button.type = options.type ?? "button";
   button.textContent = options.text;
   const hasVariant = options.className?.includes("pi-overlay-btn--") ?? false;
-  const base = hasVariant ? "pi-overlay-btn" : "pi-overlay-btn pi-overlay-btn--ghost";
+  const base = hasVariant
+    ? "pi-overlay-btn"
+    : "pi-overlay-btn pi-overlay-btn--ghost";
   button.className = mergeClassName(base, options.className);
 
   return button;
@@ -120,7 +141,9 @@ export interface OverlayInputOptions {
   className?: string;
 }
 
-export function createOverlayInput(options: OverlayInputOptions): HTMLInputElement {
+export function createOverlayInput(
+  options: OverlayInputOptions,
+): HTMLInputElement {
   const input = document.createElement("input");
 
   input.type = options.type ?? "text";
@@ -139,14 +162,19 @@ export function createOverlaySectionTitle(text: string): HTMLHeadingElement {
 
 export type OverlayBadgeTone = "ok" | "warn" | "muted";
 
-export function createOverlayBadge(text: string, tone: OverlayBadgeTone): HTMLSpanElement {
+export function createOverlayBadge(
+  text: string,
+  tone: OverlayBadgeTone,
+): HTMLSpanElement {
   const badge = document.createElement("span");
   badge.className = `pi-overlay-badge pi-overlay-badge--${tone}`;
   badge.textContent = text;
   return badge;
 }
 
-export function createOverlayHeader(options: OverlayHeaderOptions): OverlayHeaderElements {
+export function createOverlayHeader(
+  options: OverlayHeaderOptions,
+): OverlayHeaderElements {
   const header = document.createElement("div");
   header.className = "pi-overlay-header";
 
@@ -162,14 +190,17 @@ export function createOverlayHeader(options: OverlayHeaderOptions): OverlayHeade
   let subtitle: HTMLParagraphElement | null = null;
   if (options.subtitle !== undefined) {
     subtitle = document.createElement("p");
-    subtitle.className = mergeClassName("pi-overlay-subtitle", options.subtitleClassName);
+    subtitle.className = mergeClassName(
+      "pi-overlay-subtitle",
+      options.subtitleClassName,
+    );
     subtitle.textContent = options.subtitle;
     titleWrap.appendChild(subtitle);
   }
 
   const closeButton = createOverlayCloseButton({
     onClose: options.onClose,
-    label: options.closeLabel,
+    ...(options.closeLabel !== undefined ? { label: options.closeLabel } : {}),
   });
 
   header.append(titleWrap, closeButton);
@@ -183,7 +214,9 @@ export function createOverlayHeader(options: OverlayHeaderOptions): OverlayHeade
   };
 }
 
-export function createOverlayDialog(options: OverlayDialogOptions): OverlayDialogController {
+export function createOverlayDialog(
+  options: OverlayDialogOptions,
+): OverlayDialogController {
   const overlay = document.createElement("div");
   overlay.id = options.overlayId;
   overlay.className = "pi-welcome-overlay";
@@ -209,8 +242,13 @@ export function createOverlayDialog(options: OverlayDialogOptions): OverlayDialo
     overlayClosers.delete(overlay);
 
     for (let index = cleanups.length - 1; index >= 0; index -= 1) {
+      const cleanup = cleanups[index];
+      if (!cleanup) {
+        continue;
+      }
+
       try {
-        cleanups[index]();
+        cleanup();
       } catch {
         // ignore cleanup errors
       }
@@ -259,7 +297,9 @@ export function createOverlayDialog(options: OverlayDialogOptions): OverlayDialo
   };
 }
 
-export function createOverlayDialogManager(options: OverlayDialogOptions): OverlayDialogManager {
+export function createOverlayDialogManager(
+  options: OverlayDialogOptions,
+): OverlayDialogManager {
   let current: OverlayDialogController | null = null;
 
   const ensure = (): OverlayDialogController => {

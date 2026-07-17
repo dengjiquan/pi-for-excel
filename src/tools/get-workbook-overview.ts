@@ -50,7 +50,7 @@ export function createGetWorkbookOverviewTool(): AgentTool<typeof schema> {
           content: [{ type: "text", text }],
           details: undefined,
         };
-      } catch (e: unknown) {
+      } catch (e) {
         return {
           content: [{ type: "text", text: `Error getting workbook overview: ${getErrorMessage(e)}` }],
           details: undefined,
@@ -150,7 +150,7 @@ export async function buildOverview(): Promise<string> {
 
       const headers = headerRange.isNullObject
         ? []
-        : headerRange.values[0].filter((v) => v !== null && v !== undefined && v !== "");
+        : (headerRange.values[0] ?? []).filter((v) => v !== null && v !== undefined && v !== "");
 
       lines.push(
         `${sheet.position + 1}. **${sheet.name}**${visibility} — ${dims}`,
@@ -248,7 +248,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
     // ── Headers ──
     const headers = headerRange.isNullObject
       ? []
-      : (headerRange.values[0] as unknown[]).filter(
+      : (headerRange.values[0] ?? []).filter(
           (v) => v !== null && v !== undefined && v !== "",
         );
     if (headers.length > 0) {
@@ -271,7 +271,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
     const sheetQuotedPrefix = `'${sheet.name}'!`.toLowerCase();
     const relevantNames = names.items.filter((n) => {
       if (!n.visible) return false;
-      const rawVal: unknown = n.value;
+      const rawVal: DynamicValue = n.value;
       const val = typeof rawVal === "string" ? rawVal.toLowerCase() : "";
       return val.startsWith(sheetPrefix) || val.startsWith(sheetQuotedPrefix);
     });
@@ -300,7 +300,7 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
     // ── Data preview (first 5 rows as markdown table) ──
     if (!used.isNullObject && used.rowCount > 0 && used.columnCount > 0) {
       const previewRowCount = Math.min(5, used.rowCount);
-      const allValues = used.values as unknown[][];
+      const allValues = used.values as DynamicValue[][];
       const previewRows = allValues.slice(0, previewRowCount);
       const colCount = used.columnCount;
 
@@ -314,7 +314,8 @@ async function buildSheetDetail(sheetName: string): Promise<string> {
       lines.push(headerRow);
       lines.push(separator);
       for (let r = 0; r < previewRows.length; r++) {
-        const cells = previewRows[r].map((v) =>
+        const row = previewRows[r] ?? [];
+        const cells = row.map((v) =>
           v === null || v === undefined || v === "" ? "" : typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v),
         );
         lines.push(`| ${r + 1} | ${cells.join(" | ")} |`);

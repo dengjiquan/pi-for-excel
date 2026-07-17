@@ -77,12 +77,12 @@ async function defaultLoadDisabledSkillNames(): Promise<Set<string>> {
 
   try {
     const [{ getAppStorage }, { loadDisabledSkillNamesFromSettings }] = await Promise.all([
-      import("@earendil-works/pi-web-ui/dist/storage/app-storage.js"),
+      import("../storage/local/app-storage.js"),
       import("../skills/activation-store.js"),
     ]);
 
     return loadDisabledSkillNamesFromSettings(getAppStorage().settings);
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[skills] Failed to load skill activation state for tool:", error);
     return new Set();
   }
@@ -212,8 +212,8 @@ function buildSkillsErrorDetails(args: {
     kind: "skills_error",
     action: args.action,
     message: args.message,
-    requestedName: args.requestedName,
-    availableNames: args.availableNames,
+    ...(args.requestedName !== undefined ? { requestedName: args.requestedName } : {}),
+    ...(args.availableNames !== undefined ? { availableNames: args.availableNames } : {}),
     externalDiscoveryEnabled: args.externalDiscoveryEnabled,
   };
 }
@@ -255,7 +255,7 @@ function buildSkillsReadDetails(args: {
     cacheHit: args.cacheHit,
     refreshed: args.refreshed,
     sessionScoped: args.sessionScoped,
-    readCount: args.readCount,
+    ...(args.readCount !== undefined ? { readCount: args.readCount } : {}),
   };
 }
 
@@ -373,7 +373,7 @@ export function createSkillsTool(
               location: installed.location,
             }),
           };
-        } catch (error: unknown) {
+        } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const message = `Failed to install skill \`${requestedName}\`: ${reason}`;
           return {
@@ -409,7 +409,7 @@ export function createSkillsTool(
               removed,
             }),
           };
-        } catch (error: unknown) {
+        } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const message = `Failed to uninstall skill \`${requestedName}\`: ${reason}`;
           return {
@@ -453,7 +453,7 @@ export function createSkillsTool(
                 cacheHit: true,
                 refreshed: false,
                 sessionScoped,
-                readCount: cached.readCount,
+                ...(cached.readCount !== undefined ? { readCount: cached.readCount } : {}),
               }),
             };
           }
@@ -491,7 +491,7 @@ export function createSkillsTool(
           cacheHit: false,
           refreshed: refresh,
           sessionScoped,
-          readCount: cachedEntry?.readCount,
+          ...(cachedEntry?.readCount !== undefined ? { readCount: cachedEntry.readCount } : {}),
         }),
       };
     },

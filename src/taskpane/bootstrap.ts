@@ -10,7 +10,6 @@
 import { render } from "lit";
 
 import { installFetchInterceptor } from "../auth/cors-proxy.js";
-import { installModelSelectorPatch } from "../compat/model-selector-patch.js";
 import { installProcessEnvShim } from "../compat/process-env-shim.js";
 import {
   resolveSpreadsheetHostForBoot,
@@ -45,7 +44,6 @@ export function bootstrapTaskpane(): void {
   // Global patches
   installProcessEnvShim();
   installFetchInterceptor();
-  installModelSelectorPatch();
 
   // Host bootstrap (Office/WPS/browser fallback for local dev)
   let initialized = false;
@@ -70,7 +68,7 @@ export function bootstrapTaskpane(): void {
 
     const hardTimeoutTimer = setTimeout(() => {
       if (!markInitComplete()) return;
-      loadingRoot.innerHTML = "";
+      loadingRoot.replaceChildren();
       showFatalError(
         errorRoot,
         t("bootstrap.fatalTimeout"),
@@ -84,7 +82,7 @@ export function bootstrapTaskpane(): void {
         clearTimeout(slowInitTimer);
         clearTimeout(hardTimeoutTimer);
       })
-      .catch((error: unknown) => {
+      .catch((error: DynamicValue) => {
         if (!markInitComplete()) {
           console.error("[pi] Init error after timeout:", error);
           return;
@@ -92,7 +90,7 @@ export function bootstrapTaskpane(): void {
 
         clearTimeout(slowInitTimer);
         clearTimeout(hardTimeoutTimer);
-        loadingRoot.innerHTML = "";
+        loadingRoot.replaceChildren();
         showFatalError(errorRoot, t("bootstrap.fatalError", { msg: getErrorMessage(error) }));
         console.error("[pi] Init error:", error);
       });
@@ -118,7 +116,7 @@ export function bootstrapTaskpane(): void {
 
       runInit();
     })
-    .catch((error: unknown) => {
+    .catch((error: DynamicValue) => {
       console.warn("[pi] Host detection failed — initializing without Excel:", error);
       runInit();
     });

@@ -122,7 +122,8 @@ Notes:
 1. In `/login`, click **Login with …**
 2. Complete login in the browser window that opens
 3. Return to Excel and complete any prompt shown
-   - For OpenAI + Google OAuth flows, your browser will land on a page that says **"can't be reached"** — that's normal! Copy the full URL from the browser address bar and paste it when prompted in Pi for Excel
+   - With the local proxy running, ChatGPT, Anthropic, and Google OAuth should continue automatically after the browser redirects to localhost.
+   - If automatic capture is unavailable, your browser may land on a page that says **"can't be reached"** — that's normal! Copy the full URL from the browser address bar and paste it when prompted in Pi for Excel.
    - Some Google workspace tiers may also ask for a Google Cloud project ID during setup
 
 If login fails with a CORS/network error, follow the next section.
@@ -149,7 +150,7 @@ Typical symptoms:
 If you already have Node.js:
 
 ```bash
-npx pi-for-excel-proxy
+npx -y pi-for-excel-proxy@latest
 ```
 
 If you do not have Node.js (or are unsure):
@@ -160,7 +161,7 @@ curl -fsSL https://piforexcel.com/proxy | sh
 
 2. In Pi, open `/settings` → **Proxy**:
    - enable **Proxy**
-   - set URL to the URL printed by the proxy (normally `https://localhost:3003`; if 3003 is busy, it will choose a random free port and print that URL)
+   - set URL to the URL printed by the proxy (normally `https://localhost:3003`; if 3003 is busy for another service, it will choose a random free port and print that URL)
 
 3. Retry OAuth login
 
@@ -180,7 +181,12 @@ curl -k -i -s \
 Notes:
 - Keep the proxy URL on **HTTPS** (`https://...`), not HTTP.
 - API-key providers generally work without proxy.
-- If port `3003` is busy, `npx pi-for-excel-proxy` automatically chooses a random free port. Copy the printed `https://localhost:<port>` URL into `/settings` → **Proxy**.
+- The local proxy also starts loopback-only callback listeners for browser OAuth flows so ChatGPT (`http://localhost:1455/auth/callback`), Anthropic (`http://localhost:53692/callback`), Google Code Assist (`http://localhost:8085/oauth2callback`), and Google Antigravity (`http://localhost:51121/oauth-callback`) can capture browser callbacks automatically. If a port is busy, the affected login still works via the manual URL paste fallback.
+- `3141` is the add-in/dev-server port; the local proxy normally uses `3003`.
+- GPT-5.6 Luna on the ChatGPT provider requires the current proxy's Codex WebSocket bridge. `https://localhost:3003/healthz` must advertise both `X-Pi-For-Excel-Proxy: 1` and `X-Pi-For-Excel-Codex-WebSocket-Bridge: 1`.
+- If an older proxy is running, stop that process and rerun `npx -y pi-for-excel-proxy@latest`; the current CLI intentionally refuses to reuse an outdated listener.
+- If a healthy compatible proxy is already running on `3003`, the CLI reports that and exits instead of starting a duplicate.
+- If port `3003` is busy for some other reason, the CLI automatically chooses a random free port. Copy the printed `https://localhost:<port>` URL into `/settings` → **Proxy**.
 - To force a specific port, set `PORT` and use that same URL in settings:
 
 ```bash

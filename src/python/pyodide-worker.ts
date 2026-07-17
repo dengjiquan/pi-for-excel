@@ -12,7 +12,7 @@
 // Worker globals — declared locally to avoid tsconfig lib conflicts
 declare const self: {
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
-  postMessage(message: unknown): void;
+  postMessage(message: DynamicValue): void;
 };
 
 export interface PyodideWorkerRequest {
@@ -36,14 +36,14 @@ export interface PyodideWorkerResponse {
 
 // Pyodide types (minimal subset for the worker)
 interface PyodideInterface {
-  runPythonAsync(code: string): Promise<unknown>;
+  runPythonAsync(code: string): Promise<DynamicValue>;
   loadPackage(names: string | string[]): Promise<void>;
   globals: {
-    set(name: string, value: unknown): void;
-    get(name: string): unknown;
+    set(name: string, value: DynamicValue): void;
+    get(name: string): DynamicValue;
     delete(name: string): void;
   };
-  toPy(value: unknown): unknown;
+  toPy(value: DynamicValue): DynamicValue;
   version: string;
   FS: {
     writeFile(path: string, data: string | Uint8Array): void;
@@ -79,7 +79,7 @@ async function ensurePyodide(): Promise<PyodideInterface> {
 
       pyodide = instance;
       return instance;
-    } catch (error: unknown) {
+    } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
         "Failed to load Pyodide from jsDelivr. " +
@@ -109,14 +109,20 @@ function detectImports(code: string): string[] {
     // import foo / import foo.bar
     const importMatch = /^import\s+([\w.]+)/.exec(trimmed);
     if (importMatch) {
-      const topLevel = importMatch[1].split(".")[0];
-      if (topLevel) imports.add(topLevel);
+      const importName = importMatch[1];
+      if (importName) {
+        const topLevel = importName.split(".")[0];
+        if (topLevel) imports.add(topLevel);
+      }
     }
     // from foo import bar / from foo.bar import baz
     const fromMatch = /^from\s+([\w.]+)\s+import/.exec(trimmed);
     if (fromMatch) {
-      const topLevel = fromMatch[1].split(".")[0];
-      if (topLevel) imports.add(topLevel);
+      const importName = fromMatch[1];
+      if (importName) {
+        const topLevel = importName.split(".")[0];
+        if (topLevel) imports.add(topLevel);
+      }
     }
   }
 
@@ -220,7 +226,7 @@ result = None
 
   try {
     await py.runPythonAsync(request.code);
-  } catch (error: unknown) {
+  } catch (error) {
     // Restore stdout/stderr before returning
     await py.runPythonAsync(`
 __sys__.stdout = __sys__.__stdout__
@@ -239,15 +245,16 @@ __sys__.stderr = __sys__.__stderr__
     } catch { /* ignore */ }
 
     const message = error instanceof Error ? error.message : String(error);
-    return {
+    const response: PyodideWorkerResponse = {
       id: request.id,
       ok: false,
-      stdout: stdout || undefined,
-      stderr: stderr || undefined,
       error: message,
       loadTimeMs,
       runTimeMs: Math.round(performance.now() - runStart),
     };
+    if (stdout.length > 0) response.stdout = stdout;
+    if (stderr.length > 0) response.stderr = stderr;
+    return response;
   }
 
   const runTimeMs = Math.round(performance.now() - runStart);
@@ -291,15 +298,16 @@ __sys__.stderr = __sys__.__stderr__
     py.globals.delete("__result_json__");
   } catch { /* ignore */ }
 
-  return {
+  const response: PyodideWorkerResponse = {
     id: request.id,
     ok: true,
-    stdout: stdout || undefined,
-    stderr: stderr || undefined,
-    resultJson,
     loadTimeMs,
     runTimeMs,
   };
+  if (stdout.length > 0) response.stdout = stdout;
+  if (stderr.length > 0) response.stderr = stderr;
+  if (resultJson !== undefined) response.resultJson = resultJson;
+  return response;
 }
 
 self.addEventListener("message", (event: MessageEvent<PyodideWorkerRequest>) => {
@@ -307,7 +315,7 @@ self.addEventListener("message", (event: MessageEvent<PyodideWorkerRequest>) => 
 
   void handleRun(request).then(
     (response) => self.postMessage(response),
-    (error: unknown) => {
+    (error: DynamicValue) => {
       const message = error instanceof Error ? error.message : String(error);
       const response: PyodideWorkerResponse = {
         id: request.id,

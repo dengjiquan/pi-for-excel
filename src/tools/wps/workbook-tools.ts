@@ -40,7 +40,7 @@ interface WorkbookOverviewParams {
 
 interface WriteCellsParams {
   start_cell: string;
-  values: unknown[][];
+  values: DynamicValue[][];
   allow_overwrite?: boolean;
 }
 
@@ -49,9 +49,9 @@ interface WpsRangeSnapshot {
   address: string;
   rows: number;
   cols: number;
-  values: unknown[][];
-  formulas: unknown[][];
-  numberFormats: unknown[][];
+  values: DynamicValue[][];
+  formulas: DynamicValue[][];
+  numberFormats: DynamicValue[][];
   metadataWarnings: string[];
 }
 
@@ -67,39 +67,39 @@ type WriteCellsResult =
     sheetName: string;
     address: string;
     existingCount: number;
-    existingValues: unknown[][];
+    existingValues: DynamicValue[][];
   }
   | {
     blocked: false;
     sheetName: string;
     address: string;
-    beforeValues: unknown[][];
-    beforeFormulas: unknown[][];
-    readBackValues: unknown[][];
-    readBackFormulas: unknown[][];
+    beforeValues: DynamicValue[][];
+    beforeFormulas: DynamicValue[][];
+    readBackValues: DynamicValue[][];
+    readBackFormulas: DynamicValue[][];
   };
 
 type BlockedWriteCellsResult = Extract<WriteCellsResult, { blocked: true }>;
 type SuccessWriteCellsResult = Extract<WriteCellsResult, { blocked: false }>;
 
-function isUnknownArray(value: unknown): value is unknown[] {
+function isUnknownArray(value: DynamicValue): value is DynamicValue[] {
   return Array.isArray(value);
 }
 
-function isUnknownGrid(value: unknown): value is unknown[][] {
+function isUnknownGrid(value: DynamicValue): value is DynamicValue[][] {
   return isUnknownArray(value) && value.every((row) => Array.isArray(row));
 }
 
-function asString(value: unknown): string | null {
+function asString(value: DynamicValue): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
-function asWorksheet(value: unknown): WpsEtWorksheet | null {
+function asWorksheet(value: DynamicValue): WpsEtWorksheet | null {
   if (typeof value !== "object" || value === null) return null;
   return value;
 }
 
-function asRange(value: unknown): WpsEtRange | null {
+function asRange(value: DynamicValue): WpsEtRange | null {
   if (typeof value !== "object" || value === null) return null;
   return value;
 }
@@ -130,7 +130,7 @@ function workbookSheetCollection(
     ?? null;
 }
 
-function getCollectionItem(collection: WpsCountedCollection, key: string | number): unknown {
+function getCollectionItem(collection: WpsCountedCollection, key: string | number): DynamicValue {
   if (typeof collection.Item !== "function") {
     throw new Error("WPS worksheet collection does not expose Item().");
   }
@@ -213,10 +213,13 @@ function parseRectangularAddress(address: string): { rows: number; cols: number 
 
   const parts = clean.includes(":") ? clean.split(":") : [clean, clean];
   if (parts.length !== 2) return null;
+  const startPart = parts[0];
+  const endPart = parts[1];
+  if (startPart === undefined || endPart === undefined) return null;
 
   try {
-    const start = parseCell(parts[0]);
-    const end = parseCell(parts[1]);
+    const start = parseCell(startPart);
+    const end = parseCell(endPart);
     return {
       rows: Math.abs(end.row - start.row) + 1,
       cols: Math.abs(end.col - start.col) + 1,
@@ -226,7 +229,7 @@ function parseRectangularAddress(address: string): { rows: number; cols: number 
   }
 }
 
-function inferGridDims(raw: unknown): { rows: number; cols: number } | null {
+function inferGridDims(raw: DynamicValue): { rows: number; cols: number } | null {
   if (isUnknownGrid(raw)) {
     return {
       rows: raw.length,
@@ -245,7 +248,7 @@ function inferGridDims(raw: unknown): { rows: number; cols: number } | null {
   return null;
 }
 
-function rangeDimensions(range: WpsEtRange, address: string, rawValues: unknown): { rows: number; cols: number } {
+function rangeDimensions(range: WpsEtRange, address: string, rawValues: DynamicValue): { rows: number; cols: number } {
   const rowCount = getCount(range.Rows);
   const colCount = getCount(range.Columns);
   if (rowCount !== null && colCount !== null) {
@@ -261,8 +264,8 @@ function rangeDimensions(range: WpsEtRange, address: string, rawValues: unknown)
   return { rows: 1, cols: 1 };
 }
 
-function normalizeGrid(raw: unknown, rows: number, cols: number, emptyValue: unknown): unknown[][] {
-  let grid: unknown[][];
+function normalizeGrid(raw: DynamicValue, rows: number, cols: number, emptyValue: DynamicValue): DynamicValue[][] {
+  let grid: DynamicValue[][];
 
   if (isUnknownGrid(raw)) {
     grid = raw.map((row) => [...row]);
@@ -274,10 +277,10 @@ function normalizeGrid(raw: unknown, rows: number, cols: number, emptyValue: unk
     grid = [[raw ?? emptyValue]];
   }
 
-  const normalized: unknown[][] = [];
+  const normalized: DynamicValue[][] = [];
   for (let row = 0; row < rows; row += 1) {
     const sourceRow = grid[row] ?? [];
-    const normalizedRow: unknown[] = [];
+    const normalizedRow: DynamicValue[] = [];
     for (let col = 0; col < cols; col += 1) {
       normalizedRow.push(sourceRow[col] ?? emptyValue);
     }
@@ -287,7 +290,7 @@ function normalizeGrid(raw: unknown, rows: number, cols: number, emptyValue: unk
   return normalized;
 }
 
-function readRangeValue2(range: WpsEtRange): unknown {
+function readRangeValue2(range: WpsEtRange): DynamicValue {
   if (range.Value2 !== undefined) return range.Value2;
   if (typeof range.Value === "function") return range.Value();
   return undefined;
@@ -300,7 +303,7 @@ function rangeSnapshot(sheet: WpsEtWorksheet, range: WpsEtRange, fallbackAddress
   const values = normalizeGrid(rawValues, dimensions.rows, dimensions.cols, "");
   const metadataWarnings: string[] = [];
 
-  let formulas: unknown[][];
+  let formulas: DynamicValue[][];
   if (range.Formula === undefined) {
     formulas = normalizeGrid(undefined, dimensions.rows, dimensions.cols, "");
     metadataWarnings.push("WPS Formula metadata was unavailable; formula listings may be incomplete.");
@@ -308,7 +311,7 @@ function rangeSnapshot(sheet: WpsEtWorksheet, range: WpsEtRange, fallbackAddress
     formulas = normalizeGrid(range.Formula, dimensions.rows, dimensions.cols, "");
   }
 
-  let numberFormats: unknown[][];
+  let numberFormats: DynamicValue[][];
   if (range.NumberFormat === undefined) {
     numberFormats = normalizeGrid(undefined, dimensions.rows, dimensions.cols, "General");
     metadataWarnings.push("WPS NumberFormat metadata was unavailable; detailed format output may be incomplete.");
@@ -383,20 +386,20 @@ function explicitWpsOverviewOmissions(): string[] {
   ];
 }
 
-function parseWorkbookOverviewParams(raw: unknown): WorkbookOverviewParams {
+function parseWorkbookOverviewParams(raw: DynamicValue): WorkbookOverviewParams {
   if (typeof raw !== "object" || raw === null) return {};
-  const candidate = raw as { sheet?: unknown };
+  const candidate = raw as { sheet?: DynamicValue };
   return typeof candidate.sheet === "string" && candidate.sheet.trim().length > 0
     ? { sheet: candidate.sheet }
     : {};
 }
 
-function parseReadRangeParams(raw: unknown): ReadRangeParams {
+function parseReadRangeParams(raw: DynamicValue): ReadRangeParams {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("read_range params must be an object.");
   }
 
-  const candidate = raw as { range?: unknown; mode?: unknown };
+  const candidate = raw as { range?: DynamicValue; mode?: DynamicValue };
   if (typeof candidate.range !== "string" || candidate.range.trim().length === 0) {
     throw new Error("read_range requires a non-empty range string.");
   }
@@ -412,16 +415,16 @@ function parseReadRangeParams(raw: unknown): ReadRangeParams {
 
   return {
     range: candidate.range,
-    mode: candidate.mode,
+    ...(candidate.mode !== undefined ? { mode: candidate.mode } : {}),
   };
 }
 
-function parseWriteCellsParams(raw: unknown): WriteCellsParams {
+function parseWriteCellsParams(raw: DynamicValue): WriteCellsParams {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("write_cells params must be an object.");
   }
 
-  const candidate = raw as { start_cell?: unknown; values?: unknown; allow_overwrite?: unknown };
+  const candidate = raw as { start_cell?: DynamicValue; values?: DynamicValue; allow_overwrite?: DynamicValue };
   if (typeof candidate.start_cell !== "string" || candidate.start_cell.trim().length === 0) {
     throw new Error("write_cells requires a non-empty start_cell string.");
   }
@@ -439,7 +442,7 @@ function parseWriteCellsParams(raw: unknown): WriteCellsParams {
 
 export function executeWpsGetWorkbookOverview(
   _toolCallId: string,
-  rawParams: unknown,
+  rawParams: DynamicValue,
 ): Promise<AgentToolResult<undefined>> {
   try {
     const params = parseWorkbookOverviewParams(rawParams);
@@ -452,7 +455,7 @@ export function executeWpsGetWorkbookOverview(
       content: [{ type: "text", text: lines.join("\n") }],
       details: undefined,
     });
-  } catch (error: unknown) {
+  } catch (error) {
     return Promise.resolve({
       content: [{ type: "text", text: `Error getting WPS workbook overview: ${getErrorMessage(error)}` }],
       details: undefined,
@@ -526,7 +529,7 @@ function buildWpsSheetDetail(
 
 export function executeWpsReadRange(
   _toolCallId: string,
-  rawParams: unknown,
+  rawParams: DynamicValue,
 ): Promise<AgentToolResult<ReadRangeCsvDetails | undefined>> {
   let rangeLabel = "(unknown range)";
   try {
@@ -549,7 +552,7 @@ export function executeWpsReadRange(
     }
 
     return Promise.resolve(formatWpsCompactOutput(fullAddress, snapshot, startCell));
-  } catch (error: unknown) {
+  } catch (error) {
     return Promise.resolve({
       content: [{ type: "text", text: `Error reading WPS range "${rangeLabel}": ${getErrorMessage(error)}` }],
       details: undefined,
@@ -557,7 +560,7 @@ export function executeWpsReadRange(
   }
 }
 
-function hasAnyNonEmptyCell(values: unknown[][]): boolean {
+function hasAnyNonEmptyCell(values: DynamicValue[][]): boolean {
   for (const row of values) {
     for (const value of row) {
       if (value !== null && value !== undefined && value !== "") return true;
@@ -566,19 +569,20 @@ function hasAnyNonEmptyCell(values: unknown[][]): boolean {
   return false;
 }
 
-function formatAsExcelMarkdownTable(values: unknown[][], startCell: string): string {
+function formatAsExcelMarkdownTable(values: DynamicValue[][], startCell: string): string {
   if (!values || values.length === 0) return "(empty)";
 
   const start = parseCell(startCell);
   const numCols = Math.max(...values.map((row) => row.length));
-  const header: unknown[] = [""];
+  const header: DynamicValue[] = [""];
   for (let col = 0; col < numCols; col += 1) {
     header.push(colToLetter(start.col + col));
   }
 
-  const rows: unknown[][] = [header];
+  const rows: DynamicValue[][] = [header];
   for (let row = 0; row < values.length; row += 1) {
-    const renderedRow: unknown[] = [start.row + row, ...values[row]];
+    const valueRow = values[row] ?? [];
+    const renderedRow: DynamicValue[] = [start.row + row, ...valueRow];
     while (renderedRow.length < numCols + 1) renderedRow.push("");
     rows.push(renderedRow);
   }
@@ -665,8 +669,9 @@ function formatWpsDetailedOutput(
   const formatMap = new Map<string, string[]>();
   const start = parseCell(startCell);
   for (let row = 0; row < snapshot.numberFormats.length; row += 1) {
-    for (let col = 0; col < snapshot.numberFormats[row].length; col += 1) {
-      const format = snapshot.numberFormats[row][col];
+    const numberFormatRow = snapshot.numberFormats[row] ?? [];
+    for (let col = 0; col < numberFormatRow.length; col += 1) {
+      const format = numberFormatRow[col];
       if (typeof format === "string" && format !== "" && format !== "General") {
         const addressForCell = `${colToLetter(start.col + col)}${start.row + row}`;
         const existing = formatMap.get(format) ?? [];
@@ -696,7 +701,7 @@ function formatWpsDetailedOutput(
   return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
 }
 
-function toCsvField(value: unknown): string {
+function toCsvField(value: DynamicValue): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") {
     return value.includes(",") || value.includes('"') || value.includes("\n") || value.includes("\r")
@@ -708,7 +713,7 @@ function toCsvField(value: unknown): string {
   return /[",\n\r]/u.test(serialized) ? `"${serialized.replace(/"/gu, '""')}"` : serialized;
 }
 
-function valuesToCsv(values: unknown[][]): string {
+function valuesToCsv(values: DynamicValue[][]): string {
   if (!values || values.length === 0) return "";
   return values.map((row) => row.map((value) => toCsvField(value)).join(",")).join("\n");
 }
@@ -747,13 +752,14 @@ function formatWpsCsvOutput(
   };
 }
 
-function findInvalidFormulas(values: unknown[][], startCell: string): InvalidFormula[] {
+function findInvalidFormulas(values: DynamicValue[][], startCell: string): InvalidFormula[] {
   const start = parseCell(startCell);
   const invalid: InvalidFormula[] = [];
 
   for (let row = 0; row < values.length; row += 1) {
-    for (let col = 0; col < values[row].length; col += 1) {
-      const value = values[row][col];
+    const valueRow = values[row] ?? [];
+    for (let col = 0; col < valueRow.length; col += 1) {
+      const value = valueRow[col];
       if (typeof value === "string" && value.startsWith("=")) {
         const reason = validateFormula(value);
         if (reason) {
@@ -770,7 +776,7 @@ function findInvalidFormulas(values: unknown[][], startCell: string): InvalidFor
   return invalid;
 }
 
-function writeWpsRange(range: WpsEtRange, values: unknown[][]): void {
+function writeWpsRange(range: WpsEtRange, values: DynamicValue[][]): void {
   const containsFormula = values.some((row) => row.some((value) => typeof value === "string" && value.startsWith("=")));
   if (containsFormula) {
     range.Formula = values;
@@ -787,7 +793,7 @@ function writeWpsRange(range: WpsEtRange, values: unknown[][]): void {
 
 export function executeWpsWriteCells(
   _toolCallId: string,
-  rawParams: unknown,
+  rawParams: DynamicValue,
 ): Promise<AgentToolResult<WriteCellsDetails>> {
   try {
     const params = parseWriteCellsParams(rawParams);
@@ -836,7 +842,7 @@ export function executeWpsWriteCells(
 
     const result = writeWpsCells(params, padded, rows, cols, startCellRef);
     return Promise.resolve(result.blocked ? formatWpsBlockedWrite(result) : formatWpsSuccessWrite(result, rows, cols));
-  } catch (error: unknown) {
+  } catch (error) {
     return Promise.resolve({
       content: [{ type: "text", text: `Error writing WPS cells: ${getErrorMessage(error)}` }],
       details: { kind: "write_cells", blocked: false },
@@ -846,7 +852,7 @@ export function executeWpsWriteCells(
 
 function writeWpsCells(
   params: WriteCellsParams,
-  padded: unknown[][],
+  padded: DynamicValue[][],
   rows: number,
   cols: number,
   startCellRef: string,
@@ -919,8 +925,8 @@ function formatWpsBlockedWrite(result: BlockedWriteCellsResult): AgentToolResult
 const VERIFIED_VALUES_PREVIEW_ROWS = 8;
 const VERIFIED_VALUES_PREVIEW_COLS = 6;
 
-function buildVerifiedValuesPreview(values: unknown[][]): {
-  values: unknown[][];
+function buildVerifiedValuesPreview(values: DynamicValue[][]): {
+  values: DynamicValue[][];
   totalRows: number;
   totalCols: number;
   shownRows: number;
@@ -967,8 +973,9 @@ function formatWpsSuccessWrite(
       const errorCell = parseCell(error.address);
       const row = errorCell.row - start.row;
       const col = errorCell.col - start.col;
-      if (row >= 0 && col >= 0 && row < result.readBackFormulas.length && col < result.readBackFormulas[row].length) {
-        const formula = result.readBackFormulas[row][col];
+      const formulaRow = result.readBackFormulas[row];
+      if (row >= 0 && col >= 0 && formulaRow !== undefined && col < formulaRow.length) {
+        const formula = formulaRow[col];
         if (typeof formula === "string") error.formula = formula;
       }
     }

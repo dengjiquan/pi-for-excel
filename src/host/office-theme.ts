@@ -1,6 +1,9 @@
+function isHostOfficeThemePayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Office theme detection helpers used by OfficeHost. */
 
-import { isRecord } from "../utils/type-guards.js";
 
 interface RgbColor {
   r: number;
@@ -13,9 +16,9 @@ function parseHexColor(input: string): RgbColor | null {
   const normalized = raw.startsWith("#") ? raw.slice(1) : raw;
 
   if (normalized.length === 3) {
-    const r = Number.parseInt(normalized[0].repeat(2), 16);
-    const g = Number.parseInt(normalized[1].repeat(2), 16);
-    const b = Number.parseInt(normalized[2].repeat(2), 16);
+    const r = Number.parseInt(normalized.charAt(0).repeat(2), 16);
+    const g = Number.parseInt(normalized.charAt(1).repeat(2), 16);
+    const b = Number.parseInt(normalized.charAt(2).repeat(2), 16);
     if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
       return null;
     }
@@ -59,7 +62,7 @@ function isDarkColor(rgb: RgbColor): boolean {
   return relativeLuminance(rgb) < 0.35;
 }
 
-function resolveThemeDarkFromColor(input: unknown): boolean | null {
+function resolveThemeDarkFromColor(input: DynamicValue): boolean | null {
   if (typeof input !== "string") {
     return null;
   }
@@ -74,17 +77,17 @@ function resolveThemeDarkFromColor(input: unknown): boolean | null {
 
 export function resolveOfficeThemeDark(): boolean | null {
   const officeRoot = Reflect.get(globalThis, "Office");
-  if (!isRecord(officeRoot)) {
+  if (!isHostOfficeThemePayloadShape(officeRoot)) {
     return null;
   }
 
   const context = officeRoot.context;
-  if (!isRecord(context)) {
+  if (!isHostOfficeThemePayloadShape(context)) {
     return null;
   }
 
   const officeTheme = context.officeTheme;
-  if (!isRecord(officeTheme)) {
+  if (!isHostOfficeThemePayloadShape(officeTheme)) {
     return null;
   }
 

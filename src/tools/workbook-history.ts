@@ -222,7 +222,7 @@ export function createWorkbookHistoryTool(
               action: "restore",
               snapshotId,
               restoredSnapshotId: restored.restoredSnapshotId,
-              inverseSnapshotId: restored.inverseSnapshotId ?? undefined,
+              ...(typeof restored.inverseSnapshotId === "string" ? { inverseSnapshotId: restored.inverseSnapshotId } : {}),
               address: restored.address,
               changedCount: restored.changedCount,
             },
@@ -275,7 +275,7 @@ export function createWorkbookHistoryTool(
             deletedCount: removed,
           },
         };
-      } catch (error: unknown) {
+      } catch (error) {
         const message = getErrorMessage(error);
 
         if (action === "restore") {

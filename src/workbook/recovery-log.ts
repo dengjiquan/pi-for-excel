@@ -79,8 +79,8 @@ export interface WorkbookRecoverySnapshot {
   address: string;
   changedCount: number;
   cellCount: number;
-  beforeValues: unknown[][];
-  beforeFormulas: unknown[][];
+  beforeValues: DynamicValue[][];
+  beforeFormulas: DynamicValue[][];
   snapshotKind?: WorkbookRecoverySnapshotKind;
   formatRangeState?: RecoveryFormatRangeState;
   modifyStructureState?: RecoveryModifyStructureState;
@@ -97,8 +97,8 @@ export interface AppendWorkbookRecoverySnapshotArgs {
   toolCallId: string;
   address: string;
   changedCount?: number;
-  beforeValues: unknown[][];
-  beforeFormulas: unknown[][];
+  beforeValues: DynamicValue[][];
+  beforeFormulas: DynamicValue[][];
   restoredFromSnapshotId?: string;
 }
 
@@ -156,8 +156,8 @@ export interface RestoreWorkbookRecoverySnapshotResult {
 }
 
 interface WorkbookRangeState {
-  values: unknown[][];
-  formulas: unknown[][];
+  values: DynamicValue[][];
+  formulas: DynamicValue[][];
 }
 
 interface WorkbookRecoveryLogDependencies {
@@ -165,7 +165,7 @@ interface WorkbookRecoveryLogDependencies {
   getWorkbookContext: () => Promise<WorkbookContext>;
   now: () => number;
   createId: () => string;
-  applySnapshot: (address: string, values: unknown[][]) => Promise<WorkbookRangeState>;
+  applySnapshot: (address: string, values: DynamicValue[][]) => Promise<WorkbookRangeState>;
   applyFormatCellsSnapshot: (
     address: string,
     state: RecoveryFormatRangeState,
@@ -205,7 +205,7 @@ function defaultCreateId(): string {
   return `checkpoint_${Date.now().toString(36)}_${randomChunk}`;
 }
 
-async function defaultApplySnapshot(address: string, values: unknown[][]): Promise<WorkbookRangeState> {
+async function defaultApplySnapshot(address: string, values: DynamicValue[][]): Promise<WorkbookRangeState> {
   return excelRun<WorkbookRangeState>(async (context) => {
     const { range } = getRange(context, address);
     range.load("values,formulas");
@@ -259,7 +259,7 @@ async function defaultApplyChartSnapshot(
   return applyChartState(address, state);
 }
 
-function serializeComparable(raw: unknown): string {
+function serializeComparable(raw: DynamicValue): string {
   if (raw === null || raw === undefined || raw === "") return "";
 
   if (typeof raw === "string") return raw;
@@ -277,10 +277,10 @@ function serializeComparable(raw: unknown): string {
 }
 
 function countChangedCells(args: {
-  beforeValues: unknown[][];
-  beforeFormulas: unknown[][];
-  afterValues: unknown[][];
-  afterFormulas: unknown[][];
+  beforeValues: DynamicValue[][];
+  beforeFormulas: DynamicValue[][];
+  afterValues: DynamicValue[][];
+  afterFormulas: DynamicValue[][];
 }): number {
   const rowCount = Math.max(
     args.beforeValues.length,
@@ -426,8 +426,8 @@ export class WorkbookRecoveryLog {
       beforeFormulas: formulas,
       snapshotKind: "range_values",
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 
@@ -459,8 +459,8 @@ export class WorkbookRecoveryLog {
       snapshotKind: "format_cells_state",
       formatRangeState,
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 
@@ -493,8 +493,8 @@ export class WorkbookRecoveryLog {
       snapshotKind: "modify_structure_state",
       modifyStructureState,
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 
@@ -526,8 +526,8 @@ export class WorkbookRecoveryLog {
       snapshotKind: "conditional_format_rules",
       conditionalFormatRules: rules,
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 
@@ -555,8 +555,8 @@ export class WorkbookRecoveryLog {
       snapshotKind: "comment_thread",
       commentThreadState: cloneRecoveryCommentThreadState(args.commentThreadState),
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 
@@ -584,8 +584,8 @@ export class WorkbookRecoveryLog {
       snapshotKind: "chart_state",
       chartState: cloneRecoveryChartState(args.chartState),
       workbookId: workbookIdentity.workbookId,
-      workbookLabel: workbookIdentity.workbookLabel,
-      restoredFromSnapshotId: args.restoredFromSnapshotId,
+      ...(workbookIdentity.workbookLabel !== undefined ? { workbookLabel: workbookIdentity.workbookLabel } : {}),
+      ...(args.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: args.restoredFromSnapshotId } : {}),
     });
   }
 

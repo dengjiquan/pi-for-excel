@@ -1,3 +1,7 @@
+function isToolsPythonRunPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * python_run — Execute Python via native bridge (preferred) or Pyodide fallback.
  *
@@ -7,11 +11,11 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { SettingsStore } from "../storage/local/settings-store.js";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
 import { validateOfficeProxyUrl } from "../auth/proxy-validation.js";
 import { getErrorMessage } from "../utils/errors.js";
-import { isRecord } from "../utils/type-guards.js";
 import {
   extractBridgeErrorMessage,
   isAbortError,
@@ -72,7 +76,7 @@ export interface PythonBridgeResponse {
   result_json?: string;
   truncated?: boolean;
   error?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: DynamicObject;
 }
 
 export interface PythonRunToolDetails {
@@ -106,8 +110,8 @@ export interface PythonRunToolDependencies {
   ) => Promise<PythonBridgeResponse>;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && !Array.isArray(value);
+function isPythonBridgePayloadShape(value: DynamicValue): value is DynamicObject {
+  return isToolsPythonRunPayloadShape(value) && !Array.isArray(value);
 }
 
 function cleanOptionalString(value: string | undefined): string | undefined {
@@ -117,15 +121,15 @@ function cleanOptionalString(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? value : undefined;
 }
 
-function toOptionalInteger(value: unknown): number | undefined {
+function toOptionalInteger(value: DynamicValue): number | undefined {
   if (typeof value !== "number") return undefined;
   if (!Number.isFinite(value)) return undefined;
   if (!Number.isInteger(value)) return undefined;
   return value;
 }
 
-function parseParams(raw: unknown): Params {
-  if (!isPlainObject(raw)) {
+function parseParams(raw: DynamicValue): Params {
+  if (!isPythonBridgePayloadShape(raw)) {
     throw new Error("Invalid python_run params: expected an object.");
   }
 
@@ -164,15 +168,16 @@ function validateParams(params: Params): void {
 }
 
 function toBridgeRequest(params: Params): PythonBridgeRequest {
+  const inputJson = cleanOptionalString(params.input_json);
   return {
     code: params.code,
-    input_json: cleanOptionalString(params.input_json),
-    timeout_ms: params.timeout_ms,
+    ...(inputJson !== undefined ? { input_json: inputJson } : {}),
+    ...(params.timeout_ms !== undefined ? { timeout_ms: params.timeout_ms } : {}),
   };
 }
 
-function parseBridgeResponse(value: unknown): PythonBridgeResponse {
-  if (!isPlainObject(value)) {
+function parseBridgeResponse(value: DynamicValue): PythonBridgeResponse {
+  if (!isPythonBridgePayloadShape(value)) {
     return {
       ok: true,
       action: "run_python",
@@ -186,23 +191,23 @@ function parseBridgeResponse(value: unknown): PythonBridgeResponse {
   const resultJson = typeof value.result_json === "string" ? value.result_json : undefined;
   const truncated = typeof value.truncated === "boolean" ? value.truncated : undefined;
   const error = typeof value.error === "string" ? value.error : undefined;
-  const metadata = isPlainObject(value.metadata) ? value.metadata : undefined;
+  const metadata = isPythonBridgePayloadShape(value.metadata) ? value.metadata : undefined;
 
   return {
     ok,
     action: "run_python",
-    exit_code: exitCode,
-    stdout,
-    stderr,
-    result_json: resultJson,
-    truncated,
-    error,
-    metadata,
+    ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+    ...(stdout !== undefined ? { stdout } : {}),
+    ...(stderr !== undefined ? { stderr } : {}),
+    ...(resultJson !== undefined ? { result_json: resultJson } : {}),
+    ...(truncated !== undefined ? { truncated } : {}),
+    ...(error !== undefined ? { error } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   };
 }
 
-async function getSettingsStore() {
-  const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+async function getSettingsStore(): Promise<SettingsStore> {
+  const storageModule = await import("../storage/local/app-storage.js");
   return storageModule.getAppStorage().settings;
 }
 
@@ -233,7 +238,7 @@ export async function getDefaultPythonBridgeConfig(): Promise<PythonBridgeConfig
     const normalizedUrl = validateOfficeProxyUrl(rawUrl);
     return {
       url: normalizedUrl,
-      token,
+      ...(token !== undefined ? { token } : {}),
       source,
     };
   } catch {
@@ -299,10 +304,11 @@ export async function callDefaultPythonBridge(
     }
 
     if (parsedBody === null) {
+      const stdout = rawBody.trim().length > 0 ? rawBody : undefined;
       return {
         ok: true,
         action: "run_python",
-        stdout: rawBody.trim().length > 0 ? rawBody : undefined,
+        ...(stdout !== undefined ? { stdout } : {}),
       };
     }
 
@@ -312,7 +318,7 @@ export async function callDefaultPythonBridge(
     }
 
     return parsed;
-  } catch (error: unknown) {
+  } catch (error) {
     if (isAbortError(error)) {
       if (signal?.aborted) {
         throw new Error("Aborted");
@@ -407,7 +413,7 @@ function shouldAttachPythonBridgeSkillHint(message: string): boolean {
 }
 
 export function shouldFallbackToPyodideAfterBridgeError(
-  error: unknown,
+  error: DynamicValue,
   bridgeConfig: PythonBridgeConfig,
 ): boolean {
   if (bridgeConfig.source !== "default") {
@@ -465,7 +471,7 @@ export function createPythonRunTool(
     parameters: schema,
     execute: async (
       _toolCallId: string,
-      rawParams: unknown,
+      rawParams: DynamicValue,
       signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<PythonRunToolDetails>> => {
       let params: Params | null = null;
@@ -486,6 +492,9 @@ export function createPythonRunTool(
               throw new Error(response.error ?? "Python bridge rejected the request.");
             }
 
+            const stdoutPreview = buildOutputPreview(response.stdout);
+            const stderrPreview = buildOutputPreview(response.stderr);
+            const resultPreview = buildOutputPreview(response.result_json);
             return {
               content: [{ type: "text", text: formatBridgeSuccessText(response) }],
               details: {
@@ -493,14 +502,14 @@ export function createPythonRunTool(
                 ok: true,
                 action: "run_python",
                 bridgeUrl: bridgeConfig.url,
-                exitCode: response.exit_code,
-                stdoutPreview: buildOutputPreview(response.stdout),
-                stderrPreview: buildOutputPreview(response.stderr),
-                resultPreview: buildOutputPreview(response.result_json),
-                truncated: response.truncated,
+                ...(response.exit_code !== undefined ? { exitCode: response.exit_code } : {}),
+                ...(stdoutPreview !== undefined ? { stdoutPreview } : {}),
+                ...(stderrPreview !== undefined ? { stderrPreview } : {}),
+                ...(resultPreview !== undefined ? { resultPreview } : {}),
+                ...(response.truncated !== undefined ? { truncated: response.truncated } : {}),
               },
             };
-          } catch (error: unknown) {
+          } catch (error) {
             if (!shouldFallbackToPyodideAfterBridgeError(error, bridgeConfig)) {
               throw error;
             }
@@ -535,20 +544,23 @@ export function createPythonRunTool(
           throw new Error(response.error ?? "Pyodide execution failed.");
         }
 
+        const stdoutPreview = buildOutputPreview(response.stdout);
+        const stderrPreview = buildOutputPreview(response.stderr);
+        const resultPreview = buildOutputPreview(response.result_json);
         return {
           content: [{ type: "text", text: formatBridgeSuccessText(response) }],
           details: {
             kind: "python_bridge",
             ok: true,
             action: "run_python",
-            exitCode: response.exit_code,
-            stdoutPreview: buildOutputPreview(response.stdout),
-            stderrPreview: buildOutputPreview(response.stderr),
-            resultPreview: buildOutputPreview(response.result_json),
-            truncated: response.truncated,
+            ...(response.exit_code !== undefined ? { exitCode: response.exit_code } : {}),
+            ...(stdoutPreview !== undefined ? { stdoutPreview } : {}),
+            ...(stderrPreview !== undefined ? { stderrPreview } : {}),
+            ...(resultPreview !== undefined ? { resultPreview } : {}),
+            ...(response.truncated !== undefined ? { truncated: response.truncated } : {}),
           },
         };
-      } catch (error: unknown) {
+      } catch (error) {
         const message = getErrorMessage(error);
         const skillHint = shouldAttachPythonBridgeSkillHint(message)
           ? "python-bridge"
@@ -566,7 +578,7 @@ export function createPythonRunTool(
             ok: false,
             action: "run_python",
             error: message,
-            skillHint,
+            ...(skillHint !== undefined ? { skillHint } : {}),
           },
         };
       }

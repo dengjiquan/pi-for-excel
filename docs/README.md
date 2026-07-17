@@ -7,7 +7,7 @@ This folder contains **current** docs that should match shipped behavior.
 - [Deploy hosted build on Vercel](./deploy-vercel.md)
 - [Org-hosted central CORS proxy](./central-proxy.md)
 - [Dev server behind portless (opt-in)](./portless.md)
-- [Release notes (`v0.9.5-pre`)](./release-notes/v0.9.5-pre.md)
+- [Release notes (`v0.10.0-pre`)](./release-notes/v0.10.0-pre.md)
 - [Release smoke test checklist](./release-smoke-test-checklist.md)
 - [Release smoke run logs](./release-smoke-runs/README.md)
 
@@ -19,7 +19,13 @@ This folder contains **current** docs that should match shipped behavior.
 - [Manual full-workbook backups (`/backup`)](./manual-full-backups.md)
 - [WPS Spreadsheets support plan](./wps-support.md)
 
+## Proposals
+- [Agent tool interface redesign](./proposals/agent-tool-interface-redesign.md)
+- [Agent eval suite](./proposals/agent-evals.md)
+- [Research: Claude for Excel teardown](./research/claude-for-excel-teardown.md)
+
 ## Architecture & policy
+- [Coding standards for agents](./coding-standards.md)
 - [Upstream divergences from pi-mono](./upstream-divergences.md)
 - [Context management policy (cache-safe)](./context-management-policy.md)
 - [Cache observability baselines](./cache-observability-baselines.md)

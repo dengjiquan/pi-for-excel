@@ -160,10 +160,10 @@ class HttpError extends Error {
 }
 
 /**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
+ * @param {*} value
+ * @returns {boolean}
  */
-function isRecord(value) {
+function isPythonBridgeServerPayloadShape(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -208,7 +208,7 @@ function setCorsHeaders(req, res) {
 /**
  * @param {http.ServerResponse} res
  * @param {number} status
- * @param {unknown} payload
+ * @param {*} payload
  */
 function respondJson(res, status, payload) {
   res.statusCode = status;
@@ -295,7 +295,7 @@ async function readJsonBody(req) {
 }
 
 /**
- * @param {unknown} value
+ * @param {*} value
  */
 function normalizeOptionalString(value) {
   if (typeof value !== "string") return undefined;
@@ -305,7 +305,7 @@ function normalizeOptionalString(value) {
 }
 
 /**
- * @param {unknown} value
+ * @param {*} value
  * @param {{ name: string; min: number; max: number; defaultValue: number }} options
  */
 function parseBoundedInteger(value, options) {
@@ -333,7 +333,7 @@ function isAbsolutePath(value) {
 }
 
 /**
- * @param {unknown} value
+ * @param {*} value
  * @param {string} field
  */
 function normalizeAbsolutePath(value, field) {
@@ -359,10 +359,10 @@ function normalizeOutput(output) {
 }
 
 /**
- * @param {unknown} payload
+ * @param {*} payload
  */
 function parsePythonRunRequest(payload) {
-  if (!isRecord(payload)) {
+  if (!isPythonBridgeServerPayloadShape(payload)) {
     throw new HttpError(400, "Request body must be a JSON object.");
   }
 
@@ -409,10 +409,10 @@ function parsePythonRunRequest(payload) {
 }
 
 /**
- * @param {unknown} payload
+ * @param {*} payload
  */
 function parseLibreOfficeRequest(payload) {
-  if (!isRecord(payload)) {
+  if (!isPythonBridgeServerPayloadShape(payload)) {
     throw new HttpError(400, "Request body must be a JSON object.");
   }
 

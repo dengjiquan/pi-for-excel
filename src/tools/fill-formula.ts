@@ -47,7 +47,7 @@ type FillFormulaResult =
     sheetName: string;
     address: string;
     existingCount: number;
-    existingValues: unknown[][];
+    existingValues: DynamicValue[][];
   }
   | {
     blocked: false;
@@ -55,10 +55,10 @@ type FillFormulaResult =
     address: string;
     rowCount: number;
     columnCount: number;
-    beforeValues: unknown[][];
-    beforeFormulas: unknown[][];
-    readBackValues: unknown[][];
-    readBackFormulas: unknown[][];
+    beforeValues: DynamicValue[][];
+    beforeFormulas: DynamicValue[][];
+    readBackValues: DynamicValue[][];
+    readBackFormulas: DynamicValue[][];
   };
 
 const mutationFinalizeDependencies: MutationFinalizeDependencies = {
@@ -177,16 +177,18 @@ export function createFillFormulaTool(): AgentTool<typeof schema, FillFormulaDet
         lines.push(`Filled formula across **${fullAddr}** (${result.rowCount}×${result.columnCount})`);
         lines.push(`**Formula pattern:** \`${params.formula}\``);
 
-        const topLeftRaw: unknown = result.readBackFormulas?.[0]?.[0] ?? "";
-        const bottomRightRaw: unknown = result.readBackFormulas?.[result.rowCount - 1]?.[result.columnCount - 1] ?? "";
+        const topLeftRaw: DynamicValue = result.readBackFormulas?.[0]?.[0] ?? "";
+        const bottomRightRaw: DynamicValue = result.readBackFormulas?.[result.rowCount - 1]?.[result.columnCount - 1] ?? "";
         const topLeft = typeof topLeftRaw === "string" ? topLeftRaw : JSON.stringify(topLeftRaw);
         const bottomRight = typeof bottomRightRaw === "string" ? bottomRightRaw : JSON.stringify(bottomRightRaw);
         if (topLeft && bottomRight && (result.rowCount > 1 || result.columnCount > 1)) {
           lines.push(`**Example formulas:** top-left \`${topLeft}\`, bottom-right \`${bottomRight}\``);
         }
 
-        const cellPart = result.address.includes("!") ? result.address.split("!")[1] : result.address;
-        const startCell = cellPart.split(":")[0];
+        const bangIndex = result.address.indexOf("!");
+        const cellPart = bangIndex >= 0 ? result.address.slice(bangIndex + 1) : result.address;
+        const colonIndex = cellPart.indexOf(":");
+        const startCell = colonIndex >= 0 ? cellPart.slice(0, colonIndex) : cellPart;
         const errors = findErrors(result.readBackValues, startCell);
         if (errors.length > 0) {
           lines.push("");
@@ -257,7 +259,7 @@ export function createFillFormulaTool(): AgentTool<typeof schema, FillFormulaDet
         });
 
         return toolResult;
-      } catch (e: unknown) {
+      } catch (e) {
         return {
           content: [{ type: "text", text: `Error filling formula: ${getErrorMessage(e)}` }],
           details: { kind: "fill_formula", blocked: false },

@@ -10,7 +10,7 @@
  *   (<proxy>/?url=<target>) so browser OAuth flows work in Office webviews.
  */
 
-import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
 
 import {
   DEFAULT_PROXY_URL,
@@ -30,7 +30,6 @@ type ProxySettingsCache = {
 const proxyCache: ProxySettingsCache = {
   checkedAt: 0,
   enabled: false,
-  url: undefined,
 };
 
 async function getEnabledProxyUrl(): Promise<string | undefined> {
@@ -42,8 +41,8 @@ async function getEnabledProxyUrl(): Promise<string | undefined> {
 
   proxyCache.checkedAt = now;
 
-  let enabled: unknown;
-  let url: unknown;
+  let enabled: DynamicValue;
+  let url: DynamicValue;
 
   try {
     const storage = getAppStorage();
@@ -51,13 +50,13 @@ async function getEnabledProxyUrl(): Promise<string | undefined> {
     url = await storage.settings.get("proxy.url");
   } catch {
     proxyCache.enabled = false;
-    proxyCache.url = undefined;
+    delete proxyCache.url;
     return undefined;
   }
 
   proxyCache.enabled = Boolean(enabled);
   if (!proxyCache.enabled) {
-    proxyCache.url = undefined;
+    delete proxyCache.url;
     return undefined;
   }
 

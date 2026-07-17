@@ -1,8 +1,11 @@
+function isToolsMcpConfigPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * MCP server configuration storage.
  */
 
-import { isRecord } from "../utils/type-guards.js";
 
 export const MCP_SERVERS_SETTING_KEY = "mcp.servers.v1";
 const MCP_SERVERS_DOC_VERSION = 1;
@@ -14,8 +17,8 @@ const CONNECTION_STORE_VERSION = 1;
 export const MCP_SERVER_TOKENS_CONNECTION_ID = "builtin.mcp.servers";
 
 export interface McpConfigStore {
-  get(key: string): Promise<unknown>;
-  set(key: string, value: unknown): Promise<void>;
+  get(key: string): Promise<DynamicValue>;
+  set(key: string, value: DynamicValue): Promise<void>;
 }
 
 export interface McpServerConfig {
@@ -40,19 +43,19 @@ type StoredConnectionRecord = {
   secrets?: Record<string, string>;
 };
 
-function normalizeOptionalString(value: unknown): string | undefined {
+function normalizeOptionalString(value: DynamicValue): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function normalizeName(value: unknown): string | null {
+function normalizeName(value: DynamicValue): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizeEnabled(value: unknown): boolean {
+function normalizeEnabled(value: DynamicValue): boolean {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
   if (typeof value === "string") {
@@ -84,7 +87,7 @@ export function validateMcpServerUrl(url: string): string {
   return trimmed.replace(/\/+$/u, "");
 }
 
-function normalizeServerId(value: unknown, fallbackName: string, fallbackUrl: string): string {
+function normalizeServerId(value: DynamicValue, fallbackName: string, fallbackUrl: string): string {
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed.length > 0) {
@@ -101,8 +104,8 @@ function normalizeServerId(value: unknown, fallbackName: string, fallbackUrl: st
   return base.length > 0 ? `mcp-${base}` : `mcp-${crypto.randomUUID()}`;
 }
 
-function normalizeServer(raw: unknown): McpServerConfig | null {
-  if (!isRecord(raw)) return null;
+function normalizeServer(raw: DynamicValue): McpServerConfig | null {
+  if (!isToolsMcpConfigPayloadShape(raw)) return null;
 
   const name = normalizeName(raw.name);
   const rawUrl = normalizeOptionalString(raw.url);
@@ -117,14 +120,18 @@ function normalizeServer(raw: unknown): McpServerConfig | null {
 
   const id = normalizeServerId(raw.id, name, url);
   const token = normalizeOptionalString(raw.token);
-
-  return {
+  const server: McpServerConfig = {
     id,
     name,
     url,
     enabled: normalizeEnabled(raw.enabled),
-    token,
   };
+
+  if (token !== undefined) {
+    server.token = token;
+  }
+
+  return server;
 }
 
 function uniqueById(servers: McpServerConfig[]): McpServerConfig[] {
@@ -151,10 +158,10 @@ function uniqueById(servers: McpServerConfig[]): McpServerConfig[] {
   return out;
 }
 
-function normalizeServers(raw: unknown): McpServerConfig[] {
+function normalizeServers(raw: DynamicValue): McpServerConfig[] {
   const source = Array.isArray(raw)
     ? raw
-    : isRecord(raw) && Array.isArray(raw.servers)
+    : isToolsMcpConfigPayloadShape(raw) && Array.isArray(raw.servers)
       ? raw.servers
       : [];
 
@@ -232,19 +239,19 @@ async function loadConnectionStoreItems(
   settings: McpConfigStore,
 ): Promise<Record<string, StoredConnectionRecord>> {
   const raw = await settings.get(CONNECTION_STORE_KEY);
-  if (!isRecord(raw)) return {};
+  if (!isToolsMcpConfigPayloadShape(raw)) return {};
 
   const rawItems = raw.items;
-  if (!isRecord(rawItems)) return {};
+  if (!isToolsMcpConfigPayloadShape(rawItems)) return {};
 
   const items: Record<string, StoredConnectionRecord> = {};
 
   for (const [connectionId, rawRecord] of Object.entries(rawItems)) {
-    if (!isRecord(rawRecord)) continue;
+    if (!isToolsMcpConfigPayloadShape(rawRecord)) continue;
 
     const rawSecrets = rawRecord.secrets;
     const secrets: Record<string, string> = {};
-    if (isRecord(rawSecrets)) {
+    if (isToolsMcpConfigPayloadShape(rawSecrets)) {
       for (const [fieldId, value] of Object.entries(rawSecrets)) {
         const normalized = normalizeOptionalString(value);
         if (!normalized) continue;
@@ -253,14 +260,21 @@ async function loadConnectionStoreItems(
     }
 
     const status = rawRecord.status;
-    items[connectionId] = {
-      status: status === "connected" || status === "missing" || status === "invalid" || status === "error"
-        ? status
-        : undefined,
-      lastValidatedAt: normalizeOptionalString(rawRecord.lastValidatedAt),
-      lastError: normalizeOptionalString(rawRecord.lastError),
+    const record: StoredConnectionRecord = {
       secrets,
     };
+    if (status === "connected" || status === "missing" || status === "invalid" || status === "error") {
+      record.status = status;
+    }
+    const lastValidatedAt = normalizeOptionalString(rawRecord.lastValidatedAt);
+    if (lastValidatedAt !== undefined) {
+      record.lastValidatedAt = lastValidatedAt;
+    }
+    const lastError = normalizeOptionalString(rawRecord.lastError);
+    if (lastError !== undefined) {
+      record.lastError = lastError;
+    }
+    items[connectionId] = record;
   }
 
   return items;
@@ -300,12 +314,15 @@ async function writeConnectionStoreMcpTokens(
     return;
   }
 
-  items[MCP_SERVER_TOKENS_CONNECTION_ID] = {
+  const record: StoredConnectionRecord = {
     status: "connected",
-    lastValidatedAt: previous?.lastValidatedAt,
-    lastError: undefined,
     secrets: normalizedTokens,
   };
+  const previousLastValidatedAt = normalizeOptionalString(previous?.lastValidatedAt);
+  if (previousLastValidatedAt !== undefined) {
+    record.lastValidatedAt = previousLastValidatedAt;
+  }
+  items[MCP_SERVER_TOKENS_CONNECTION_ID] = record;
 
   await saveConnectionStoreItems(settings, items);
 }
@@ -314,11 +331,20 @@ function mergeServersWithConnectionTokens(args: {
   servers: readonly McpServerConfig[];
   connectionTokens: Readonly<Record<string, string>>;
 }): McpServerConfig[] {
-  return args.servers.map((server) => ({
-    ...server,
-    token: normalizeOptionalString(args.connectionTokens[server.id])
-      ?? normalizeOptionalString(server.token),
-  }));
+  return args.servers.map((server) => {
+    const token = normalizeOptionalString(args.connectionTokens[server.id])
+      ?? normalizeOptionalString(server.token);
+    const merged: McpServerConfig = {
+      id: server.id,
+      name: server.name,
+      url: server.url,
+      enabled: server.enabled,
+    };
+    if (token !== undefined) {
+      merged.token = token;
+    }
+    return merged;
+  });
 }
 
 export async function migrateLegacyMcpTokensToConnectionStore(
@@ -379,7 +405,7 @@ export async function saveMcpServers(
 
   try {
     await settings.set(MCP_SERVERS_SETTING_KEY, createDocument(stripServerTokens(normalized)));
-  } catch (error: unknown) {
+  } catch (error) {
     try {
       const currentTokenMap = await loadConnectionStoreMcpTokens(settings);
       const rollbackIsSafe = areTokenMapsEqual(currentTokenMap, tokensByServerId);
@@ -408,12 +434,16 @@ export function createMcpServerConfig(input: {
 
   const url = validateMcpServerUrl(input.url);
   const token = normalizeOptionalString(input.token);
-
-  return {
+  const server: McpServerConfig = {
     id: `mcp-${crypto.randomUUID()}`,
     name,
     url,
     enabled: input.enabled ?? true,
-    token,
   };
+
+  if (token !== undefined) {
+    server.token = token;
+  }
+
+  return server;
 }

@@ -9,9 +9,9 @@
 
 import { getModel } from "@earendil-works/pi-ai/compat";
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionData } from "@earendil-works/pi-web-ui/dist/storage/types.js";
-import type { SessionsStore } from "@earendil-works/pi-web-ui/dist/storage/stores/sessions-store.js";
-import type { SettingsStore } from "@earendil-works/pi-web-ui/dist/storage/stores/settings-store.js";
+import type { SessionData } from "../storage/local/types.js";
+import type { SessionsStore } from "../storage/local/sessions-store.js";
+import type { SettingsStore } from "../storage/local/settings-store.js";
 
 import {
   resolveCustomProviderModel,
@@ -40,7 +40,7 @@ type PersistedSessionModel = SessionData["model"];
 
 type UserLikeMessage = AgentMessage & {
   role: "user" | "user-with-attachments";
-  content: unknown;
+  content: DynamicValue;
 };
 
 /**
@@ -188,7 +188,10 @@ export async function setupSessionPersistence(opts: {
   }
 
   async function saveSession(optsForSave?: { force?: boolean }): Promise<void> {
-    if (!shouldPersistSession({ firstAssistantSeen, force: optsForSave?.force })) return;
+    if (!shouldPersistSession({
+      firstAssistantSeen,
+      ...(optsForSave?.force !== undefined ? { force: optsForSave.force } : {}),
+    })) return;
 
     try {
       const now = new Date().toISOString();
@@ -323,7 +326,7 @@ export async function setupSessionPersistence(opts: {
     if (sessionData.model) {
       agent.state.model = await refreshPersistedModel({
         persisted: sessionData.model,
-        customProvidersStore: opts.customProvidersStore,
+        ...(opts.customProvidersStore !== undefined ? { customProvidersStore: opts.customProvidersStore } : {}),
       });
     }
     if (sessionData.thinkingLevel) {

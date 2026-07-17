@@ -12,8 +12,12 @@ import {
   type WorkspaceFileLocationKind,
   type WorkspaceFileWorkbookTag,
 } from "../files/types.js";
-import { type FilesWorkspaceAuditContext, getFilesWorkspace } from "../files/workspace.js";
+import {
+  type FilesWorkspaceAuditContext,
+  getFilesWorkspace,
+} from "../files/workspace.js";
 import { getErrorMessage } from "../utils/errors.js";
+import { MarkdownBlock } from "./messages/markdown-block.js";
 import {
   createFilesDialogDetailActions,
   type FilesDialogDetailActionFileRef,
@@ -73,7 +77,9 @@ interface DetailPreviewResult {
 
 type FilesDialogFileRef = FilesDialogDetailActionFileRef;
 
-function resolveFileLocationKind(file: WorkspaceFileEntry): WorkspaceFileLocationKind {
+function resolveFileLocationKind(
+  file: WorkspaceFileEntry,
+): WorkspaceFileLocationKind {
   if (file.locationKind) {
     return file.locationKind;
   }
@@ -92,8 +98,13 @@ function toFileRef(file: WorkspaceFileEntry): FilesDialogFileRef {
   };
 }
 
-function fileMatchesRef(file: WorkspaceFileEntry, ref: FilesDialogFileRef): boolean {
-  return file.path === ref.path && resolveFileLocationKind(file) === ref.locationKind;
+function fileMatchesRef(
+  file: WorkspaceFileEntry,
+  ref: FilesDialogFileRef,
+): boolean {
+  return (
+    file.path === ref.path && resolveFileLocationKind(file) === ref.locationKind
+  );
 }
 
 function formatRelativeDate(timestamp: number): string {
@@ -101,9 +112,12 @@ function formatRelativeDate(timestamp: number): string {
   const diff = now - timestamp;
 
   if (diff < 60_000) return t("date.justNow");
-  if (diff < 3_600_000) return t("date.minutesAgo", { n: Math.round(diff / 60_000) });
-  if (diff < 86_400_000) return t("date.hoursAgo", { n: Math.round(diff / 3_600_000) });
-  if (diff < 604_800_000) return t("date.daysAgo", { n: Math.round(diff / 86_400_000) });
+  if (diff < 3_600_000)
+    return t("date.minutesAgo", { n: Math.round(diff / 60_000) });
+  if (diff < 86_400_000)
+    return t("date.hoursAgo", { n: Math.round(diff / 3_600_000) });
+  if (diff < 604_800_000)
+    return t("date.daysAgo", { n: Math.round(diff / 86_400_000) });
   return new Date(timestamp).toLocaleDateString();
 }
 
@@ -115,7 +129,10 @@ function isPdfMimeType(mimeType: string): boolean {
   return mimeType.trim().toLowerCase() === "application/pdf";
 }
 
-function hasOneOfExtensions(path: string, extensions: readonly string[]): boolean {
+function hasOneOfExtensions(
+  path: string,
+  extensions: readonly string[],
+): boolean {
   const lowerPath = path.toLowerCase();
   return extensions.some((extension) => lowerPath.endsWith(extension));
 }
@@ -270,54 +287,60 @@ function createBinaryPreview(args: {
   return preview;
 }
 
-function createTextPreview(text: string, truncated: boolean): {
+/** File extensions previewed as rendered markdown instead of plain text. */
+const MARKDOWN_PREVIEW_EXTENSIONS = new Set(["md", "markdown"]);
+
+function isMarkdownPreviewFile(fileName: string): boolean {
+  const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
+  return MARKDOWN_PREVIEW_EXTENSIONS.has(extension);
+}
+
+function createTextPreview(args: {
+  fileName: string;
+  text: string;
+  truncated: boolean;
+}): {
   element: HTMLDivElement;
   hasMoreLines: boolean;
 } {
   const preview = document.createElement("div");
-  preview.className = "pi-files-detail-preview pi-files-detail-preview--text";
 
   // Copy button using reusable helper
   const copyBtn = createCopyButton({
-    text,
+    text: args.text,
     className: "pi-files-detail-preview__copy",
     title: t("files-dialog-actions.copyContent"),
   });
   preview.appendChild(copyBtn);
 
-  const lines = text.replaceAll("\r\n", "\n").split("\n");
+  const lines = args.text.replaceAll("\r\n", "\n").split("\n");
   const visibleLines = lines.slice(0, TEXT_PREVIEW_MAX_LINES);
-
-  visibleLines.forEach((line, index) => {
-    const lineRow = document.createElement("div");
-    lineRow.className = "pi-files-detail-preview__line";
-
-    const lineNumber = document.createElement("span");
-    lineNumber.className = "pi-files-detail-preview__ln";
-    lineNumber.textContent = String(index + 1);
-
-    const code = document.createElement("span");
-    code.className = "pi-files-detail-preview__code";
-    code.textContent = line;
-
-    lineRow.append(lineNumber, code);
-    preview.appendChild(lineRow);
-  });
-
   const hasMoreLines = lines.length > TEXT_PREVIEW_MAX_LINES;
-  if (hasMoreLines && !truncated) {
-    const fadeLine = document.createElement("div");
-    fadeLine.className = "pi-files-detail-preview__line pi-files-detail-preview__line--fade";
 
-    const lineNumber = document.createElement("span");
-    lineNumber.className = "pi-files-detail-preview__ln";
-    lineNumber.textContent = String(TEXT_PREVIEW_MAX_LINES + 1);
+  if (isMarkdownPreviewFile(args.fileName)) {
+    // Rendered markdown — readable, wrapping document view. MarkdownBlock
+    // escapes raw HTML by default and the marked pipeline is hardened at
+    // boot (safe links, no image network requests), so untrusted file
+    // content is safe here.
+    preview.className =
+      "pi-files-detail-preview pi-files-detail-preview--markdown";
+    const block = new MarkdownBlock();
+    block.content = visibleLines.join("\n");
+    preview.appendChild(block);
+  } else {
+    // Plain text — wrapped prose view, no line numbers. Preview is for
+    // reading, not code editing.
+    preview.className = "pi-files-detail-preview pi-files-detail-preview--text";
+    const body = document.createElement("div");
+    body.className = "pi-files-detail-preview__body";
+    body.textContent = visibleLines.join("\n");
+    preview.appendChild(body);
+  }
 
-    const code = document.createElement("span");
-    code.className = "pi-files-detail-preview__code";
-
-    fadeLine.append(lineNumber, code);
-    preview.appendChild(fadeLine);
+  if (hasMoreLines && !args.truncated) {
+    const fade = document.createElement("div");
+    fade.className = "pi-files-detail-preview__fade";
+    preview.appendChild(fade);
   }
 
   return {
@@ -332,7 +355,8 @@ function createUploadActionButton(args: {
 }): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
+  button.className =
+    "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
 
   const iconEl = document.createElement("span");
   iconEl.className = "pi-files-actions__icon";
@@ -364,7 +388,8 @@ function createEmptyState(onUpload: () => void): HTMLDivElement {
 
   const uploadButton = document.createElement("button");
   uploadButton.type = "button";
-  uploadButton.className = "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
+  uploadButton.className =
+    "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
   uploadButton.textContent = t("files-dialog.uploadButtonText");
   uploadButton.addEventListener("click", onUpload);
 
@@ -382,7 +407,9 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return out;
 }
 
-function createWorkbookTagCallout(workbookTag: WorkspaceFileWorkbookTag): HTMLDivElement {
+function createWorkbookTagCallout(
+  workbookTag: WorkspaceFileWorkbookTag,
+): HTMLDivElement {
   const strong = document.createElement("strong");
   strong.textContent = workbookTag.workbookLabel;
 
@@ -401,7 +428,8 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
 
   const dialog = createOverlayDialog({
     overlayId: OVERLAY_ID,
-    cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-files-dialog",
+    cardClassName:
+      "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-files-dialog",
   });
 
   const closeOverlay = dialog.close;
@@ -423,7 +451,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
   const detailBackButton = document.createElement("button");
   detailBackButton.type = "button";
   detailBackButton.className = "pi-files-detail__back";
-  detailBackButton.setAttribute("aria-label", t("files-dialog.detailBackButton"));
+  detailBackButton.setAttribute(
+    "aria-label",
+    t("files-dialog.detailBackButton"),
+  );
   detailBackButton.textContent = "←";
 
   const detailTitleWrap = document.createElement("div");
@@ -529,7 +560,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     activePreviewObjectUrl = null;
   };
 
-  const findFileByRef = (ref: FilesDialogFileRef): WorkspaceFileEntry | null => {
+  const findFileByRef = (
+    ref: FilesDialogFileRef,
+  ): WorkspaceFileEntry | null => {
     return allFiles.find((file) => fileMatchesRef(file, ref)) ?? null;
   };
 
@@ -587,7 +620,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     });
   };
 
-  const buildDetailPreview = async (file: WorkspaceFileEntry): Promise<DetailPreviewResult> => {
+  const buildDetailPreview = async (
+    file: WorkspaceFileEntry,
+  ): Promise<DetailPreviewResult> => {
     const fileRef = toFileRef(file);
 
     if (file.kind === "text") {
@@ -598,7 +633,11 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
         locationKind: fileRef.locationKind,
       });
 
-      const preview = createTextPreview(result.text ?? "", result.truncated === true);
+      const preview = createTextPreview({
+        fileName: file.name,
+        text: result.text ?? "",
+        truncated: result.truncated === true,
+      });
       return {
         element: preview.element,
         previewTruncated: result.truncated === true,
@@ -627,10 +666,13 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       }
 
       const bytes = base64ToBytes(result.base64);
-      const url = URL.createObjectURL(new Blob([toArrayBuffer(bytes)], { type: file.mimeType }));
+      const url = URL.createObjectURL(
+        new Blob([toArrayBuffer(bytes)], { type: file.mimeType }),
+      );
 
       const preview = document.createElement("div");
-      preview.className = "pi-files-detail-preview pi-files-detail-preview--image";
+      preview.className =
+        "pi-files-detail-preview pi-files-detail-preview--image";
 
       const image = document.createElement("img");
       image.src = url;
@@ -667,7 +709,9 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     };
   };
 
-  const renderDetailView = async (fileRef: FilesDialogFileRef): Promise<void> => {
+  const renderDetailView = async (
+    fileRef: FilesDialogFileRef,
+  ): Promise<void> => {
     const file = findFileByRef(fileRef);
     if (!file) {
       showListView();
@@ -691,21 +735,27 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     }
 
     if (isFilesDialogBuiltInDoc(file)) {
-      nodes.push(createInfoCallout({
-        icon: lucide(ClipboardList),
-        body: ["Built-in documentation — read only. Pi references this automatically."],
-      }));
+      nodes.push(
+        createInfoCallout({
+          icon: lucide(ClipboardList),
+          body: [
+            "Built-in documentation — read only. Pi references this automatically.",
+          ],
+        }),
+      );
     }
 
     let previewResult: DetailPreviewResult;
     try {
       previewResult = await buildDetailPreview(file);
-    } catch (error: unknown) {
+    } catch (error) {
       previewResult = {
         element: createBinaryPreview({
           file,
           icon: lucide(AlertTriangle),
-          label: t("files-dialog.preview.unavailable", { error: getErrorMessage(error) }),
+          label: t("files-dialog.preview.unavailable", {
+            error: getErrorMessage(error),
+          }),
         }),
         previewTruncated: false,
         objectUrl: null,
@@ -766,6 +816,16 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     name.title = file.path;
     nameRow.appendChild(name);
 
+    const meta = document.createElement("span");
+    meta.className = "pi-files-item__meta";
+    meta.textContent = buildFileMetaLine(file);
+
+    info.append(nameRow, meta);
+
+    row.append(icon, info);
+
+    // Badge sits at row level (right-aligned column) so all badges share
+    // the same x position regardless of filename length.
     const badge = resolveFilesDialogBadge(file);
     if (badge) {
       const badgeElement = document.createElement("span");
@@ -774,20 +834,14 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       if (badge.title) {
         badgeElement.title = badge.title;
       }
-      nameRow.appendChild(badgeElement);
+      row.appendChild(badgeElement);
     }
-
-    const meta = document.createElement("span");
-    meta.className = "pi-files-item__meta";
-    meta.textContent = buildFileMetaLine(file);
-
-    info.append(nameRow, meta);
 
     const arrow = document.createElement("span");
     arrow.className = "pi-files-item__arrow";
     arrow.textContent = "›";
 
-    row.append(icon, info, arrow);
+    row.appendChild(arrow);
     row.addEventListener("click", () => {
       void showDetailView(toFileRef(file));
     });
@@ -795,7 +849,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     return row;
   };
 
-  const createFolderGroup = (folder: FilesDialogFolderGroup, collapseKey: string): HTMLDivElement => {
+  const createFolderGroup = (
+    folder: FilesDialogFolderGroup,
+    collapseKey: string,
+  ): HTMLDivElement => {
     const group = document.createElement("div");
     group.className = "pi-files-folder-group";
 
@@ -852,7 +909,8 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
   const renderListView = (): void => {
     const files = allFiles;
 
-    const connectState = resolveFilesDialogConnectFolderButtonState(backendStatus);
+    const connectState =
+      resolveFilesDialogConnectFolderButtonState(backendStatus);
     connectFolderButton.hidden = connectState.hidden;
     connectFolderButton.disabled = connectState.disabled;
     connectFolderButton.title = connectState.title;
@@ -884,15 +942,20 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       backendStatus,
     });
 
-    const hasNonBuiltInFiles = files.some((file) => !isFilesDialogBuiltInDoc(file));
-    const hasFilterQuery = normalizeFilesDialogFilterText(filterText).length > 0;
+    const hasNonBuiltInFiles = files.some(
+      (file) => !isFilesDialogBuiltInDoc(file),
+    );
+    const hasFilterQuery =
+      normalizeFilesDialogFilterText(filterText).length > 0;
 
     sectionsHost.replaceChildren();
 
     if (!hasNonBuiltInFiles && !hasFilterQuery) {
-      sectionsHost.appendChild(createEmptyState(() => {
-        hiddenInput.click();
-      }));
+      sectionsHost.appendChild(
+        createEmptyState(() => {
+          hiddenInput.click();
+        }),
+      );
     }
 
     if (sections.length === 0) {
@@ -940,11 +1003,16 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
 
         // Folder groups
         section.folders.forEach((folder) => {
-          sectionList.appendChild(createFolderGroup(folder, `${section.key}:${folder.name}`));
+          sectionList.appendChild(
+            createFolderGroup(folder, `${section.key}:${folder.name}`),
+          );
         });
 
         const applyCollapsedState = (collapsed: boolean): void => {
-          sectionHead.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          sectionHead.setAttribute(
+            "aria-expanded",
+            collapsed ? "false" : "true",
+          );
           sectionList.hidden = collapsed;
         };
 
@@ -971,8 +1039,11 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     footer.textContent = buildFilesDialogStatusMessage({
       totalCount: files.length,
       totalSizeBytes: totalSize,
-      backendLabel: backendStatus?.label ?? t("files-dialog.storageUnavailable"),
-      nativeDirectoryName: backendStatus?.nativeConnected ? backendStatus.nativeDirectoryName ?? null : null,
+      backendLabel:
+        backendStatus?.label ?? t("files-dialog.storageUnavailable"),
+      nativeDirectoryName: backendStatus?.nativeConnected
+        ? (backendStatus.nativeDirectoryName ?? null)
+        : null,
     });
   };
 
@@ -997,14 +1068,21 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
         }
 
         await renderDetailView(detailFileRef);
-      } catch (error: unknown) {
-        showToast(t("files-dialog.toast.refreshFailed", { error: getErrorMessage(error) }));
+      } catch (error) {
+        showToast(
+          t("files-dialog.toast.refreshFailed", {
+            error: getErrorMessage(error),
+          }),
+        );
       }
     })();
   };
 
   dialog.addCleanup(() => {
-    document.removeEventListener(FILES_WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
+    document.removeEventListener(
+      FILES_WORKSPACE_CHANGED_EVENT,
+      onWorkspaceChanged,
+    );
     revokePreviewObjectUrl();
   });
 
@@ -1017,11 +1095,17 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       return;
     }
 
-    void workspace.connectNativeDirectory({
-      audit: DIALOG_AUDIT_CONTEXT,
-    }).catch((error: unknown) => {
-      showToast(t("files-dialog.toast.connectFolderFailed", { error: getErrorMessage(error) }));
-    });
+    void workspace
+      .connectNativeDirectory({
+        audit: DIALOG_AUDIT_CONTEXT,
+      })
+      .catch((error: DynamicValue) => {
+        showToast(
+          t("files-dialog.toast.connectFolderFailed", {
+            error: getErrorMessage(error),
+          }),
+        );
+      });
   });
 
   hiddenInput.addEventListener("change", () => {
@@ -1033,14 +1117,24 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     const files = Array.from(selected);
     hiddenInput.value = "";
 
-    void workspace.importFiles(files, {
-      audit: DIALOG_AUDIT_CONTEXT,
-    })
-      .then((count) => {
-        showToast(t("files-dialog.toast.imported", { count, plural: count === 1 ? "" : "s" }));
+    void workspace
+      .importFiles(files, {
+        audit: DIALOG_AUDIT_CONTEXT,
       })
-      .catch((error: unknown) => {
-        showToast(t("files-dialog.toast.uploadFailed", { error: getErrorMessage(error) }));
+      .then((count) => {
+        showToast(
+          t("files-dialog.toast.imported", {
+            count,
+            plural: count === 1 ? "" : "s",
+          }),
+        );
+      })
+      .catch((error: DynamicValue) => {
+        showToast(
+          t("files-dialog.toast.uploadFailed", {
+            error: getErrorMessage(error),
+          }),
+        );
       });
   });
 
@@ -1056,8 +1150,10 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
     await refreshWorkspaceState();
     renderListView();
     setView("list");
-  } catch (error: unknown) {
-    showToast(t("files-dialog.toast.loadFailed", { error: getErrorMessage(error) }));
+  } catch (error) {
+    showToast(
+      t("files-dialog.toast.loadFailed", { error: getErrorMessage(error) }),
+    );
     showListView();
     renderListView();
   }

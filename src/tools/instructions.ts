@@ -7,7 +7,7 @@
 
 import { Type, type Static } from "@sinclair/typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
 
 import {
   applyRuleAction,
@@ -143,7 +143,7 @@ export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
           ],
           details: undefined,
         };
-      } catch (error: unknown) {
+      } catch (error) {
         return {
           content: [{ type: "text", text: `Error updating rules: ${getErrorMessage(error)}` }],
           details: undefined,

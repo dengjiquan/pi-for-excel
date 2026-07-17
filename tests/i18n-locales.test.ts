@@ -7,12 +7,36 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const localesDir = join(root, "src", "language", "locales");
 
-const en = JSON.parse(readFileSync(join(localesDir, "en.json"), "utf8")) as Record<string, string>;
-const zh = JSON.parse(readFileSync(join(localesDir, "zh-CN.json"), "utf8")) as Record<string, string>;
+function parseLocaleJson(raw: DynamicValue, label: string): Record<string, string> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${label} locale must be an object`);
+  }
+
+  const rawObject = raw as DynamicObject;
+  const parsed: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rawObject)) {
+    if (typeof value !== "string") {
+      throw new Error(`${label} locale value for ${key} must be a string`);
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+const en = parseLocaleJson(JSON.parse(readFileSync(join(localesDir, "en.json"), "utf8")) as DynamicValue, "en");
+const zh = parseLocaleJson(JSON.parse(readFileSync(join(localesDir, "zh-CN.json"), "utf8")) as DynamicValue, "zh-CN");
+
+function requireMatchGroup(match: RegExpMatchArray, index: number): string {
+  const value = match[index];
+  if (value === undefined) {
+    throw new Error(`Expected regex capture group ${index}.`);
+  }
+  return value;
+}
 
 function placeholders(value: string): Set<string> {
   const found = new Set<string>();
-  for (const m of value.matchAll(/\{([a-zA-Z0-9_]+)\}/g)) found.add(m[1]);
+  for (const m of value.matchAll(/\{([a-zA-Z0-9_]+)\}/g)) found.add(requireMatchGroup(m, 1));
   return found;
 }
 
@@ -93,11 +117,11 @@ void test("every locale key is referenced somewhere in src/", () => {
   // - humanize.unit.*  via nUnit() template keys in src/ui/humanize-params.ts
   const labelKeys = new Set(
     [...corpus.matchAll(/\bl\("([^"]+)"\)/g)].map(
-      (m) => `humanize.label.${m[1].toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}`,
+      (m) => `humanize.label.${requireMatchGroup(m, 1).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}`,
     ),
   );
   const valueKeys = new Set(
-    [...corpus.matchAll(/\bv\("([^"]+)"/g)].map((m) => `humanize.value.${m[1]}`),
+    [...corpus.matchAll(/\bv\("([^"]+)"/g)].map((m) => `humanize.value.${requireMatchGroup(m, 1)}`),
   );
   const unused = Object.keys(en).filter((k) => {
     if (labelKeys.has(k) || valueKeys.has(k)) return false;
@@ -116,8 +140,9 @@ void test("every static t(\"...\") call site references an existing key", () => 
     for (const m of content.matchAll(/\bt\(\s*"([^"$`]+)"/g)) {
       // Keys ending in "." are dynamic prefixes (string concatenation), e.g.
       // t("perm.trust." + trust) — covered by the unused-key exemptions above.
-      if (m[1].endsWith(".")) continue;
-      if (!(m[1] in en)) missing.push(`${f.slice(root.length + 1)}: ${m[1]}`);
+      const key = requireMatchGroup(m, 1);
+      if (key.endsWith(".")) continue;
+      if (!(key in en)) missing.push(`${f.slice(root.length + 1)}: ${key}`);
     }
   }
   assert.deepEqual(missing, [], `t() call sites with unknown keys: ${missing.join(", ")}`);

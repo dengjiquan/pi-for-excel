@@ -122,7 +122,7 @@ function qualifyOwnedConnectionId(ownerId: string, connectionId: string): string
 }
 
 function normalizeToolConnectionRequirements(
-  rawValue: unknown,
+  rawValue: DynamicValue,
   ownerId: string,
 ): string[] | undefined {
   const normalizedIds: string[] = [];
@@ -159,12 +159,12 @@ function normalizeConnectionDefinitionForOwner(
 }
 
 function assertValidToolDefinition(name: string, tool: ExtensionToolDefinition): void {
-  const execute: unknown = Reflect.get(tool, "execute");
+  const execute: DynamicValue = Reflect.get(tool, "execute");
   if (typeof execute === "function") {
     return;
   }
 
-  const handler: unknown = Reflect.get(tool, "handler");
+  const handler: DynamicValue = Reflect.get(tool, "handler");
   if (typeof handler === "function") {
     throw new Error(
       `Extension tool "${name}" is invalid: use execute(params, signal?, onUpdate?) instead of handler.`,
@@ -569,7 +569,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
     },
 
     storage: {
-      async get(key: string): Promise<unknown> {
+      async get(key: string): Promise<DynamicValue> {
         assertCapability("storage.readwrite");
         if (!storageGet) {
           throw new Error("Extension host does not support storage.get()");
@@ -578,7 +578,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
         return storageGet(key);
       },
 
-      async set(key: string, value: unknown): Promise<void> {
+      async set(key: string, value: DynamicValue): Promise<void> {
         assertCapability("storage.readwrite");
         if (!storageSet) {
           throw new Error("Extension host does not support storage.set()");
@@ -721,13 +721,13 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           ownerId: widgetOwnerId,
           id: widgetId,
           element: spec.el,
-          title: spec.title,
-          placement: spec.placement,
-          order: spec.order,
-          collapsible: spec.collapsible,
-          collapsed: spec.collapsed,
-          minHeightPx: spec.minHeightPx,
-          maxHeightPx: spec.maxHeightPx,
+          ...(spec.title !== undefined ? { title: spec.title } : {}),
+          ...(spec.placement !== undefined ? { placement: spec.placement } : {}),
+          ...(spec.order !== undefined ? { order: spec.order } : {}),
+          ...(spec.collapsible !== undefined ? { collapsible: spec.collapsible } : {}),
+          ...(spec.collapsed !== undefined ? { collapsed: spec.collapsed } : {}),
+          ...(spec.minHeightPx !== undefined ? { minHeightPx: spec.minHeightPx } : {}),
+          ...(spec.maxHeightPx !== undefined ? { maxHeightPx: spec.maxHeightPx } : {}),
         });
       },
 

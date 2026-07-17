@@ -94,7 +94,7 @@ export function createActionQueue(opts: {
 
   const shutdown = () => {
     closed = true;
-    agent.prepareNextTurn = undefined;
+    delete agent.prepareNextTurn;
     actions.length = 0;
     syncDisplay();
   };

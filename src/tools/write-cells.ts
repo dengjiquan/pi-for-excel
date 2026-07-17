@@ -64,16 +64,16 @@ type WriteCellsResult =
     sheetName: string;
     address: string;
     existingCount: number;
-    existingValues: unknown[][];
+    existingValues: DynamicValue[][];
   }
   | {
     blocked: false;
     sheetName: string;
     address: string;
-    beforeValues: unknown[][];
-    beforeFormulas: unknown[][];
-    readBackValues: unknown[][];
-    readBackFormulas: unknown[][];
+    beforeValues: DynamicValue[][];
+    beforeFormulas: DynamicValue[][];
+    readBackValues: DynamicValue[][];
+    readBackFormulas: DynamicValue[][];
   };
 
 type BlockedWriteCellsResult = Extract<WriteCellsResult, { blocked: true }>;
@@ -108,8 +108,9 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
 
         const { padded, rows, cols } = padValues(params.values);
 
-        const startCellRef = params.start_cell.includes("!")
-          ? params.start_cell.split("!")[1]
+        const bangIndex = params.start_cell.indexOf("!");
+        const startCellRef = bangIndex >= 0
+          ? params.start_cell.slice(bangIndex + 1)
           : params.start_cell;
 
         if (startCellRef.includes(":")) {
@@ -197,7 +198,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
               toolName: "write_cells",
               toolCallId,
               blocked: true,
-              outputAddress: blockedResult.details.address,
+              ...(blockedResult.details.address !== undefined ? { outputAddress: blockedResult.details.address } : {}),
               changedCount: 0,
               changes: [],
             },
@@ -213,7 +214,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
             toolName: "write_cells",
             toolCallId,
             blocked: false,
-            outputAddress: successResult.details.address,
+            ...(successResult.details.address !== undefined ? { outputAddress: successResult.details.address } : {}),
             changedCount: successResult.details.changes?.changedCount ?? 0,
             changes: successResult.details.changes?.sample ?? [],
           },
@@ -242,7 +243,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
         });
 
         return successResult;
-      } catch (e: unknown) {
+      } catch (e) {
         return {
           content: [{ type: "text", text: `Error writing cells: ${getErrorMessage(e)}` }],
           details: { kind: "write_cells", blocked: false },
@@ -252,13 +253,14 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
   };
 }
 
-function findInvalidFormulas(values: unknown[][], startCell: string): InvalidFormula[] {
+function findInvalidFormulas(values: DynamicValue[][], startCell: string): InvalidFormula[] {
   const start = parseCell(startCell);
   const invalid: InvalidFormula[] = [];
 
   for (let r = 0; r < values.length; r++) {
-    for (let c = 0; c < values[r].length; c++) {
-      const value = values[r][c];
+    const valueRow = values[r] ?? [];
+    for (let c = 0; c < valueRow.length; c++) {
+      const value = valueRow[c];
       if (typeof value === "string" && value.startsWith("=")) {
         const reason = validateFormula(value);
         if (reason) {
@@ -307,12 +309,13 @@ export function validateFormula(formula: string): string | null {
   return null;
 }
 
-export function countOccupiedCells(values: unknown[][], formulas: unknown[][]): number {
+export function countOccupiedCells(values: DynamicValue[][], formulas: DynamicValue[][]): number {
   let count = 0;
   for (let r = 0; r < values.length; r++) {
-    for (let c = 0; c < values[r].length; c++) {
-      const value = values[r][c];
-      const formula = formulas?.[r]?.[c];
+    const valueRow = values[r] ?? [];
+    for (let c = 0; c < valueRow.length; c++) {
+      const value = valueRow[c];
+      const formula = formulas[r]?.[c];
       const hasValue = value !== null && value !== undefined && value !== "";
       const hasFormula = typeof formula === "string" && formula.startsWith("=");
       if (hasValue || hasFormula) count += 1;
@@ -325,7 +328,7 @@ const VERIFIED_VALUES_PREVIEW_ROWS = 8;
 const VERIFIED_VALUES_PREVIEW_COLS = 6;
 
 interface VerifiedValuesPreview {
-  values: unknown[][];
+  values: DynamicValue[][];
   totalRows: number;
   totalCols: number;
   shownRows: number;
@@ -335,16 +338,16 @@ interface VerifiedValuesPreview {
   truncated: boolean;
 }
 
-function buildVerifiedValuesPreview(values: unknown[][]): VerifiedValuesPreview {
+function buildVerifiedValuesPreview(values: DynamicValue[][]): VerifiedValuesPreview {
   const totalRows = values.length;
   const totalCols = values.reduce((max, row) => Math.max(max, row.length), 0);
 
   const shownRows = Math.min(totalRows, VERIFIED_VALUES_PREVIEW_ROWS);
   const shownCols = Math.min(totalCols, VERIFIED_VALUES_PREVIEW_COLS);
 
-  const previewValues: unknown[][] = [];
+  const previewValues: DynamicValue[][] = [];
   for (let r = 0; r < shownRows; r += 1) {
-    previewValues.push(values[r].slice(0, shownCols));
+    previewValues.push((values[r] ?? []).slice(0, shownCols));
   }
 
   const omittedRows = Math.max(totalRows - shownRows, 0);
@@ -395,8 +398,10 @@ function formatBlocked(result: BlockedWriteCellsResult): AgentToolResult<WriteCe
 
 function formatSuccess(result: SuccessWriteCellsResult, rows: number, cols: number): AgentToolResult<WriteCellsDetails> {
   const fullAddr = qualifiedAddress(result.sheetName, result.address);
-  const cellPart = result.address.includes("!") ? result.address.split("!")[1] : result.address;
-  const startCell = cellPart.split(":")[0];
+  const bangIndex = result.address.indexOf("!");
+  const cellPart = bangIndex >= 0 ? result.address.slice(bangIndex + 1) : result.address;
+  const colonIndex = cellPart.indexOf(":");
+  const startCell = colonIndex >= 0 ? cellPart.slice(0, colonIndex) : cellPart;
 
   const lines: string[] = [];
   lines.push(`Written to **${fullAddr}** (${rows}×${cols})`);
@@ -410,8 +415,9 @@ function formatSuccess(result: SuccessWriteCellsResult, rows: number, cols: numb
       const errCell = parseCell(err.address);
       const r = errCell.row - start.row;
       const c = errCell.col - start.col;
-      if (r >= 0 && c >= 0 && r < result.readBackFormulas.length && c < result.readBackFormulas[r].length) {
-        const f = result.readBackFormulas[r][c];
+      const formulaRow = result.readBackFormulas[r];
+      if (r >= 0 && c >= 0 && formulaRow !== undefined && c < formulaRow.length) {
+        const f = formulaRow[c];
         if (typeof f === "string") {
           err.formula = f;
         }

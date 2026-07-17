@@ -6,7 +6,10 @@
  * "Load failed" / "Connection error".
  */
 
+import type { SpreadsheetHostKind } from "../host/types.js";
+
 export const DEFAULT_LOCAL_PROXY_URL = "https://localhost:3003";
+export const WPS_DEV_HOST_GATEWAY_PROXY_URL = "http://10.0.2.2:3003";
 
 /**
  * Resolve the build-time default proxy URL override (org/central deployments).
@@ -14,7 +17,7 @@ export const DEFAULT_LOCAL_PROXY_URL = "https://localhost:3003";
  * https:// URL — http would be blocked as mixed content in Office webviews,
  * so we refuse it here rather than baking in a broken default.
  */
-export function resolveDefaultProxyUrl(raw: unknown): string {
+export function resolveDefaultProxyUrl(raw: DynamicValue): string {
   if (typeof raw !== "string") return DEFAULT_LOCAL_PROXY_URL;
   const candidate = normalizeProxyUrl(raw);
   if (candidate.length === 0) return DEFAULT_LOCAL_PROXY_URL;
@@ -58,6 +61,8 @@ export const DEFAULT_PROXY_IS_REMOTE = !isLoopbackProxyUrl(DEFAULT_PROXY_URL);
  * otherwise the helper will return 403 and OAuth preflight checks will fail.
  */
 export const PROXY_REACHABILITY_TARGET_URL = "https://github.com";
+export const PROXY_HEALTH_HEADER = "x-pi-for-excel-proxy";
+export const CODEX_WEBSOCKET_BRIDGE_HEADER = "x-pi-for-excel-codex-websocket-bridge";
 
 export const PROXY_HELPER_DOCS_URL =
   "https://github.com/tmustier/pi-for-excel/blob/main/docs/install.md#oauth-logins-and-cors-proxy";
@@ -67,9 +72,28 @@ export function normalizeProxyUrl(url: string): string {
 }
 
 /**
+ * Resolve the runtime default proxy URL, including host-specific dev defaults.
+ */
+export function resolveRuntimeDefaultProxyUrl(options?: {
+  hostKind?: SpreadsheetHostKind;
+  location?: Pick<Location, "hostname" | "protocol">;
+}): string {
+  const loc = options?.location ?? (typeof window === "undefined" ? undefined : window.location);
+  if (
+    options?.hostKind === "wps" &&
+    loc?.protocol === "http:" &&
+    loc.hostname === "10.0.2.2"
+  ) {
+    return WPS_DEV_HOST_GATEWAY_PROXY_URL;
+  }
+
+  return DEFAULT_PROXY_URL;
+}
+
+/**
  * Resolve a user-configured proxy URL with sane defaults.
  */
-export function resolveConfiguredProxyUrl(rawUrl: unknown): string {
+export function resolveConfiguredProxyUrl(rawUrl: DynamicValue): string {
   const trimmed = typeof rawUrl === "string" ? rawUrl.trim() : "";
   const candidate = trimmed.length > 0 ? trimmed : DEFAULT_PROXY_URL;
   return normalizeProxyUrl(candidate);
@@ -79,6 +103,26 @@ export function resolveConfiguredProxyUrl(rawUrl: unknown): string {
  * Probe whether a proxy URL is reachable and can forward to the allowlisted
  * reachability target.
  */
+export async function probeCodexWebSocketBridge(
+  proxyUrl: string,
+  timeoutMs: number = 1500,
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const url = `${normalizeProxyUrl(proxyUrl)}/healthz`;
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    return response.ok
+      && response.headers.get(PROXY_HEALTH_HEADER) === "1"
+      && response.headers.get(CODEX_WEBSOCKET_BRIDGE_HEADER) === "1";
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function probeProxyReachability(
   proxyUrl: string,
   timeoutMs: number = 1500,

@@ -31,11 +31,10 @@ import type { MutationFinalizeDependencies } from "./mutation/types.js";
 // Helper for string enum (TypeBox doesn't have a built-in StringEnum)
 function StringEnum<T extends string[]>(values: [...T], opts?: { description?: string }) {
   return Type.Union(
-    values.map((v) => Type.Literal(v)),
+    values.map((value) => Type.Literal(value)),
     opts,
   );
 }
-
 const schema = Type.Object({
   action: StringEnum(
     [
@@ -381,8 +380,8 @@ export function createModifyStructureTool(): AgentTool<typeof schema, ModifyStru
                 changedCount: 1,
                 outputAddress: sheet.name,
                 summary: `deleted sheet ${sheet.name}`,
-                checkpointState,
-                checkpointUnavailableReason,
+                ...(checkpointState !== undefined ? { checkpointState } : {}),
+                ...(checkpointUnavailableReason !== undefined ? { checkpointUnavailableReason } : {}),
               };
             }
 
@@ -421,22 +420,24 @@ export function createModifyStructureTool(): AgentTool<typeof schema, ModifyStru
               usedRange.load("isNullObject");
               await context.sync();
 
-              const canCreateCheckpoint = usedRange.isNullObject;
+              let checkpointState: RecoveryModifyStructureState | undefined;
+              if (usedRange.isNullObject) {
+                checkpointState = {
+                  kind: "sheet_absent",
+                  sheetId: copy.id,
+                  sheetName: targetName,
+                };
+              }
+              const checkpointUnavailableReason = checkpointState === undefined
+                ? "Checkpoint capture was skipped for `duplicate_sheet` because duplicated sheet contains data."
+                : undefined;
               return {
                 message: `Duplicated "${params.sheet}" as "${targetName}".`,
                 changedCount: 1,
                 outputAddress: targetName,
                 summary: `duplicated sheet ${params.sheet} as ${targetName}`,
-                checkpointState: canCreateCheckpoint
-                  ? {
-                    kind: "sheet_absent",
-                    sheetId: copy.id,
-                    sheetName: targetName,
-                  }
-                  : undefined,
-                checkpointUnavailableReason: canCreateCheckpoint
-                  ? undefined
-                  : "Checkpoint capture was skipped for `duplicate_sheet` because duplicated sheet contains data.",
+                ...(checkpointState !== undefined ? { checkpointState } : {}),
+                ...(checkpointUnavailableReason !== undefined ? { checkpointUnavailableReason } : {}),
               };
             }
 
@@ -492,7 +493,7 @@ export function createModifyStructureTool(): AgentTool<typeof schema, ModifyStru
             toolName: "modify_structure",
             toolCallId,
             blocked: false,
-            outputAddress: result.outputAddress,
+            ...(result.outputAddress !== undefined ? { outputAddress: result.outputAddress } : {}),
             changedCount: result.changedCount,
             changes: [],
             summary: result.summary,
@@ -527,7 +528,7 @@ export function createModifyStructureTool(): AgentTool<typeof schema, ModifyStru
         });
 
         return toolResult;
-      } catch (e: unknown) {
+      } catch (e) {
         const message = getErrorMessage(e);
 
         await finalizeMutationOperation(mutationFinalizeDependencies, {
@@ -535,7 +536,7 @@ export function createModifyStructureTool(): AgentTool<typeof schema, ModifyStru
             toolName: "modify_structure",
             toolCallId,
             blocked: true,
-            outputAddress: params.sheet,
+            ...(params.sheet !== undefined ? { outputAddress: params.sheet } : {}),
             changedCount: 0,
             changes: [],
             summary: `error: ${message}`,

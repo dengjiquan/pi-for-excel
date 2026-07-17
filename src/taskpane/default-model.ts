@@ -2,7 +2,12 @@
  * Default model selection for the taskpane.
  */
 
-import { getModel, getModels, type Api, type Model } from "@earendil-works/pi-ai/compat";
+import {
+  getModel,
+  getModels,
+  type Api,
+  type Model,
+} from "@earendil-works/pi-ai/compat";
 
 import {
   compareOpenAiModelIds,
@@ -50,7 +55,10 @@ const DEFAULT_MODEL_RULES: DefaultModelRule[] = [
   { provider: "google-antigravity", match: /^.+$/ },
 ];
 
-function pickLatestMatchingModel(provider: DefaultProvider, match: RegExp): Model<Api> | null {
+function pickLatestMatchingModel(
+  provider: DefaultProvider,
+  match: RegExp,
+): Model<Api> | null {
   const models: Model<Api>[] = getProviderModels(provider);
   const candidates = models.filter((m) => match.test(m.id));
   candidates.sort((a, b) => {
@@ -61,7 +69,9 @@ function pickLatestMatchingModel(provider: DefaultProvider, match: RegExp): Mode
   return candidates[0] ?? null;
 }
 
-function pickPreferredOpenAiModel(provider: "openai-codex" | "openai"): Model<Api> | null {
+function pickPreferredOpenAiModel(
+  provider: "openai-codex" | "openai",
+): Model<Api> | null {
   const models: Model<Api>[] = getProviderModels(provider);
   const bestGpt = models
     .filter((m) => isOpenAiGeneralGptModelId(m.id))
@@ -71,13 +81,17 @@ function pickPreferredOpenAiModel(provider: "openai-codex" | "openai"): Model<Ap
     .sort((a, b) => compareOpenAiModelIds(a.id, b.id))[0];
 
   if (bestGpt && bestCodex) {
-    return shouldPreferOpenAiGeneralModel(bestGpt.id, bestCodex.id) ? bestGpt : bestCodex;
+    return shouldPreferOpenAiGeneralModel(bestGpt.id, bestCodex.id)
+      ? bestGpt
+      : bestCodex;
   }
 
   if (bestGpt) return bestGpt;
   if (bestCodex) return bestCodex;
 
-  return models.slice().sort((a, b) => compareOpenAiModelIds(a.id, b.id))[0] ?? null;
+  return (
+    models.slice().sort((a, b) => compareOpenAiModelIds(a.id, b.id))[0] ?? null
+  );
 }
 
 export function pickDefaultModel(
@@ -85,9 +99,9 @@ export function pickDefaultModel(
   customDefaultModel?: Model<Api> | null,
 ): Model<Api> {
   // OpenAI special-case:
-  // GPT-5.5 is the preferred default when an OpenAI-backed provider is available.
   // Prefer the newest general GPT-5 model when it is at least as new as Codex,
-  // while keeping Codex as fallback.
+  // while keeping Codex as fallback. GPT-5.6's canonical tier order is
+  // Sol → Terra → Luna; upstream intentionally exposes no bare gpt-5.6 alias.
   for (const provider of ["openai", "openai-codex"] as const) {
     if (!availableProviders.includes(provider)) continue;
     const model = pickPreferredOpenAiModel(provider);
@@ -131,16 +145,18 @@ export function pickDefaultModel(
   // produces an API-key prompt for the wrong provider.
   for (const provider of availableProviders) {
     const models = getProviderModels(provider);
-    const best = models
-      .slice()
-      .sort((a, b) => {
-        const recency = modelRecencyScore(b.id) - modelRecencyScore(a.id);
-        if (recency !== 0) return recency;
-        return a.id.localeCompare(b.id);
-      })[0];
+    const best = models.slice().sort((a, b) => {
+      const recency = modelRecencyScore(b.id) - modelRecencyScore(a.id);
+      if (recency !== 0) return recency;
+      return a.id.localeCompare(b.id);
+    })[0];
     if (best) return best;
   }
 
-  // Absolute fallback: keep this resilient across pi-ai version bumps
-  return getModel("openai", "gpt-5.5");
+  // Absolute fallback: keep this resilient across pi-ai version bumps.
+  // Sol is the maintainer-preferred GPT-5.6 quality tier.
+  // ponytail: gpt-5.6-sol is the maintainer-preferred tier but pi-ai 0.80.3's
+  // openai enum hasn't added it yet; cast keeps this fallback compiling until
+  // upstream catches up. Rarely reached (only when no provider has any model).
+  return getModel("openai", "gpt-5.6-sol" as never);
 }

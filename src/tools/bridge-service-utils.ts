@@ -29,14 +29,14 @@ export async function probeBridgeHealth(bridgeUrl: string): Promise<boolean> {
   return response?.ok === true;
 }
 
-export async function fetchBridgeHealthJson(bridgeUrl: string): Promise<unknown> {
+export async function fetchBridgeHealthJson(bridgeUrl: string): Promise<DynamicValue> {
   const response = await fetchBridgeHealthResponse(bridgeUrl);
   if (!response?.ok) {
     return null;
   }
 
   try {
-    return await response.json() as unknown;
+    return await response.json() as DynamicValue;
   } catch {
     return null;
   }
@@ -44,7 +44,7 @@ export async function fetchBridgeHealthJson(bridgeUrl: string): Promise<unknown>
 
 export async function getBridgeSetting(settingKey: string): Promise<string | undefined> {
   try {
-    const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+    const storageModule = await import("../storage/local/app-storage.js");
     const storage = storageModule.getAppStorage();
     const value = await storage.settings.get<string>(settingKey);
     if (typeof value !== "string") {
@@ -60,7 +60,7 @@ export async function getBridgeSetting(settingKey: string): Promise<string | und
 
 export async function setBridgeSetting(settingKey: string, value: string): Promise<void> {
   try {
-    const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+    const storageModule = await import("../storage/local/app-storage.js");
     const storage = storageModule.getAppStorage();
     await storage.settings.set(settingKey, value);
   } catch {

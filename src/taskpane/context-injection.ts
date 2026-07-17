@@ -87,7 +87,9 @@ function buildWorkspaceFilesSection(summary: string, reason: "initial" | "files_
   return [`[Workspace files refresh: ${reasonText}]`, summary].join("\n\n");
 }
 
-export function createContextInjector(changeTracker: ChangeTracker) {
+export function createContextInjector(
+  changeTracker: ChangeTracker,
+): (messages: AgentMessage[], _signal?: AbortSignal) => Promise<AgentMessage[]> {
   let lastInjectedWorkbookId: string | null | undefined;
   let lastInjectedBlueprintRevision = -1;
   let lastInjectedWorkspaceSignature: string | undefined;
@@ -189,7 +191,7 @@ export function createContextInjector(changeTracker: ChangeTracker) {
     const nextMessages = [...messages];
     let lastUserIdx = -1;
     for (let i = nextMessages.length - 1; i >= 0; i--) {
-      if (nextMessages[i].role === "user") {
+      if (nextMessages[i]?.role === "user") {
         lastUserIdx = i;
         break;
       }

@@ -1,3 +1,7 @@
+function isToolsMcpPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * mcp — Model Context Protocol gateway for configured HTTP servers.
  */
@@ -8,11 +12,7 @@ import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { APP_NAME, APP_VERSION } from "../app/metadata.js";
 import { integrationsCommandHint } from "../integrations/naming.js";
 import { getErrorMessage } from "../utils/errors.js";
-import {
-  getHttpErrorReason,
-  runWithTimeoutAbort,
-} from "../utils/network.js";
-import { isRecord } from "../utils/type-guards.js";
+import { getHttpErrorReason, runWithTimeoutAbort } from "../utils/network.js";
 import type { ProxyAwareSettingsStore } from "./external-fetch.js";
 import {
   buildProxyDownErrorMessage,
@@ -37,24 +37,36 @@ const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MCP_TIMEOUT_MS = 15_000;
 
 const schema = Type.Object({
-  tool: Type.Optional(Type.String({
-    description: "Tool name to call.",
-  })),
-  args: Type.Optional(Type.String({
-    description: "Tool arguments as a JSON string.",
-  })),
-  connect: Type.Optional(Type.String({
-    description: "Server name/id to connect and refresh.",
-  })),
-  describe: Type.Optional(Type.String({
-    description: "Tool name to describe.",
-  })),
-  search: Type.Optional(Type.String({
-    description: "Search query for MCP tools.",
-  })),
-  server: Type.Optional(Type.String({
-    description: "Optional server name/id filter.",
-  })),
+  tool: Type.Optional(
+    Type.String({
+      description: "Tool name to call.",
+    }),
+  ),
+  args: Type.Optional(
+    Type.String({
+      description: "Tool arguments as a JSON string.",
+    }),
+  ),
+  connect: Type.Optional(
+    Type.String({
+      description: "Server name/id to connect and refresh.",
+    }),
+  ),
+  describe: Type.Optional(
+    Type.String({
+      description: "Tool name to describe.",
+    }),
+  ),
+  search: Type.Optional(
+    Type.String({
+      description: "Search query for MCP tools.",
+    }),
+  ),
+  server: Type.Optional(
+    Type.String({
+      description: "Optional server name/id filter.",
+    }),
+  ),
 });
 
 type Params = Static<typeof schema>;
@@ -65,7 +77,7 @@ interface McpToolDescriptor {
   serverUrl: string;
   name: string;
   description?: string;
-  inputSchema?: unknown;
+  inputSchema?: DynamicValue;
 }
 
 interface ServerToolList {
@@ -76,10 +88,10 @@ interface ServerToolList {
 }
 
 interface RpcCallResult {
-  result: unknown;
+  result: DynamicValue;
   proxied: boolean;
   proxyBaseUrl?: string;
-  sessionId?: string;
+  sessionId?: string | undefined;
 }
 
 export interface McpGatewayDetails {
@@ -106,22 +118,55 @@ export interface McpToolDependencies {
   callJsonRpc?: (args: {
     server: McpServerConfig;
     method: string;
-    params?: unknown;
+    params?: DynamicValue;
     signal: AbortSignal | undefined;
     proxyBaseUrl?: string;
     expectResponse?: boolean;
-    sessionId?: string;
+    sessionId?: string | undefined;
   }) => Promise<RpcCallResult | null>;
 }
 
-function normalizeOptionalString(value: unknown): string | undefined {
+function normalizeOptionalString(value: DynamicValue): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parseParams(raw: unknown): Params {
-  if (!isRecord(raw)) {
+function proxyBaseUrlArg(proxyBaseUrl: string | undefined): {
+  proxyBaseUrl?: string;
+} {
+  return proxyBaseUrl === undefined ? {} : { proxyBaseUrl };
+}
+
+function createMcpGatewayDetails(args: {
+  ok: boolean;
+  operation: string;
+  server?: string | undefined;
+  tool?: string | undefined;
+  proxied?: boolean | undefined;
+  proxyBaseUrl?: string | undefined;
+  resultPreview?: string | undefined;
+  error?: string | undefined;
+  proxyDown?: boolean | undefined;
+}): McpGatewayDetails {
+  const details: McpGatewayDetails = {
+    kind: "mcp_gateway",
+    ok: args.ok,
+    operation: args.operation,
+  };
+  if (args.server !== undefined) details.server = args.server;
+  if (args.tool !== undefined) details.tool = args.tool;
+  if (args.proxied !== undefined) details.proxied = args.proxied;
+  if (args.proxyBaseUrl !== undefined) details.proxyBaseUrl = args.proxyBaseUrl;
+  if (args.resultPreview !== undefined)
+    details.resultPreview = args.resultPreview;
+  if (args.error !== undefined) details.error = args.error;
+  if (args.proxyDown !== undefined) details.proxyDown = args.proxyDown;
+  return details;
+}
+
+function parseParams(raw: DynamicValue): Params {
+  if (!isToolsMcpPayloadShape(raw)) {
     return {};
   }
 
@@ -152,7 +197,10 @@ function normalizeServerToken(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function findServerByToken(servers: readonly McpServerConfig[], token: string): McpServerConfig | null {
+function findServerByToken(
+  servers: readonly McpServerConfig[],
+  token: string,
+): McpServerConfig | null {
   const normalized = normalizeServerToken(token);
 
   for (const server of servers) {
@@ -171,9 +219,12 @@ function matchesServerToken(tool: McpToolDescriptor, token: string): boolean {
   );
 }
 
-function parseToolListResult(server: McpServerConfig, value: unknown): McpToolDescriptor[] {
-  if (!isRecord(value)) return [];
-  if (!isRecord(value.result)) return [];
+function parseToolListResult(
+  server: McpServerConfig,
+  value: DynamicValue,
+): McpToolDescriptor[] {
+  if (!isToolsMcpPayloadShape(value)) return [];
+  if (!isToolsMcpPayloadShape(value.result)) return [];
   const result = value.result;
 
   const tools = result.tools;
@@ -182,28 +233,34 @@ function parseToolListResult(server: McpServerConfig, value: unknown): McpToolDe
   const out: McpToolDescriptor[] = [];
 
   for (const item of tools) {
-    if (!isRecord(item)) continue;
+    if (!isToolsMcpPayloadShape(item)) continue;
 
     const name = normalizeOptionalString(item.name);
     if (!name) continue;
 
-    out.push({
+    const descriptor: McpToolDescriptor = {
       serverId: server.id,
       serverName: server.name,
       serverUrl: server.url,
       name,
-      description: normalizeOptionalString(item.description),
-      inputSchema: item.inputSchema,
-    });
+    };
+    const description = normalizeOptionalString(item.description);
+    if (description !== undefined) {
+      descriptor.description = description;
+    }
+    if (item.inputSchema !== undefined) {
+      descriptor.inputSchema = item.inputSchema;
+    }
+    out.push(descriptor);
   }
 
   return out;
 }
 
-function parseJsonRpcError(value: unknown): string | null {
-  if (!isRecord(value)) return null;
+function parseJsonRpcError(value: DynamicValue): string | null {
+  if (!isToolsMcpPayloadShape(value)) return null;
 
-  if (isRecord(value.error)) {
+  if (isToolsMcpPayloadShape(value.error)) {
     const errorMessage = normalizeOptionalString(value.error.message);
     if (errorMessage) return errorMessage;
   }
@@ -212,12 +269,12 @@ function parseJsonRpcError(value: unknown): string | null {
   return text ?? null;
 }
 
-function extractTextContentBlocks(value: unknown): string[] {
+function extractTextContentBlocks(value: DynamicValue): string[] {
   if (!Array.isArray(value)) return [];
 
   const lines: string[] = [];
   for (const item of value) {
-    if (!isRecord(item)) continue;
+    if (!isToolsMcpPayloadShape(item)) continue;
     if (item.type !== "text") continue;
     const text = normalizeOptionalString(item.text);
     if (!text) continue;
@@ -227,7 +284,7 @@ function extractTextContentBlocks(value: unknown): string[] {
   return lines;
 }
 
-function formatJson(value: unknown): string {
+function formatJson(value: DynamicValue): string {
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -235,7 +292,7 @@ function formatJson(value: unknown): string {
   }
 }
 
-function parseCallArgs(rawArgs: string | undefined): unknown {
+function parseCallArgs(rawArgs: string | undefined): DynamicValue {
   if (!rawArgs) return {};
 
   try {
@@ -245,7 +302,10 @@ function parseCallArgs(rawArgs: string | undefined): unknown {
   }
 }
 
-function buildServerStatusLine(server: McpServerConfig, tools: McpToolDescriptor[] | null): string {
+function buildServerStatusLine(
+  server: McpServerConfig,
+  tools: McpToolDescriptor[] | null,
+): string {
   if (!server.enabled) {
     return `- ${server.name} (${server.url}) — disabled`;
   }
@@ -257,7 +317,10 @@ function buildServerStatusLine(server: McpServerConfig, tools: McpToolDescriptor
   return `- ${server.name} (${server.url}) — enabled, ${tools.length} tool${tools.length === 1 ? "" : "s"}`;
 }
 
-function buildToolPreview(tools: readonly McpToolDescriptor[], max = 20): string {
+function buildToolPreview(
+  tools: readonly McpToolDescriptor[],
+  max = 20,
+): string {
   if (tools.length === 0) {
     return "No tools found.";
   }
@@ -265,8 +328,7 @@ function buildToolPreview(tools: readonly McpToolDescriptor[], max = 20): string
   const lines: string[] = [];
   const count = Math.min(max, tools.length);
 
-  for (let i = 0; i < count; i += 1) {
-    const tool = tools[i];
+  for (const tool of tools.slice(0, count)) {
     const desc = tool.description ? ` — ${tool.description}` : "";
     lines.push(`- ${tool.name}${desc}`);
   }
@@ -300,7 +362,7 @@ function matchesSearch(tool: McpToolDescriptor, query: string): boolean {
 }
 
 async function defaultGetRuntimeConfig(): Promise<McpRuntimeConfig> {
-  const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+  const storageModule = await import("../storage/local/app-storage.js");
   const settingsStore = storageModule.getAppStorage().settings;
   const configStore: McpConfigStore = settingsStore;
   const proxyStore: ProxyAwareSettingsStore = settingsStore;
@@ -312,24 +374,32 @@ async function defaultGetRuntimeConfig(): Promise<McpRuntimeConfig> {
 
   return {
     servers,
-    proxyBaseUrl,
+    ...proxyBaseUrlArg(proxyBaseUrl),
   };
 }
 
 async function defaultCallJsonRpc(args: {
   server: McpServerConfig;
   method: string;
-  params?: unknown;
+  params?: DynamicValue;
   signal: AbortSignal | undefined;
   proxyBaseUrl?: string;
   expectResponse?: boolean;
-  sessionId?: string;
+  sessionId?: string | undefined;
 }): Promise<RpcCallResult | null> {
-  const { server, method, params, signal, proxyBaseUrl, expectResponse = true, sessionId } = args;
+  const {
+    server,
+    method,
+    params,
+    signal,
+    proxyBaseUrl,
+    expectResponse = true,
+    sessionId,
+  } = args;
 
   const resolved = resolveOutboundRequestUrl({
     targetUrl: server.url,
-    proxyBaseUrl,
+    ...proxyBaseUrlArg(proxyBaseUrl),
   });
 
   const headers: Record<string, string> = {
@@ -345,7 +415,7 @@ async function defaultCallJsonRpc(args: {
     headers[MCP_SESSION_HEADER] = sessionId;
   }
 
-  const requestBody: Record<string, unknown> = {
+  const requestBody: DynamicObject = {
     jsonrpc: "2.0",
     method,
   };
@@ -379,31 +449,31 @@ async function defaultCallJsonRpc(args: {
         return {
           result: null,
           proxied: resolved.proxied,
-          proxyBaseUrl: resolved.proxyBaseUrl,
+          ...proxyBaseUrlArg(resolved.proxyBaseUrl),
           sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
         };
       }
 
       const body = await response.text();
-      const payload = parseMcpHttpResponseBody({
+      const payload: DynamicValue = parseMcpHttpResponseBody({
         text: body,
         contentType: response.headers.get("Content-Type"),
         requestId: requestId ?? "",
-      });
+      }) as DynamicValue;
 
       const rpcError = parseJsonRpcError(payload);
       if (rpcError) {
         throw new Error(rpcError);
       }
 
-      if (!isRecord(payload)) {
+      if (!isToolsMcpPayloadShape(payload)) {
         throw new Error("Invalid MCP JSON-RPC response.");
       }
 
       return {
         result: payload,
         proxied: resolved.proxied,
-        proxyBaseUrl: resolved.proxyBaseUrl,
+        ...proxyBaseUrlArg(resolved.proxyBaseUrl),
         sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
       };
     },
@@ -413,7 +483,8 @@ async function defaultCallJsonRpc(args: {
 export function createMcpTool(
   dependencies: McpToolDependencies = {},
 ): AgentTool<TSchema, McpGatewayDetails> {
-  const getRuntimeConfig = dependencies.getRuntimeConfig ?? defaultGetRuntimeConfig;
+  const getRuntimeConfig =
+    dependencies.getRuntimeConfig ?? defaultGetRuntimeConfig;
   const callJsonRpc = dependencies.callJsonRpc ?? defaultCallJsonRpc;
 
   const toolCache = new Map<string, ServerToolList>();
@@ -446,7 +517,7 @@ export function createMcpTool(
         },
       },
       signal,
-      proxyBaseUrl,
+      ...proxyBaseUrlArg(proxyBaseUrl),
     });
 
     if (initializeResult?.sessionId) {
@@ -461,7 +532,7 @@ export function createMcpTool(
       server,
       method: "notifications/initialized",
       signal,
-      proxyBaseUrl,
+      ...proxyBaseUrlArg(proxyBaseUrl),
       expectResponse: false,
       sessionId,
     });
@@ -471,7 +542,7 @@ export function createMcpTool(
       method: "tools/list",
       params: {},
       signal,
-      proxyBaseUrl,
+      ...proxyBaseUrlArg(proxyBaseUrl),
       sessionId,
     });
 
@@ -484,7 +555,7 @@ export function createMcpTool(
       server,
       tools,
       proxied: listResult.proxied,
-      proxyBaseUrl: listResult.proxyBaseUrl,
+      ...proxyBaseUrlArg(listResult.proxyBaseUrl),
     };
 
     toolCache.set(server.id, entry);
@@ -502,7 +573,7 @@ export function createMcpTool(
       if (!server.enabled) continue;
       const list = await ensureServerTools({
         server,
-        proxyBaseUrl: args.proxyBaseUrl,
+        ...proxyBaseUrlArg(args.proxyBaseUrl),
         signal: args.signal,
       });
       out.push(list);
@@ -519,7 +590,7 @@ export function createMcpTool(
     parameters: schema,
     execute: async (
       _toolCallId: string,
-      rawParams: unknown,
+      rawParams: DynamicValue,
       signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<McpGatewayDetails>> => {
       const params = parseParams(rawParams);
@@ -528,10 +599,14 @@ export function createMcpTool(
       try {
         const runtimeConfig = await getRuntimeConfig();
         usedProxyBaseUrl = runtimeConfig.proxyBaseUrl;
-        const enabledServers = runtimeConfig.servers.filter((server) => server.enabled);
+        const enabledServers = runtimeConfig.servers.filter(
+          (server) => server.enabled,
+        );
 
         if (runtimeConfig.servers.length === 0) {
-          throw new Error(`No MCP servers configured. Open ${integrationsCommandHint()} to add one.`);
+          throw new Error(
+            `No MCP servers configured. Open ${integrationsCommandHint()} to add one.`,
+          );
         }
 
         const resolveSingleServer = (token: string): McpServerConfig => {
@@ -549,7 +624,7 @@ export function createMcpTool(
           const server = resolveSingleServer(params.connect);
           const list = await ensureServerTools({
             server,
-            proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
             signal,
             refresh: true,
           });
@@ -569,7 +644,7 @@ export function createMcpTool(
               operation: "connect",
               server: server.name,
               proxied: list.proxied,
-              proxyBaseUrl: list.proxyBaseUrl,
+              ...proxyBaseUrlArg(list.proxyBaseUrl),
               resultPreview: firstLine(text),
             },
           };
@@ -577,16 +652,18 @@ export function createMcpTool(
 
         if (params.tool) {
           const candidateLists = params.server
-            ? [await ensureServerTools({
-              server: resolveSingleServer(params.server),
-              proxyBaseUrl: runtimeConfig.proxyBaseUrl,
-              signal,
-            })]
+            ? [
+                await ensureServerTools({
+                  server: resolveSingleServer(params.server),
+                  ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
+                  signal,
+                }),
+              ]
             : await listToolsAcrossServers({
-              servers: enabledServers,
-              proxyBaseUrl: runtimeConfig.proxyBaseUrl,
-              signal,
-            });
+                servers: enabledServers,
+                ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
+                signal,
+              });
 
           const allTools = candidateLists.flatMap((list) => list.tools);
           const matched = allTools.filter((tool) => tool.name === params.tool);
@@ -596,9 +673,13 @@ export function createMcpTool(
           }
 
           if (!params.server) {
-            const matchedServerIds = new Set(matched.map((tool) => tool.serverId));
+            const matchedServerIds = new Set(
+              matched.map((tool) => tool.serverId),
+            );
             if (matchedServerIds.size > 1) {
-              const serverNames = Array.from(new Set(matched.map((tool) => tool.serverName))).sort();
+              const serverNames = Array.from(
+                new Set(matched.map((tool) => tool.serverName)),
+              ).sort();
               throw new Error(
                 `MCP tool "${params.tool}" is available on multiple servers (${serverNames.join(", ")}). Specify the server parameter.`,
               );
@@ -606,6 +687,9 @@ export function createMcpTool(
           }
 
           const targetTool = matched[0];
+          if (!targetTool) {
+            throw new Error(`MCP tool not found: ${params.tool}`);
+          }
           const targetServer = resolveSingleServer(targetTool.serverId);
           const parsedArgs = parseCallArgs(params.args);
 
@@ -617,7 +701,7 @@ export function createMcpTool(
               arguments: parsedArgs,
             },
             signal,
-            proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
             sessionId: sessionIds.get(targetServer.id),
           });
 
@@ -628,7 +712,10 @@ export function createMcpTool(
           const payload = callResult.result;
           let resultText = "";
 
-          if (isRecord(payload) && isRecord(payload.result)) {
+          if (
+            isToolsMcpPayloadShape(payload) &&
+            isToolsMcpPayloadShape(payload.result)
+          ) {
             const rpcResult = payload.result;
             const contentBlocks = extractTextContentBlocks(rpcResult.content);
             if (contentBlocks.length > 0) {
@@ -664,7 +751,7 @@ export function createMcpTool(
               server: targetServer.name,
               tool: targetTool.name,
               proxied: callResult.proxied,
-              proxyBaseUrl: callResult.proxyBaseUrl,
+              ...proxyBaseUrlArg(callResult.proxyBaseUrl),
               resultPreview: firstLine(resultText),
             },
           };
@@ -673,23 +760,27 @@ export function createMcpTool(
         if (params.describe) {
           const lists = await listToolsAcrossServers({
             servers: enabledServers,
-            proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
             signal,
           });
 
           const allTools = lists.flatMap((list) => list.tools);
           const candidates = params.server
-            ? allTools.filter((tool) => matchesServerToken(tool, params.server ?? ""))
+            ? allTools.filter((tool) =>
+                matchesServerToken(tool, params.server ?? ""),
+              )
             : allTools;
 
-          const target = candidates.find((tool) => tool.name === params.describe) ?? null;
+          const target =
+            candidates.find((tool) => tool.name === params.describe) ?? null;
           if (!target) {
             throw new Error(`MCP tool not found: ${params.describe}`);
           }
 
-          const schemaBlock = target.inputSchema === undefined
-            ? "(no input schema provided)"
-            : `\`\`\`json\n${formatJson(target.inputSchema)}\n\`\`\``;
+          const schemaBlock =
+            target.inputSchema === undefined
+              ? "(no input schema provided)"
+              : `\`\`\`json\n${formatJson(target.inputSchema)}\n\`\`\``;
 
           const description = target.description ?? "(no description provided)";
 
@@ -718,12 +809,14 @@ export function createMcpTool(
         if (params.search) {
           const lists = await listToolsAcrossServers({
             servers: enabledServers,
-            proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
             signal,
           });
 
           const allTools = lists.flatMap((list) => list.tools);
-          const matches = allTools.filter((tool) => matchesSearch(tool, params.search ?? ""));
+          const matches = allTools.filter((tool) =>
+            matchesSearch(tool, params.search ?? ""),
+          );
 
           const lines: string[] = [];
           lines.push(`MCP search \"${params.search}\"`);
@@ -733,8 +826,7 @@ export function createMcpTool(
             lines.push("No matching tools.");
           } else {
             const limit = Math.min(matches.length, 30);
-            for (let i = 0; i < limit; i += 1) {
-              const tool = matches[i];
+            for (const tool of matches.slice(0, limit)) {
               const desc = tool.description ? ` — ${tool.description}` : "";
               lines.push(`- ${tool.name} (${tool.serverName})${desc}`);
             }
@@ -760,7 +852,7 @@ export function createMcpTool(
           const server = resolveSingleServer(params.server);
           const list = await ensureServerTools({
             server,
-            proxyBaseUrl: runtimeConfig.proxyBaseUrl,
+            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
             signal,
           });
 
@@ -778,7 +870,7 @@ export function createMcpTool(
               operation: "server",
               server: server.name,
               proxied: list.proxied,
-              proxyBaseUrl: list.proxyBaseUrl,
+              ...proxyBaseUrlArg(list.proxyBaseUrl),
               resultPreview: firstLine(text),
             },
           };
@@ -793,7 +885,9 @@ export function createMcpTool(
         }
 
         lines.push("");
-        lines.push("Tip: use `connect`, `server`, `search`, `describe`, or `tool`.");
+        lines.push(
+          "Tip: use `connect`, `server`, `search`, `describe`, or `tool`.",
+        );
 
         const statusText = lines.join("\n");
 
@@ -806,9 +900,12 @@ export function createMcpTool(
             resultPreview: firstLine(statusText),
           },
         };
-      } catch (error: unknown) {
+      } catch (error) {
         const message = getErrorMessage(error);
-        const proxyDown = isLikelyProxyConnectionError(message, usedProxyBaseUrl);
+        const proxyDown = isLikelyProxyConnectionError(
+          message,
+          usedProxyBaseUrl,
+        );
         const displayMessage = proxyDown
           ? buildProxyDownErrorMessage("MCP gateway", message)
           : `Error: ${message}`;
@@ -827,8 +924,7 @@ export function createMcpTool(
 
         return {
           content: [{ type: "text", text: displayMessage }],
-          details: {
-            kind: "mcp_gateway",
+          details: createMcpGatewayDetails({
             ok: false,
             operation,
             server: params.server ?? params.connect,
@@ -836,7 +932,7 @@ export function createMcpTool(
             proxyBaseUrl: usedProxyBaseUrl,
             error: message,
             proxyDown,
-          },
+          }),
         };
       }
     },

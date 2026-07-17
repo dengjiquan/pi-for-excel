@@ -24,11 +24,10 @@ import type { ViewSettingsDetails } from "./tool-details.js";
 
 function StringEnum<T extends string[]>(values: [...T], opts?: { description?: string }) {
   return Type.Union(
-    values.map((v) => Type.Literal(v)),
+    values.map((value) => Type.Literal(value)),
     opts,
   );
 }
-
 const schema = Type.Object({
   action: StringEnum(
     [
@@ -116,7 +115,7 @@ function buildMutationDetails(args: {
   return {
     kind: "view_settings",
     action: args.action,
-    address: args.address,
+    ...(args.address !== undefined ? { address: args.address } : {}),
     recovery: recoveryCheckpointUnavailable(NON_CHECKPOINTED_MUTATION_REASON),
   };
 }
@@ -166,7 +165,7 @@ export function createViewSettingsTool(
           content: [{ type: "text", text: result.text }],
           details: buildMutationDetails({
             action: params.action,
-            address: outputAddress,
+            ...(outputAddress !== undefined ? { address: outputAddress } : {}),
           }),
         };
 
@@ -175,7 +174,7 @@ export function createViewSettingsTool(
             toolName: "view_settings",
             toolCallId,
             blocked: false,
-            outputAddress,
+            ...(outputAddress !== undefined ? { outputAddress } : {}),
             changedCount: result.changedCount ?? 1,
             changes: [],
             summary: result.summary ?? `${params.action} view setting`,
@@ -190,7 +189,7 @@ export function createViewSettingsTool(
         });
 
         return output;
-      } catch (e: unknown) {
+      } catch (e) {
         const message = getErrorMessage(e);
         const outputAddress = params.range ?? params.sheet;
 
@@ -205,7 +204,7 @@ export function createViewSettingsTool(
           content: [{ type: "text", text: `Error: ${message}` }],
           details: buildMutationDetails({
             action: params.action,
-            address: outputAddress,
+            ...(outputAddress !== undefined ? { address: outputAddress } : {}),
           }),
         };
 
@@ -214,7 +213,7 @@ export function createViewSettingsTool(
             toolName: "view_settings",
             toolCallId,
             blocked: true,
-            outputAddress,
+            ...(outputAddress !== undefined ? { outputAddress } : {}),
             changedCount: 0,
             changes: [],
             summary: `error: ${message}`,

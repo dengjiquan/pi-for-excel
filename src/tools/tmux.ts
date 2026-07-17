@@ -1,3 +1,7 @@
+function isToolsTmuxPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * tmux — Experimental local tmux bridge adapter.
  *
@@ -14,7 +18,6 @@ import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
 import { validateOfficeProxyUrl } from "../auth/proxy-validation.js";
 import { getErrorMessage } from "../utils/errors.js";
-import { isRecord } from "../utils/type-guards.js";
 import {
   extractBridgeErrorMessage,
   isAbortError,
@@ -47,7 +50,7 @@ type TmuxAction = (typeof TMUX_ACTIONS)[number];
 
 const TMUX_ACTION_SET = new Set<string>(TMUX_ACTIONS);
 
-function isTmuxAction(value: unknown): value is TmuxAction {
+function isTmuxAction(value: DynamicValue): value is TmuxAction {
   return typeof value === "string" && TMUX_ACTION_SET.has(value);
 }
 
@@ -57,7 +60,6 @@ function StringEnum<T extends string[]>(values: [...T], opts?: { description?: s
     opts,
   );
 }
-
 const schema = Type.Object({
   action: StringEnum([...TMUX_ACTIONS], {
     description:
@@ -145,7 +147,7 @@ export interface TmuxBridgeResponse {
   sessions?: string[];
   output?: string;
   error?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: DynamicObject;
 }
 
 export interface TmuxToolDetails {
@@ -187,19 +189,19 @@ function cleanOptionalStringArray(values: string[] | undefined): string[] | unde
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-function toOptionalBoolean(value: unknown): boolean | undefined {
+function toOptionalBoolean(value: DynamicValue): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-function toOptionalInteger(value: unknown): number | undefined {
+function toOptionalInteger(value: DynamicValue): number | undefined {
   if (typeof value !== "number") return undefined;
   if (!Number.isFinite(value)) return undefined;
   if (!Number.isInteger(value)) return undefined;
   return value;
 }
 
-function parseParams(raw: unknown): Params {
-  if (!isRecord(raw)) {
+function parseParams(raw: DynamicValue): Params {
+  if (!isToolsTmuxPayloadShape(raw)) {
     throw new Error("Invalid tmux params: expected an object.");
   }
 
@@ -291,22 +293,27 @@ function validateActionParams(params: Params): void {
 }
 
 function toBridgeRequest(params: Params): TmuxBridgeRequest {
+  const session = cleanOptionalString(params.session);
+  const cwd = cleanOptionalString(params.cwd);
+  const text = cleanOptionalString(params.text);
+  const keys = cleanOptionalStringArray(params.keys);
+  const waitFor = cleanOptionalString(params.wait_for);
   return {
     action: params.action,
-    session: cleanOptionalString(params.session),
-    cwd: cleanOptionalString(params.cwd),
-    text: cleanOptionalString(params.text),
-    keys: cleanOptionalStringArray(params.keys),
-    enter: params.enter,
-    lines: params.lines,
-    wait_for: cleanOptionalString(params.wait_for),
-    timeout_ms: params.timeout_ms,
-    wait_ms: params.wait_ms,
-    join_wrapped: params.join_wrapped,
+    ...(session !== undefined ? { session } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(text !== undefined ? { text } : {}),
+    ...(keys !== undefined ? { keys } : {}),
+    ...(params.enter !== undefined ? { enter: params.enter } : {}),
+    ...(params.lines !== undefined ? { lines: params.lines } : {}),
+    ...(waitFor !== undefined ? { wait_for: waitFor } : {}),
+    ...(params.timeout_ms !== undefined ? { timeout_ms: params.timeout_ms } : {}),
+    ...(params.wait_ms !== undefined ? { wait_ms: params.wait_ms } : {}),
+    ...(params.join_wrapped !== undefined ? { join_wrapped: params.join_wrapped } : {}),
   };
 }
 
-function parseStringArray(value: unknown): string[] | undefined {
+function parseStringArray(value: DynamicValue): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
 
   const out: string[] = [];
@@ -319,8 +326,8 @@ function parseStringArray(value: unknown): string[] | undefined {
   return out.length > 0 ? out : [];
 }
 
-function parseBridgeResponse(value: unknown, fallbackAction: TmuxAction): TmuxBridgeResponse {
-  if (!isRecord(value)) {
+function parseBridgeResponse(value: DynamicValue, fallbackAction: TmuxAction): TmuxBridgeResponse {
+  if (!isToolsTmuxPayloadShape(value)) {
     return {
       ok: true,
       action: fallbackAction,
@@ -333,16 +340,16 @@ function parseBridgeResponse(value: unknown, fallbackAction: TmuxAction): TmuxBr
   const sessions = parseStringArray(value.sessions);
   const output = typeof value.output === "string" ? value.output : undefined;
   const error = typeof value.error === "string" ? value.error : undefined;
-  const metadata = isRecord(value.metadata) ? value.metadata : undefined;
+  const metadata = isToolsTmuxPayloadShape(value.metadata) ? value.metadata : undefined;
 
   return {
     ok,
     action,
-    session,
-    sessions,
-    output,
-    error,
-    metadata,
+    ...(session !== undefined ? { session } : {}),
+    ...(sessions !== undefined ? { sessions } : {}),
+    ...(output !== undefined ? { output } : {}),
+    ...(error !== undefined ? { error } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   };
 }
 
@@ -351,7 +358,7 @@ async function defaultGetBridgeConfig(): Promise<TmuxBridgeConfig | null> {
   let token: string | undefined;
 
   try {
-    const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+    const storageModule = await import("../storage/local/app-storage.js");
     const settings = storageModule.getAppStorage().settings;
 
     const urlValue = await settings.get<string>(TMUX_BRIDGE_URL_SETTING_KEY);
@@ -372,7 +379,7 @@ async function defaultGetBridgeConfig(): Promise<TmuxBridgeConfig | null> {
     const normalizedUrl = validateOfficeProxyUrl(rawUrl);
     return {
       url: normalizedUrl,
-      token,
+      ...(token !== undefined ? { token } : {}),
     };
   } catch {
     return null;
@@ -449,11 +456,12 @@ async function defaultCallBridge(
     }
 
     if (parsedBody === null) {
+      const output = rawBody.trim().length > 0 ? rawBody : undefined;
       return {
         ok: true,
         action: request.action,
-        session: request.session,
-        output: rawBody.trim().length > 0 ? rawBody : undefined,
+        ...(request.session !== undefined ? { session: request.session } : {}),
+        ...(output !== undefined ? { output } : {}),
       };
     }
 
@@ -463,7 +471,7 @@ async function defaultCallBridge(
     }
 
     return parsed;
-  } catch (error: unknown) {
+  } catch (error) {
     if (isAbortError(error)) {
       if (signal?.aborted) {
         throw new Error("Aborted");
@@ -597,7 +605,7 @@ export function createTmuxTool(
     parameters: schema,
     execute: async (
       _toolCallId: string,
-      rawParams: unknown,
+      rawParams: DynamicValue,
       signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<TmuxToolDetails>> => {
       let params: Params | null = null;
@@ -632,6 +640,8 @@ export function createTmuxTool(
         }
 
         const session = response.session ?? request.session;
+        const outputPreview = buildOutputPreview(response.output);
+        const sessionsCount = response.sessions?.length;
 
         return {
           content: [{ type: "text", text: formatBridgeSuccessText(request, response) }],
@@ -640,16 +650,16 @@ export function createTmuxTool(
             ok: true,
             action: request.action,
             bridgeUrl: bridgeConfig.url,
-            session,
-            sessionsCount: response.sessions?.length,
-            outputPreview: buildOutputPreview(response.output),
+            ...(session !== undefined ? { session } : {}),
+            ...(sessionsCount !== undefined ? { sessionsCount } : {}),
+            ...(outputPreview !== undefined ? { outputPreview } : {}),
           },
         };
-      } catch (error: unknown) {
+      } catch (error) {
         const message = getErrorMessage(error);
         const fallbackAction =
           params?.action ??
-          (isRecord(rawParams) && isTmuxAction(rawParams.action)
+          (isToolsTmuxPayloadShape(rawParams) && isTmuxAction(rawParams.action)
             ? rawParams.action
             : "list_sessions");
         const skillHint = shouldAttachTmuxBridgeSkillHint(message)
@@ -668,7 +678,7 @@ export function createTmuxTool(
             ok: false,
             action: fallbackAction,
             error: message,
-            skillHint,
+            ...(skillHint !== undefined ? { skillHint } : {}),
           },
         };
       }

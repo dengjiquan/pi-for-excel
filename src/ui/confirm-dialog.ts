@@ -33,11 +33,17 @@ function canRenderConfirmationDialog(): boolean {
   return document.body instanceof HTMLElement;
 }
 
-function getConfirmButtonClassName(tone: ConfirmButtonTone | undefined): string {
-  return tone === "danger" ? "pi-overlay-btn--danger" : "pi-overlay-btn--primary";
+function getConfirmButtonClassName(
+  tone: ConfirmButtonTone | undefined,
+): string {
+  return tone === "danger"
+    ? "pi-overlay-btn--danger"
+    : "pi-overlay-btn--primary";
 }
 
-export function requestConfirmationDialog(options: ConfirmDialogOptions): Promise<boolean> {
+export function requestConfirmationDialog(
+  options: ConfirmDialogOptions,
+): Promise<boolean> {
   if (!canRenderConfirmationDialog()) {
     return Promise.reject(new Error(getConfirmationUiUnavailableError()));
   }
@@ -48,8 +54,12 @@ export function requestConfirmationDialog(options: ConfirmDialogOptions): Promis
   return new Promise((resolve) => {
     const dialog = createOverlayDialog({
       overlayId,
-      cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
-      restoreFocusOnClose: options.restoreFocusOnClose,
+      cardClassName:
+        options.cardClassName ??
+        "pi-welcome-card pi-overlay-card pi-overlay-card--s",
+      ...(options.restoreFocusOnClose !== undefined
+        ? { restoreFocusOnClose: options.restoreFocusOnClose }
+        : {}),
       zIndex: NESTED_OVERLAY_Z_INDEX,
     });
 

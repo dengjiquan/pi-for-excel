@@ -1,3 +1,7 @@
+function isFilesWorkspacePayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Files workspace manager.
  *
@@ -9,7 +13,6 @@
 
 import { t } from "../language/index.js";
 import { formatWorkbookLabel, getWorkbookContext } from "../workbook/context.js";
-import { isRecord } from "../utils/type-guards.js";
 import { base64ToBytes, bytesToBase64, encodeTextUtf8, truncateBase64, truncateText } from "./encoding.js";
 import { MemoryBackend, NativeDirectoryBackend, OpfsBackend, type WorkspaceBackend } from "./backend.js";
 import { getBuiltinWorkspaceDoc, isBuiltinWorkspacePath, listBuiltinWorkspaceDocs } from "./builtin-docs.js";
@@ -83,13 +86,13 @@ interface PersistedAuditTrail {
   entries: FilesWorkspaceAuditEntry[];
 }
 
-function isDirectoryPickerHost(value: unknown): value is DirectoryPickerHost {
-  if (!isRecord(value)) return false;
+function isDirectoryPickerHost(value: DynamicValue): value is DirectoryPickerHost {
+  if (!isFilesWorkspacePayloadShape(value)) return false;
   return typeof value.showDirectoryPicker === "function";
 }
 
-function isDirectoryHandle(value: unknown): value is FileSystemDirectoryHandle {
-  if (!isRecord(value)) return false;
+function isDirectoryHandle(value: DynamicValue): value is FileSystemDirectoryHandle {
+  if (!isFilesWorkspacePayloadShape(value)) return false;
   return (
     value.kind === "directory" &&
     typeof value.getDirectoryHandle === "function" &&
@@ -98,8 +101,8 @@ function isDirectoryHandle(value: unknown): value is FileSystemDirectoryHandle {
   );
 }
 
-function isDirectoryPermissionHandle(value: unknown): value is DirectoryPermissionHandle {
-  if (!isRecord(value)) return false;
+function isDirectoryPermissionHandle(value: DynamicValue): value is DirectoryPermissionHandle {
+  if (!isFilesWorkspacePayloadShape(value)) return false;
 
   return (
     typeof value.queryPermission === "function" &&
@@ -143,15 +146,15 @@ function tryOpenDownloadWindow(url: string, pendingWindow: Window | null): boole
   return window.open(url, "_blank") !== null;
 }
 
-function isNonEmptyString(value: unknown): value is string {
+function isNonEmptyString(value: DynamicValue): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isFiniteNumber(value: unknown): value is number {
+function isFiniteNumber(value: DynamicValue): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isMissingWorkspaceFileError(error: unknown): boolean {
+function isMissingWorkspaceFileError(error: DynamicValue): boolean {
   if (!(error instanceof Error)) return false;
 
   if (error.name === "NotFoundError") {
@@ -175,15 +178,15 @@ function isMissingWorkspaceFileError(error: unknown): boolean {
   return /\b(can\s?not|cannot|can't)\s+be\s+found\b/u.test(message);
 }
 
-function isWorkspaceBackendKind(value: unknown): value is WorkspaceBackendKind {
+function isWorkspaceBackendKind(value: DynamicValue): value is WorkspaceBackendKind {
   return value === "native-directory" || value === "opfs" || value === "memory";
 }
 
-function isFilesWorkspaceAuditActor(value: unknown): value is FilesWorkspaceAuditActor {
+function isFilesWorkspaceAuditActor(value: DynamicValue): value is FilesWorkspaceAuditActor {
   return value === "assistant" || value === "user" || value === "system";
 }
 
-function isFilesWorkspaceAuditAction(value: unknown): value is FilesWorkspaceAuditAction {
+function isFilesWorkspaceAuditAction(value: DynamicValue): value is FilesWorkspaceAuditAction {
   return (
     value === "list" ||
     value === "read" ||
@@ -197,7 +200,7 @@ function isFilesWorkspaceAuditAction(value: unknown): value is FilesWorkspaceAud
   );
 }
 
-function sanitizeOptionalPath(value: unknown): string | undefined {
+function sanitizeOptionalPath(value: DynamicValue): string | undefined {
   if (!isNonEmptyString(value)) return undefined;
 
   try {
@@ -207,8 +210,18 @@ function sanitizeOptionalPath(value: unknown): string | undefined {
   }
 }
 
-function parseWorkbookTag(value: unknown): WorkspaceFileWorkbookTag | null {
-  if (!isRecord(value)) return null;
+function requestedLocationArgs(
+  locationKind: WorkspaceFileLocationKind | undefined,
+): { requestedLocationKind?: WorkspaceFileLocationKind } {
+  if (locationKind === undefined) {
+    return {};
+  }
+
+  return { requestedLocationKind: locationKind };
+}
+
+function parseWorkbookTag(value: DynamicValue): WorkspaceFileWorkbookTag | null {
+  if (!isFilesWorkspacePayloadShape(value)) return null;
 
   const workbookId = typeof value.workbookId === "string"
     ? value.workbookId.trim()
@@ -231,12 +244,12 @@ function parseWorkbookTag(value: unknown): WorkspaceFileWorkbookTag | null {
   };
 }
 
-function parsePersistedMetadata(value: unknown): Map<string, WorkspaceFileWorkbookTag> {
+function parsePersistedMetadata(value: DynamicValue): Map<string, WorkspaceFileWorkbookTag> {
   const byPath = new Map<string, WorkspaceFileWorkbookTag>();
-  if (!isRecord(value)) return byPath;
+  if (!isFilesWorkspacePayloadShape(value)) return byPath;
 
   const rawByPath = value.byPath;
-  if (!isRecord(rawByPath)) return byPath;
+  if (!isFilesWorkspacePayloadShape(rawByPath)) return byPath;
 
   for (const [rawPath, rawTag] of Object.entries(rawByPath)) {
     const normalizedPath = sanitizeOptionalPath(rawPath);
@@ -251,8 +264,8 @@ function parsePersistedMetadata(value: unknown): Map<string, WorkspaceFileWorkbo
   return byPath;
 }
 
-function parseAuditEntry(value: unknown): FilesWorkspaceAuditEntry | null {
-  if (!isRecord(value)) return null;
+function parseAuditEntry(value: DynamicValue): FilesWorkspaceAuditEntry | null {
+  if (!isFilesWorkspacePayloadShape(value)) return null;
 
   if (!isFilesWorkspaceAuditAction(value.action)) return null;
   if (!isFilesWorkspaceAuditActor(value.actor)) return null;
@@ -270,24 +283,27 @@ function parseAuditEntry(value: unknown): FilesWorkspaceAuditEntry | null {
   const workbookId = isNonEmptyString(value.workbookId) ? value.workbookId.trim() : undefined;
   const workbookLabel = isNonEmptyString(value.workbookLabel) ? value.workbookLabel.trim() : undefined;
 
-  return {
+  const entry: FilesWorkspaceAuditEntry = {
     id,
     at,
     action: value.action,
     actor: value.actor,
     source: value.source.trim(),
     backend: value.backend,
-    path,
-    fromPath,
-    toPath,
-    bytes,
-    workbookId,
-    workbookLabel,
   };
+
+  if (path !== undefined) entry.path = path;
+  if (fromPath !== undefined) entry.fromPath = fromPath;
+  if (toPath !== undefined) entry.toPath = toPath;
+  if (bytes !== undefined) entry.bytes = bytes;
+  if (workbookId !== undefined) entry.workbookId = workbookId;
+  if (workbookLabel !== undefined) entry.workbookLabel = workbookLabel;
+
+  return entry;
 }
 
-function parsePersistedAuditTrail(value: unknown): FilesWorkspaceAuditEntry[] {
-  if (!isRecord(value)) return [];
+function parsePersistedAuditTrail(value: DynamicValue): FilesWorkspaceAuditEntry[] {
+  if (!isFilesWorkspacePayloadShape(value)) return [];
 
   const entriesRaw = value.entries;
   if (!Array.isArray(entriesRaw)) return [];
@@ -318,12 +334,12 @@ function createAuditEntryId(): string {
 
 interface SettingsStoreLike {
   get<T>(key: string): Promise<T | null>;
-  set(key: string, value: unknown): Promise<void>;
+  set(key: string, value: DynamicValue): Promise<void>;
   delete(key: string): Promise<void>;
 }
 
-function isSettingsStoreLike(value: unknown): value is SettingsStoreLike {
-  if (!isRecord(value)) return false;
+function isSettingsStoreLike(value: DynamicValue): value is SettingsStoreLike {
+  if (!isFilesWorkspacePayloadShape(value)) return false;
 
   return (
     typeof value.get === "function" &&
@@ -334,9 +350,9 @@ function isSettingsStoreLike(value: unknown): value is SettingsStoreLike {
 
 async function getSettingsStore(): Promise<SettingsStoreLike | null> {
   try {
-    const storageModule = await import("@earendil-works/pi-web-ui/dist/storage/app-storage.js");
+    const storageModule = await import("../storage/local/app-storage.js");
     const appStorage = storageModule.getAppStorage();
-    const settings = isRecord(appStorage) ? appStorage.settings : null;
+    const settings = isFilesWorkspacePayloadShape(appStorage) ? appStorage.settings : null;
     return isSettingsStoreLike(settings) ? settings : null;
   } catch {
     return null;
@@ -348,7 +364,7 @@ async function readPersistedNativeHandle(): Promise<FileSystemDirectoryHandle | 
   if (!settings) return null;
 
   try {
-    const stored = await settings.get<unknown>(NATIVE_HANDLE_SETTING_KEY);
+    const stored = await settings.get<DynamicValue>(NATIVE_HANDLE_SETTING_KEY);
     return isDirectoryHandle(stored) ? stored : null;
   } catch {
     return null;
@@ -734,7 +750,7 @@ export class FilesWorkspace {
     if (!settings) return;
 
     try {
-      const raw = await settings.get<unknown>(METADATA_SETTING_KEY);
+      const raw = await settings.get<DynamicValue>(METADATA_SETTING_KEY);
       const parsed = parsePersistedMetadata(raw);
       this.metadataByPath.clear();
       for (const [path, tag] of parsed) {
@@ -774,7 +790,7 @@ export class FilesWorkspace {
     if (!settings) return;
 
     try {
-      const raw = await settings.get<unknown>(AUDIT_TRAIL_SETTING_KEY);
+      const raw = await settings.get<DynamicValue>(AUDIT_TRAIL_SETTING_KEY);
       this.auditEntries = parsePersistedAuditTrail(raw);
     } catch {
       this.auditEntries = [];
@@ -884,7 +900,7 @@ export class FilesWorkspace {
     try {
       await backend.readFile(path);
       return true;
-    } catch (error: unknown) {
+    } catch (error) {
       if (isMissingWorkspaceFileError(error)) {
         return false;
       }
@@ -912,13 +928,14 @@ export class FilesWorkspace {
       actor: args.context.actor,
       source: args.context.source,
       backend: args.backend,
-      path: args.path,
-      fromPath: args.fromPath,
-      toPath: args.toPath,
-      bytes: args.bytes,
-      workbookId: workbookTag?.workbookId,
-      workbookLabel: workbookTag?.workbookLabel,
     };
+
+    if (args.path !== undefined) entry.path = args.path;
+    if (args.fromPath !== undefined) entry.fromPath = args.fromPath;
+    if (args.toPath !== undefined) entry.toPath = args.toPath;
+    if (args.bytes !== undefined) entry.bytes = args.bytes;
+    if (workbookTag?.workbookId !== undefined) entry.workbookId = workbookTag.workbookId;
+    if (workbookTag?.workbookLabel !== undefined) entry.workbookLabel = workbookTag.workbookLabel;
 
     this.auditEntries = [entry, ...this.auditEntries].slice(0, MAX_AUDIT_ENTRIES);
     await this.persistAuditTrail();
@@ -1078,7 +1095,7 @@ export class FilesWorkspace {
         locationKind: activeBackend.kind === "native-directory" ? "native-directory" : "workspace",
         auditBackend: activeBackend.kind,
       };
-    } catch (activeError: unknown) {
+    } catch (activeError) {
       if (!isMissingWorkspaceFileError(activeError)) {
         throw activeError;
       }
@@ -1090,7 +1107,7 @@ export class FilesWorkspace {
             locationKind: "workspace",
             auditBackend: workspaceBackend.kind,
           };
-        } catch (workspaceError: unknown) {
+        } catch (workspaceError) {
           if (!isMissingWorkspaceFileError(workspaceError)) {
             throw workspaceError;
           }
@@ -1162,13 +1179,18 @@ export class FilesWorkspace {
     const backend = await this.getBackend();
     const nativeSupported = this.isNativeDirectoryPickerSupported();
 
-    return {
+    const status: WorkspaceBackendStatus = {
       kind: backend.kind,
       label: backendLabel(backend.kind),
       nativeSupported,
       nativeConnected: backend.kind === "native-directory",
-      nativeDirectoryName: this.nativeHandle?.name,
     };
+
+    if (this.nativeHandle?.name !== undefined) {
+      status.nativeDirectoryName = this.nativeHandle.name;
+    }
+
+    return status;
   }
 
   async listFiles(options: WorkspaceListOptions = {}): Promise<WorkspaceFileEntry[]> {
@@ -1231,7 +1253,7 @@ export class FilesWorkspace {
     const normalizedPath = normalizeWorkspacePath(path);
     const rawReadResult = await this.readRawFile({
       path: normalizedPath,
-      requestedLocationKind: opts.locationKind,
+      ...requestedLocationArgs(opts.locationKind),
     });
 
     const withTags =
@@ -1241,16 +1263,13 @@ export class FilesWorkspace {
         : [rawReadResult.result];
 
     const taggedResult = withTags[0];
-    const result: WorkspaceFileReadResult = taggedResult
-      ? {
-        ...rawReadResult.result,
-        workbookTag: taggedResult.workbookTag,
-        locationKind: rawReadResult.locationKind,
-      }
-      : {
-        ...rawReadResult.result,
-        locationKind: rawReadResult.locationKind,
-      };
+    const result: WorkspaceFileReadResult = {
+      ...rawReadResult.result,
+      locationKind: rawReadResult.locationKind,
+    };
+    if (taggedResult?.workbookTag !== undefined) {
+      result.workbookTag = taggedResult.workbookTag;
+    }
 
     const mode = opts.mode ?? "auto";
     const maxChars = opts.maxChars ?? 20000;
@@ -1268,36 +1287,36 @@ export class FilesWorkspace {
       resolved = {
         ...result,
         text: truncated.text,
-        base64: undefined,
         truncated: truncated.truncated,
       };
+      delete resolved.base64;
     } else if (mode === "base64") {
       const base64Content = result.base64 ?? bytesToBase64(encodeTextUtf8(result.text ?? ""));
       const truncated = truncateBase64(base64Content, maxChars);
 
       resolved = {
         ...result,
-        text: undefined,
         base64: truncated.base64,
         truncated: truncated.truncated,
       };
+      delete resolved.text;
     } else if (result.text !== undefined) {
       const truncated = truncateText(result.text, maxChars);
       resolved = {
         ...result,
         text: truncated.text,
-        base64: undefined,
         truncated: truncated.truncated,
       };
+      delete resolved.base64;
     } else {
       const base64Content = result.base64 ?? "";
       const truncated = truncateBase64(base64Content, maxChars);
       resolved = {
         ...result,
-        text: undefined,
         base64: truncated.base64,
         truncated: truncated.truncated,
       };
+      delete resolved.text;
     }
 
     if (opts.audit) {
@@ -1322,7 +1341,7 @@ export class FilesWorkspace {
   ): Promise<void> {
     const normalizedPath = normalizeWorkspacePath(path);
     const target = await this.resolveMutationTarget({
-      requestedLocationKind: options.locationKind,
+      ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: false,
       path: normalizedPath,
     });
@@ -1365,7 +1384,7 @@ export class FilesWorkspace {
   ): Promise<void> {
     const normalizedPath = normalizeWorkspacePath(path);
     const target = await this.resolveMutationTarget({
-      requestedLocationKind: options.locationKind,
+      ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: false,
       path: normalizedPath,
     });
@@ -1403,7 +1422,7 @@ export class FilesWorkspace {
   async deleteFile(path: string, options: WorkspaceMutationOptions = {}): Promise<void> {
     const normalizedPath = normalizeWorkspacePath(path);
     const target = await this.resolveMutationTarget({
-      requestedLocationKind: options.locationKind,
+      ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: false,
       path: normalizedPath,
     });
@@ -1439,7 +1458,7 @@ export class FilesWorkspace {
     const normalizedNewPath = normalizeWorkspacePath(newPath);
 
     const target = await this.resolveMutationTarget({
-      requestedLocationKind: options.locationKind,
+      ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: false,
       path: normalizedOldPath,
     });
@@ -1473,7 +1492,7 @@ export class FilesWorkspace {
 
   async importFiles(files: Iterable<File>, options: WorkspaceMutationOptions = {}): Promise<number> {
     const target = await this.resolveMutationTarget({
-      requestedLocationKind: options.locationKind,
+      ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: true,
     });
 
@@ -1556,7 +1575,7 @@ export class FilesWorkspace {
       const normalizedPath = normalizeWorkspacePath(path);
       const readResult = await this.readRawFile({
         path: normalizedPath,
-        requestedLocationKind: options.locationKind,
+        ...requestedLocationArgs(options.locationKind),
       });
       const result = readResult.result;
 
@@ -1592,7 +1611,7 @@ export class FilesWorkspace {
 
       // Delay revocation so the opened window can finish loading the blob.
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error: unknown) {
+    } catch (error) {
       closeWindowSafely(pendingWindow);
       throw error;
     }

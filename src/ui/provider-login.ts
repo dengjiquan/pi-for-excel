@@ -7,8 +7,9 @@
  * - API key input + Save button
  */
 
-import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
-import { isCorsError } from "@earendil-works/pi-web-ui/dist/utils/proxy-utils.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
+import { isCorsError } from "../auth/cors-error.js";
+import { pollOAuthCallbackCapture } from "../auth/oauth-callback-capture.js";
 import { getOAuthProvider } from "../auth/oauth-provider-registry.js";
 import { clearOAuthCredentials, saveOAuthCredentials } from "../auth/oauth-storage.js";
 import {
@@ -21,6 +22,7 @@ import {
 import { PROVIDER_PROMPT_OVERLAY_ID, PROXY_GATE_OVERLAY_ID } from "./overlay-ids.js";
 import { closeOverlayById, createOverlayDialog } from "./overlay-dialog.js";
 import { getErrorMessage } from "../utils/errors.js";
+import { escapeAttr, escapeHtml, setSafeInnerHTML } from "../utils/html.js";
 import { t } from "../language/index.js";
 import { filterProvidersByAllowlist, resolveAllowedProviderIds } from "./provider-allowlist.js";
 
@@ -100,9 +102,12 @@ function showProxyGateDialog(): Promise<boolean> {
       codeRow.style.display = "none";
       hint.textContent = t("provider.proxy_gate.hint_remote", { url: DEFAULT_PROXY_URL });
     } else {
-      hint.innerHTML =
-        `${t("provider.proxy_gate.hint_html")} ` +
-        `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+      setSafeInnerHTML(
+        hint,
+        `${escapeHtml(t("provider.proxy_gate.hint_html"))} ` +
+          `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
+        "proxy gate helper link markup with escaped localized text",
+      );
     }
 
     const actions = document.createElement("div");
@@ -159,9 +164,12 @@ function showProxyGateDialog(): Promise<boolean> {
         if (DEFAULT_PROXY_IS_REMOTE) {
           hint.textContent = t("provider.proxy_gate.not_detected_remote", { url: DEFAULT_PROXY_URL });
         } else {
-          hint.innerHTML =
-            `${t("provider.proxy_gate.not_detected_html")} ` +
-            `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+          setSafeInnerHTML(
+            hint,
+            `${escapeHtml(t("provider.proxy_gate.not_detected_html"))} ` +
+              `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
+            "proxy retry helper link markup with escaped localized text",
+          );
         }
       })();
     };
@@ -191,6 +199,13 @@ const OAUTH_IDS_NEEDING_PROXY = new Set([
   "github-copilot",
 ]);
 
+const OAUTH_CALLBACK_CAPTURE_IDS = new Set([
+  "anthropic",
+  "openai-codex",
+  "google-gemini-cli",
+  "google-antigravity",
+]);
+
 export interface ProviderDef {
   id: string;
   label: string;
@@ -200,7 +215,7 @@ export interface ProviderDef {
 
 export const ALL_PROVIDERS: ProviderDef[] = [
   // OAuth providers first (subscription / account-based flows)
-  // Only list flows that are supported in-browser (PKCE/manual paste, no local callback server).
+  // Only list flows that are supported in-browser (PKCE with proxy-assisted or manual callback handling).
   // desc holds a locale key (resolved via t() at render time in buildProviderRow).
   { id: "anthropic",          label: /* brand */ "Anthropic",                oauth: "anthropic",          desc: "provider.desc.claude" },
   { id: "openai-codex",       label: /* brand */ "OpenAI (ChatGPT)",         oauth: "openai-codex",       desc: "provider.desc.openai_sub" },
@@ -270,7 +285,8 @@ function normalizeAnthropicAuthorizationInput(input: string): string {
   // Accept whitespace-separated values (code state)
   if (!value.includes("#")) {
     const parts = value.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) return `${parts[0]}#${parts[1]}`;
+    const [code, state] = parts;
+    if (code !== undefined && state !== undefined) return `${code}#${state}`;
   }
 
   return value;
@@ -282,6 +298,7 @@ function looksLikeOAuthRedirectInput(value: string): boolean {
     value.includes("#")
     || value.includes("code=")
     || lower.startsWith("http://localhost:1455/")
+    || lower.startsWith("http://localhost:53692/")
     || lower.startsWith("http://localhost:8085/")
     || lower.startsWith("http://localhost:51121/")
     || lower.startsWith("https://auth.openai.com/")
@@ -289,6 +306,17 @@ function looksLikeOAuthRedirectInput(value: string): boolean {
     || lower.includes("oauth2callback")
     || lower.includes("oauth-callback")
   );
+}
+
+function getOAuthStateFromAuthUrl(authUrl: string | null): string | undefined {
+  if (!authUrl) return undefined;
+
+  try {
+    const state = new URL(authUrl).searchParams.get("state");
+    return state && state.length > 0 ? state : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeApiKeyForProvider(
@@ -487,6 +515,10 @@ function promptForText(opts: {
   helperText?: string;
   submitLabel?: string;
   externalUrl?: string;
+  autoCapture?: {
+    providerId: string;
+    state: string;
+  };
 }): Promise<string> {
   return new Promise((resolve, reject) => {
     closeOverlayById(PROVIDER_PROMPT_OVERLAY_ID);
@@ -509,6 +541,10 @@ function promptForText(opts: {
     helperEl.className = "pi-prompt-helper";
     helperEl.hidden = true;
 
+    const captureStatusEl = document.createElement("p");
+    captureStatusEl.className = "pi-prompt-helper";
+    captureStatusEl.hidden = true;
+
     const input = document.createElement("input");
     input.className = "pi-prompt-input";
     input.type = "text";
@@ -518,6 +554,10 @@ function promptForText(opts: {
     const externalUrlEl = document.createElement("div");
     externalUrlEl.className = "pi-prompt-external-url";
     externalUrlEl.hidden = true;
+
+    const externalUrlFallbackEl = document.createElement("div");
+    externalUrlFallbackEl.className = "pi-prompt-external-url__manual";
+    externalUrlFallbackEl.hidden = true;
 
     const actions = document.createElement("div");
     actions.className = "pi-prompt-actions";
@@ -533,7 +573,16 @@ function promptForText(opts: {
     okBtn.textContent = opts.submitLabel ?? t("provider.prompt.continue");
 
     actions.append(cancelBtn, okBtn);
-    dialog.card.append(titleEl, messageEl, helperEl, externalUrlEl, input, actions);
+    dialog.card.append(
+      titleEl,
+      messageEl,
+      helperEl,
+      externalUrlEl,
+      externalUrlFallbackEl,
+      captureStatusEl,
+      input,
+      actions,
+    );
 
     if (opts.helperText) {
       helperEl.textContent = opts.helperText;
@@ -552,30 +601,59 @@ function promptForText(opts: {
       openLink.rel = "noopener noreferrer";
       openLink.textContent = t("provider.prompt.openLoginPage");
 
+      const manualLabel = document.createElement("label");
+      manualLabel.className = "pi-prompt-external-url__manual-label";
+      manualLabel.textContent = t("provider.prompt.loginUrlFallback");
+
+      const manualInput = document.createElement("textarea");
+      manualInput.className = "pi-prompt-external-url__manual-value";
+      manualInput.readOnly = true;
+      manualInput.rows = 3;
+      manualInput.value = opts.externalUrl;
+      manualInput.setAttribute("aria-label", t("provider.prompt.loginUrlFallback"));
+      const selectManualUrl = (): void => {
+        manualInput.focus();
+        manualInput.select();
+      };
+      manualInput.addEventListener("focus", selectManualUrl);
+      manualInput.addEventListener("click", selectManualUrl);
+
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
       copyBtn.className = "pi-prompt-external-url__copy";
       copyBtn.textContent = t("provider.prompt.copyLoginLink");
       copyBtn.addEventListener("click", () => {
-        void copyTextToClipboard(opts.externalUrl ?? "").then(() => {
-          copyBtn.textContent = t("provider.prompt.copied");
-          setTimeout(() => {
-            copyBtn.textContent = t("provider.prompt.copyLoginLink");
-          }, 1500);
-        });
+        void copyTextToClipboard(opts.externalUrl ?? "")
+          .then(() => {
+            copyBtn.textContent = t("provider.prompt.copied");
+            setTimeout(() => {
+              copyBtn.textContent = t("provider.prompt.copyLoginLink");
+            }, 1500);
+          })
+          .catch(() => {
+            copyBtn.textContent = t("provider.prompt.copyFailedShort");
+            selectManualUrl();
+            setTimeout(() => {
+              copyBtn.textContent = t("provider.prompt.copyLoginLink");
+            }, 2000);
+          });
       });
 
+      externalUrlFallbackEl.append(manualLabel, manualInput);
       externalUrlEl.append(openLink, copyBtn);
       externalUrlEl.hidden = false;
+      externalUrlFallbackEl.hidden = false;
     }
 
     let settled = false;
+    let captureAbortController: AbortController | undefined;
 
     const submit = (): void => {
       if (settled) {
         return;
       }
 
+      captureAbortController?.abort();
       settled = true;
       const value = input.value.trim();
       dialog.close();
@@ -587,6 +665,7 @@ function promptForText(opts: {
         return;
       }
 
+      captureAbortController?.abort();
       settled = true;
       dialog.close();
       reject(new PromptCancelledError());
@@ -609,6 +688,7 @@ function promptForText(opts: {
       cancelBtn.removeEventListener("click", cancel);
       okBtn.removeEventListener("click", submit);
       input.removeEventListener("keydown", onInputKeyDown);
+      captureAbortController?.abort();
 
       if (!settled) {
         settled = true;
@@ -617,6 +697,36 @@ function promptForText(opts: {
     });
 
     dialog.mount();
+
+    if (opts.autoCapture) {
+      captureStatusEl.textContent = t("provider.oauth.capture_waiting");
+      captureStatusEl.hidden = false;
+      captureAbortController = new AbortController();
+
+      void pollOAuthCallbackCapture({
+        providerId: opts.autoCapture.providerId,
+        state: opts.autoCapture.state,
+        signal: captureAbortController.signal,
+      }).then(
+        (capture) => {
+          if (settled) return;
+          if (!capture) {
+            captureStatusEl.textContent = t("provider.oauth.capture_fallback");
+            return;
+          }
+
+          captureStatusEl.textContent = t("provider.oauth.capture_captured");
+          input.value = capture.url;
+          submit();
+        },
+        (error: DynamicValue) => {
+          if (settled) return;
+          if (error instanceof Error && error.name === "AbortError") return;
+          captureStatusEl.textContent = t("provider.oauth.capture_fallback");
+        },
+      );
+    }
+
     requestAnimationFrame(() => input.focus());
   });
 }
@@ -646,33 +756,42 @@ export function buildProviderRow(
 
   const row = document.createElement("div");
   row.className = "pi-login-row";
-  row.innerHTML = `
+  const labelText = escapeHtml(label);
+  const descriptionMarkup = desc ? `<span class="pi-login-desc">${escapeHtml(t(desc))}</span>` : "";
+  const oauthMarkup = oauth
+    ? `
+        <button class="pi-login-oauth">${escapeHtml(t("provider.login_with", { label }))}</button>
+        <div class="pi-login-divider">
+          <div class="pi-login-divider__line"></div>
+          <span class="pi-login-divider__text">${escapeHtml(t("provider.or_api_key"))}</span>
+          <div class="pi-login-divider__line"></div>
+        </div>
+      `
+    : "";
+  setSafeInnerHTML(
+    row,
+    `
     <button class="pi-welcome-provider pi-login-trigger">
       <span class="pi-login-meta">
-        <span class="pi-login-label">${label}</span>
-        ${desc ? `<span class="pi-login-desc">${t(desc)}</span>` : ""}
+        <span class="pi-login-label">${labelText}</span>
+        ${descriptionMarkup}
       </span>
       <span class="pi-login-status ${isActive ? "is-connected" : ""}">
-        ${isActive ? t("provider.connected") : t("provider.set_up")}
+        ${escapeHtml(isActive ? t("provider.connected") : t("provider.set_up"))}
       </span>
     </button>
     <div class="pi-login-detail" hidden>
-      <button class="pi-login-disconnect" type="button" ${isActive ? "" : "hidden"}>${t("provider.disconnect", { label })}</button>
-      ${oauth ? `
-        <button class="pi-login-oauth">${t("provider.login_with", { label })}</button>
-        <div class="pi-login-divider">
-          <div class="pi-login-divider__line"></div>
-          <span class="pi-login-divider__text">${t("provider.or_api_key")}</span>
-          <div class="pi-login-divider__line"></div>
-        </div>
-      ` : ""}
+      <button class="pi-login-disconnect" type="button" ${isActive ? "" : "hidden"}>${escapeHtml(t("provider.disconnect", { label }))}</button>
+      ${oauthMarkup}
       <div class="pi-login-key-row">
-        <input class="pi-login-key" type="password" placeholder="${keyPlaceholder}" aria-label="${t("provider.keyAria", { label })}" autocomplete="off" spellcheck="false" />
-        <button class="pi-login-save">${t("provider.save")}</button>
+        <input class="pi-login-key" type="password" placeholder="${escapeAttr(keyPlaceholder)}" aria-label="${escapeAttr(t("provider.keyAria", { label }))}" autocomplete="off" spellcheck="false" />
+        <button class="pi-login-save">${escapeHtml(t("provider.save"))}</button>
       </div>
       <p class="pi-login-error" hidden></p>
     </div>
-  `;
+  `,
+    "provider login row template with escaped provider and localized text",
+  );
 
   const headerBtn = row.querySelector<HTMLButtonElement>(".pi-welcome-provider");
   if (!headerBtn) {
@@ -779,13 +898,23 @@ export function buildProviderRow(
                       ? t("provider.oauth.helper.google")
                       : undefined;
 
+                const oauthCallbackProviderId = oauth && OAUTH_CALLBACK_CAPTURE_IDS.has(oauth)
+                  ? oauth
+                  : undefined;
+                const oauthCallbackState = oauthCallbackProviderId
+                  ? getOAuthStateFromAuthUrl(authUrlRef.current)
+                  : undefined;
+
                 const value = await promptForText({
                   title: t("provider.login_with", { label }),
                   message: prompt.message,
                   placeholder: prompt.placeholder || "",
-                  helperText,
+                  ...(helperText !== undefined ? { helperText } : {}),
                   submitLabel: t("provider.prompt.continue"),
-                  externalUrl: authUrlRef.current ?? undefined,
+                  ...(authUrlRef.current !== null ? { externalUrl: authUrlRef.current } : {}),
+                  ...(oauthCallbackProviderId && oauthCallbackState
+                    ? { autoCapture: { providerId: oauthCallbackProviderId, state: oauthCallbackState } }
+                    : {}),
                 });
 
                 if (id === "anthropic") {
@@ -807,7 +936,7 @@ export function buildProviderRow(
           onConnected(row, id, label);
           detail.hidden = true;
           expandedRef.current = null;
-        } catch (err: unknown) {
+        } catch (err) {
           if (err instanceof PromptCancelledError) {
             // User cancelled the prompt; leave UI unchanged.
             return;
@@ -822,11 +951,14 @@ export function buildProviderRow(
             if (DEFAULT_PROXY_IS_REMOTE) {
               errorEl.textContent = t("provider.cors_error_remote", { url: DEFAULT_PROXY_URL });
             } else {
-              errorEl.innerHTML =
-                `${t("provider.cors_error")} <code style="padding:2px 5px;border-radius:4px;` +
-                "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4)\">" +
-                `npx pi-for-excel-proxy</code>${t("provider.cors_error.retry")} ` +
-                `<a href="${PROXY_HELPER_DOCS_URL}" target="_blank" rel="noopener noreferrer">${t("provider.proxy_gate.guide")}</a>`;
+              setSafeInnerHTML(
+                errorEl,
+                `${escapeHtml(t("provider.cors_error"))} <code style="padding:2px 5px;border-radius:4px;` +
+                  "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4)\">" +
+                  `npx pi-for-excel-proxy</code>${escapeHtml(t("provider.cors_error.retry"))} ` +
+                  `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
+                "provider CORS helper error markup with escaped localized text",
+              );
             }
           } else {
             errorEl.textContent = msg || t("provider.login_failed");
@@ -857,7 +989,7 @@ export function buildProviderRow(
           setConnectedState(false);
           keyInput.value = "";
           onDisconnected?.(row, id, label);
-        } catch (err: unknown) {
+        } catch (err) {
           const msg = getErrorMessage(err);
           errorEl.textContent = msg ? t("provider.disconnect_failed_msg", { msg }) : t("provider.disconnect_failed");
           errorEl.hidden = false;
@@ -892,7 +1024,7 @@ export function buildProviderRow(
       onConnected(row, id, label);
       detail.hidden = true;
       expandedRef.current = null;
-    } catch (err: unknown) {
+    } catch (err) {
       const msg = getErrorMessage(err);
       errorEl.textContent = msg ? t("provider.save_failed_msg", { msg }) : t("provider.save_failed");
       errorEl.hidden = false;

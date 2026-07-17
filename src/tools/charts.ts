@@ -35,7 +35,6 @@ function StringEnum<T extends string[]>(values: [...T], opts?: { description?: s
     opts,
   );
 }
-
 const CHART_ACTIONS = ["list", "create", "update", "delete", "get_image"] as const;
 const FRIENDLY_CHART_TYPES = [
   "column",
@@ -342,7 +341,7 @@ function parsePositionAnchors(position: string): PositionAnchors {
   const second = parts[1];
   return {
     start: qualify(start),
-    end: second ? qualify(second) : undefined,
+    ...(second ? { end: qualify(second) } : {}),
   };
 }
 
@@ -568,7 +567,7 @@ async function executeCreate(params: Params): Promise<ChartsExecutionResult> {
       kind: "chart_absent",
       sheetName: chartSheet.name,
       name: chart.name,
-      chartId,
+      ...(chartId !== undefined ? { chartId } : {}),
     };
 
     return {
@@ -628,7 +627,7 @@ async function executeUpdate(params: Params): Promise<ChartsExecutionResult> {
           action: "update",
           name: chart.name,
           address,
-          sourceRange: sourceAddress,
+          ...(sourceAddress !== undefined ? { sourceRange: sourceAddress } : {}),
         },
       },
       outputAddress: address,
@@ -820,7 +819,7 @@ export function createChartsTool(
         if (params.action === "update") {
           try {
             beforeChartState = await resolvedDependencies.captureChartPresent(requireName(params), params.sheet);
-          } catch (error: unknown) {
+          } catch (error) {
             captureError = `Chart backup capture failed: ${getErrorMessage(error)}`;
           }
         }
@@ -834,23 +833,25 @@ export function createChartsTool(
           return result.result;
         }
 
+        const outputAddress = result.outputAddress ?? result.result.details.address;
+        const recovery = buildRecoveryStep(
+          resolvedDependencies,
+          toolCallId,
+          result.result,
+          result,
+          captureError,
+        );
         await finalizeMutationOperation(mutationFinalizeDependencies, {
           auditEntry: {
             toolName: "charts",
             toolCallId,
             blocked: false,
-            outputAddress: result.outputAddress ?? result.result.details.address,
+            ...(outputAddress !== undefined ? { outputAddress } : {}),
             changedCount: result.changedCount ?? 1,
             changes: [],
             summary: result.auditSummary ?? `${params.action} chart`,
           },
-          recovery: buildRecoveryStep(
-            resolvedDependencies,
-            toolCallId,
-            result.result,
-            result,
-            captureError,
-          ),
+          ...(recovery !== undefined ? { recovery } : {}),
         });
 
         if (result.sourceRangeChanged) {
@@ -858,16 +859,17 @@ export function createChartsTool(
         }
 
         return result.result;
-      } catch (error: unknown) {
+      } catch (error) {
         const message = getErrorMessage(error);
 
         if (isMutation) {
+          const outputAddress = params.name ?? params.source_range ?? params.sheet;
           await finalizeMutationOperation(mutationFinalizeDependencies, {
             auditEntry: {
               toolName: "charts",
               toolCallId,
               blocked: true,
-              outputAddress: params.name ?? params.source_range ?? params.sheet,
+              ...(outputAddress !== undefined ? { outputAddress } : {}),
               changedCount: 0,
               changes: [],
               summary: `error: ${message}`,
@@ -880,8 +882,8 @@ export function createChartsTool(
           details: {
             kind: "charts",
             action: params.action,
-            name: params.name,
-            sourceRange: params.source_range,
+            ...(params.name !== undefined ? { name: params.name } : {}),
+            ...(params.source_range !== undefined ? { sourceRange: params.source_range } : {}),
           },
         };
       }

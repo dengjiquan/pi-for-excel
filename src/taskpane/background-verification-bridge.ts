@@ -11,6 +11,9 @@
  */
 
 import type { WorkbookContext } from "../workbook/context.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
+import { closeOverlayById } from "../ui/overlay-dialog.js";
+import { MODEL_SELECTOR_OVERLAY_ID } from "../ui/overlay-ids.js";
 import type { PiSidebar } from "../ui/pi-sidebar.js";
 import type { SessionRuntime } from "./session-runtime-manager.js";
 
@@ -23,13 +26,15 @@ type BridgeCommandType =
   | "writeRange"
   | "clearRange"
   | "workbookWriteProbe"
+  | "configureProxy"
+  | "selectModel"
   | "submitPrompt"
   | "listCharts";
 
 interface BridgeCommand {
   id?: string;
   type: BridgeCommandType;
-  payload?: unknown;
+  payload?: DynamicValue;
 }
 
 interface PollResponse extends BridgeCommand {
@@ -47,7 +52,7 @@ interface BridgeOptions {
 }
 
 interface JsonRecord {
-  [key: string]: unknown;
+  [key: string]: DynamicValue;
 }
 
 interface BridgeStopHandle {
@@ -57,41 +62,41 @@ interface BridgeStopHandle {
 const DEFAULT_POLL_DELAY_MS = 750;
 
 function envValue(name: keyof ImportMetaEnv): string {
-  const value: unknown = import.meta.env[name];
+  const value: DynamicValue = import.meta.env[name];
   return typeof value === "string" ? value.trim() : "";
 }
 
-function isRecord(value: unknown): value is JsonRecord {
+function isTaskpaneBackgroundVerificationBridgePayloadShape(value: DynamicValue): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(value: unknown, key: string): string | undefined {
-  if (!isRecord(value)) return undefined;
+function stringField(value: DynamicValue, key: string): string | undefined {
+  if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "string" && field.trim().length > 0 ? field.trim() : undefined;
 }
 
-function booleanField(value: unknown, key: string): boolean | undefined {
-  if (!isRecord(value)) return undefined;
+function booleanField(value: DynamicValue, key: string): boolean | undefined {
+  if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "boolean" ? field : undefined;
 }
 
-function numberField(value: unknown, key: string): number | undefined {
-  if (!isRecord(value)) return undefined;
+function numberField(value: DynamicValue, key: string): number | undefined {
+  if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "number" && Number.isFinite(field) ? field : undefined;
 }
 
-function isUnknownArray(value: unknown): value is readonly unknown[] {
+function isUnknownArray(value: DynamicValue): value is readonly DynamicValue[] {
   return Array.isArray(value);
 }
 
-function matrixField(value: unknown, key: string): unknown[][] | undefined {
-  if (!isRecord(value)) return undefined;
+function matrixField(value: DynamicValue, key: string): DynamicValue[][] | undefined {
+  if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   if (!isUnknownArray(field) || field.length === 0) return undefined;
-  const rows: unknown[][] = [];
+  const rows: DynamicValue[][] = [];
   let width: number | null = null;
   for (const row of field) {
     if (!isUnknownArray(row) || row.length === 0) return undefined;
@@ -128,7 +133,7 @@ async function postJson<T>(url: string, body: JsonRecord, signal: AbortSignal): 
     body: JSON.stringify(body),
     signal,
   });
-  const parsed = await response.json() as unknown;
+  const parsed = await response.json() as DynamicValue;
   if (!response.ok) {
     const message = stringField(parsed, "error") ?? `HTTP ${response.status}`;
     throw new Error(message);
@@ -140,7 +145,7 @@ function assertNever(value: never): never {
   throw new Error(`Unknown background verification command: ${String(value)}`);
 }
 
-function serializeError(error: unknown): JsonRecord {
+function serializeError(error: DynamicValue): JsonRecord {
   if (error instanceof Error) {
     return {
       name: error.name,
@@ -154,6 +159,27 @@ function isRuntimeBusy(runtime: SessionRuntime | null): boolean {
   return runtime ? runtime.agent.state.isStreaming || runtime.actionQueue.isBusy() : false;
 }
 
+function latestAssistantSummary(runtime: SessionRuntime): JsonRecord | null {
+  for (let index = runtime.agent.state.messages.length - 1; index >= 0; index -= 1) {
+    const message = runtime.agent.state.messages[index];
+    if (!message || message.role !== "assistant") continue;
+
+    const textLength = message.content.reduce((total, part) => (
+      part.type === "text" ? total + part.text.length : total
+    ), 0);
+    return {
+      provider: message.provider,
+      model: message.model,
+      api: message.api,
+      stopReason: message.stopReason,
+      errorMessage: message.errorMessage,
+      textLength,
+      usage: message.usage,
+    };
+  }
+  return null;
+}
+
 function activeRuntimeSummary(runtime: SessionRuntime | null): JsonRecord | null {
   if (!runtime) return null;
   return {
@@ -162,6 +188,7 @@ function activeRuntimeSummary(runtime: SessionRuntime | null): JsonRecord | null
     model: runtime.agent.state.model,
     thinkingLevel: runtime.agent.state.thinkingLevel,
     messageCount: runtime.agent.state.messages.length,
+    lastAssistant: latestAssistantSummary(runtime),
     isStreaming: runtime.agent.state.isStreaming,
     isBusy: isRuntimeBusy(runtime),
   };
@@ -196,7 +223,118 @@ async function waitForRuntimeIdle(
   };
 }
 
-async function submitPrompt(payload: unknown, options: BridgeOptions): Promise<JsonRecord> {
+async function waitForBridgeValue<T>(
+  readValue: () => T | null,
+  description: string,
+  timeoutMs = 10_000,
+): Promise<T> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = readValue();
+    if (value !== null) return value;
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+
+function selectorRowIdentity(row: HTMLButtonElement): { provider: string; id: string } | null {
+  const provider = row.querySelector<HTMLElement>(".pi-model-selector-item-provider")?.textContent?.trim();
+  const id = row.querySelector<HTMLElement>(".pi-model-selector-item-id")?.textContent?.trim();
+  if (!provider || !id) return null;
+  return { provider, id };
+}
+
+async function configureProxy(payload: DynamicValue): Promise<JsonRecord> {
+  const enabled = booleanField(payload, "enabled");
+  if (enabled === undefined) {
+    throw new Error("configureProxy requires boolean payload.enabled");
+  }
+
+  const url = stringField(payload, "url");
+  const settings = getAppStorage().settings;
+  await settings.set("proxy.enabled", enabled);
+  if (url) {
+    await settings.set("proxy.url", url);
+  }
+
+  return {
+    configured: true,
+    enabled,
+    url: url ?? null,
+  };
+}
+
+async function selectModel(payload: DynamicValue, options: BridgeOptions): Promise<JsonRecord> {
+  const provider = stringField(payload, "provider");
+  const modelId = stringField(payload, "modelId");
+  if (!provider || !modelId) {
+    throw new Error("selectModel requires payload.provider and payload.modelId");
+  }
+
+  const runtime = options.getActiveRuntime();
+  if (!runtime) throw new Error("Cannot select a model without an active runtime");
+  if (isRuntimeBusy(runtime)) throw new Error("Cannot select a model while the active runtime is busy");
+
+  const before = activeRuntimeSummary(runtime);
+  closeOverlayById(MODEL_SELECTOR_OVERLAY_ID);
+
+  const modelButton = await waitForBridgeValue(
+    () => document.querySelector<HTMLButtonElement>(".pi-status-model"),
+    "the status-bar model button",
+  );
+  modelButton.click();
+
+  const searchInput = await waitForBridgeValue(
+    () => document.querySelector<HTMLInputElement>(".pi-model-selector-search"),
+    "the model selector",
+  );
+  searchInput.value = modelId;
+  searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+  const row = await waitForBridgeValue(() => {
+    const rows = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".pi-model-selector-item"),
+    );
+    return rows.find((candidate) => {
+      const identity = selectorRowIdentity(candidate);
+      return identity?.provider === provider && identity.id === modelId;
+    }) ?? null;
+  }, `${provider}/${modelId} in the model selector`);
+
+  const identity = selectorRowIdentity(row);
+  const selectorText = row.textContent?.replace(/\s+/gu, " ").trim() ?? "";
+  row.click();
+
+  await waitForBridgeValue(
+    () => document.getElementById(MODEL_SELECTOR_OVERLAY_ID) === null ? true : null,
+    "the model selector to close",
+  );
+
+  const after = await waitForBridgeValue(() => {
+    const activeRuntime = options.getActiveRuntime();
+    if (
+      activeRuntime?.agent.state.model.provider !== provider
+      || activeRuntime.agent.state.model.id !== modelId
+    ) {
+      return null;
+    }
+    return activeRuntimeSummary(activeRuntime);
+  }, `${provider}/${modelId} to become the active model`);
+
+  return {
+    selected: true,
+    requested: { provider, modelId },
+    selectorMatch: {
+      provider: identity?.provider ?? "",
+      id: identity?.id ?? "",
+      text: selectorText,
+    },
+    before,
+    after,
+  };
+}
+
+async function submitPrompt(payload: DynamicValue, options: BridgeOptions): Promise<JsonRecord> {
   const text = stringField(payload, "text");
   if (!text) throw new Error("submitPrompt requires payload.text");
 
@@ -293,7 +431,7 @@ async function readRange(address: string): Promise<JsonRecord> {
   });
 }
 
-async function writeRange(address: string, values: unknown[][], formulas?: unknown[][], numberFormat?: unknown[][]): Promise<JsonRecord> {
+async function writeRange(address: string, values: DynamicValue[][], formulas?: DynamicValue[][], numberFormat?: DynamicValue[][]): Promise<JsonRecord> {
   if (typeof Excel === "undefined") {
     throw new Error("Excel global is unavailable; the taskpane is not running inside the Excel host.");
   }
@@ -325,7 +463,7 @@ async function writeRange(address: string, values: unknown[][], formulas?: unkno
   });
 }
 
-function clearApplyToFromPayload(payload: unknown): Excel.ClearApplyTo {
+function clearApplyToFromPayload(payload: DynamicValue): Excel.ClearApplyTo {
   const applyTo = stringField(payload, "applyTo") ?? "contents";
   switch (applyTo) {
     case "all":
@@ -367,7 +505,7 @@ async function clearRange(address: string, applyTo: Excel.ClearApplyTo): Promise
   });
 }
 
-async function workbookWriteProbe(payload: unknown): Promise<JsonRecord> {
+async function workbookWriteProbe(payload: DynamicValue): Promise<JsonRecord> {
   if (typeof Excel === "undefined") {
     throw new Error("Excel global is unavailable; the taskpane is not running inside the Excel host.");
   }
@@ -411,8 +549,8 @@ async function workbookWriteProbe(payload: unknown): Promise<JsonRecord> {
       await context.sync();
       cleanup = { action: "delete-created-sheet", restored: true };
     } else if (!createdSheet && !keepSheet) {
-      target.formulas = before.formulas as unknown[][];
-      target.numberFormat = before.numberFormat as unknown[][];
+      target.formulas = before.formulas as DynamicValue[][];
+      target.numberFormat = before.numberFormat as DynamicValue[][];
       await context.sync();
       cleanup = { action: "restore-existing-range", restored: true };
     } else {
@@ -491,7 +629,7 @@ async function listCharts(): Promise<JsonRecord> {
   });
 }
 
-async function executeCommand(command: BridgeCommand, options: BridgeOptions): Promise<unknown> {
+async function executeCommand(command: BridgeCommand, options: BridgeOptions): Promise<DynamicValue> {
   switch (command.type) {
     case "noop":
       return { ok: true };
@@ -539,6 +677,10 @@ async function executeCommand(command: BridgeCommand, options: BridgeOptions): P
     }
     case "workbookWriteProbe":
       return await workbookWriteProbe(command.payload);
+    case "configureProxy":
+      return await configureProxy(command.payload);
+    case "selectModel":
+      return await selectModel(command.payload, options);
     case "submitPrompt":
       return await submitPrompt(command.payload, options);
     case "listCharts":

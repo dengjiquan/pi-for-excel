@@ -1,3 +1,7 @@
+function isTaskpaneInitPayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Taskpane initialization.
  *
@@ -7,17 +11,16 @@
 
 import { html, render } from "lit";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { ApiKeyPromptDialog } from "@earendil-works/pi-web-ui/dist/dialogs/ApiKeyPromptDialog.js";
-import { ModelSelector } from "@earendil-works/pi-web-ui/dist/dialogs/ModelSelector.js";
-import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
-import type { CustomProvider } from "@earendil-works/pi-web-ui/dist/storage/stores/custom-providers-store.js";
-import type { SessionData } from "@earendil-works/pi-web-ui/dist/storage/types.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
+import type { CustomProvider } from "../storage/local/custom-providers-store.js";
+import type { SessionData } from "../storage/local/types.js";
 
 import { createOfficeStreamFn } from "../auth/stream-proxy.js";
 import {
   DEFAULT_PROXY_URL,
   PROXY_HELPER_DOCS_URL,
   isLoopbackProxyUrl,
+  resolveRuntimeDefaultProxyUrl,
   validateOfficeProxyUrl,
 } from "../auth/proxy-validation.js";
 import { restoreCredentials } from "../auth/restore.js";
@@ -58,18 +61,15 @@ import {
   withWorkbookCoordinator,
 } from "../tools/with-workbook-coordinator.js";
 import { registerBuiltins } from "../commands/builtins.js";
-import { showExtensionsHubDialog, type ExtensionsHubTab } from "../commands/builtins/extensions-hub-overlay.js";
 import { ExtensionRuntimeManager } from "../extensions/runtime-manager.js";
 import type { ResumeDialogTarget } from "../commands/builtins/resume-target.js";
 import {
-  showRulesDialog,
-  showRecoveryDialog,
+  configureSettingsPages,
+  openSettings,
   showResumeDialog,
-  showSettingsDialog,
-  showShortcutsDialog,
+  type ExtensionsHubTab,
   type RecoveryCheckpointSummary,
 } from "../commands/builtins/overlays.js";
-import { configureSettingsDialogDependencies } from "../commands/builtins/settings-overlay.js";
 import { wireCommandMenu } from "../commands/command-menu.js";
 import { executeSlashCommand } from "../commands/slash-command-execution.js";
 import {
@@ -125,8 +125,10 @@ import { TOOL_APPROVAL_OVERLAY_ID } from "../ui/overlay-ids.js";
 import { showActionToast, showToast } from "../ui/toast.js";
 import { PiSidebar } from "../ui/pi-sidebar.js";
 import { createProxyBanner } from "../ui/proxy-banner.js";
-import { setActiveProviders } from "../compat/model-selector-patch.js";
-import { getCurrentSpreadsheetHost } from "../host/index.js";
+import { setActiveProviders } from "../models/active-providers.js";
+import { promptForProviderConnection } from "../ui/api-key-dialog.js";
+import { openModelSelectorDialog } from "../ui/model-selector-dialog.js";
+import { getCurrentSpreadsheetHost, type SpreadsheetHostKind } from "../host/index.js";
 import { createWorkbookCoordinator } from "../workbook/coordinator.js";
 import { formatWorkbookLabel, type WorkbookContext } from "../workbook/context.js";
 import {
@@ -185,7 +187,6 @@ import {
   normalizeRuntimeTools,
 } from "./runtime-utils.js";
 import { doesOverlayClaimEscape } from "../utils/escape-guard.js";
-import { isRecord } from "../utils/type-guards.js";
 
 function showErrorBanner(errorRoot: HTMLElement, message: string): void {
   render(renderError(message), errorRoot);
@@ -197,17 +198,22 @@ function clearErrorBanner(errorRoot: HTMLElement): void {
 
 interface ProxySettingsStore {
   get<T>(key: string): Promise<T | null>;
-  set(key: string, value: unknown): Promise<void>;
+  set(key: string, value: DynamicValue): Promise<void>;
 }
 
-async function ensureDefaultProxyUrl(settings: ProxySettingsStore): Promise<void> {
+async function ensureDefaultProxyUrl(
+  settings: ProxySettingsStore,
+  hostKind: SpreadsheetHostKind,
+): Promise<void> {
   try {
+    const runtimeDefaultProxyUrl = resolveRuntimeDefaultProxyUrl({ hostKind });
     const proxyUrl = await settings.get<string>("proxy.url");
-    if (typeof proxyUrl === "string" && proxyUrl.trim().length > 0) {
+    const storedProxyUrl = typeof proxyUrl === "string" ? proxyUrl.trim() : "";
+    if (storedProxyUrl.length > 0 && !(storedProxyUrl === DEFAULT_PROXY_URL && runtimeDefaultProxyUrl !== DEFAULT_PROXY_URL)) {
       return;
     }
 
-    await settings.set("proxy.url", DEFAULT_PROXY_URL);
+    await settings.set("proxy.url", runtimeDefaultProxyUrl);
   } catch {
     // ignore
   }
@@ -234,19 +240,19 @@ export async function initTaskpane(opts: {
   }
 
   // Seed a predictable proxy default for OAuth flows.
-  await ensureDefaultProxyUrl(settings);
+  await ensureDefaultProxyUrl(settings, spreadsheetHost.kind);
 
   // Migrate legacy web-search API keys to the connection store schema.
   try {
     await migrateLegacyWebSearchApiKeysToConnectionStore(settings);
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[pi] Failed to migrate legacy web-search API keys:", error);
   }
 
   // Migrate legacy MCP bearer tokens to the connection store schema.
   try {
     await migrateLegacyMcpTokensToConnectionStore(settings);
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[pi] Failed to migrate legacy MCP bearer tokens:", error);
   }
 
@@ -291,7 +297,7 @@ export async function initTaskpane(opts: {
       for (const provider of configuredBuiltInProviders) {
         combinedProviders.add(provider);
       }
-    } catch (error: unknown) {
+    } catch (error) {
       console.warn("[auth] Built-in provider lookup failed:", error);
     }
 
@@ -306,7 +312,7 @@ export async function initTaskpane(opts: {
       for (const provider of customInfo.providerNames) {
         combinedProviders.add(provider);
       }
-    } catch (error: unknown) {
+    } catch (error) {
       console.warn("[auth] Custom provider lookup failed:", error);
     }
 
@@ -325,7 +331,7 @@ export async function initTaskpane(opts: {
       .then(() => {
         onProvidersChanged?.();
       })
-      .catch((error: unknown) => {
+      .catch((error: DynamicValue) => {
         console.warn("[auth] Provider refresh after settings change failed:", error);
       });
   });
@@ -343,28 +349,28 @@ export async function initTaskpane(opts: {
           // providers (#553) — mirrors the pi:providers-changed path.
           onProvidersChanged?.();
         })
-        .catch((error: unknown) => {
+        .catch((error: DynamicValue) => {
           console.warn("[auth] Provider refresh after credential restore failed:", error);
         });
     })
-    .catch((error: unknown) => {
+    .catch((error: DynamicValue) => {
       console.warn("[auth] Credential restore failed:", error);
     });
 
   try {
     await awaitWithTimeout("Credential restore", 6000, credentialRestorePromise);
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[auth] Credential restore skipped:", error);
   }
 
   try {
     await awaitWithTimeout("Provider lookup", 3500, refreshConfiguredProviders());
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[auth] Provider lookup failed during startup:", error);
   }
 
   if (availableProviders.length === 0) {
-    void showWelcomeLogin(providerKeys).catch((error: unknown) => {
+    void showWelcomeLogin(providerKeys).catch((error: DynamicValue) => {
       console.warn("[auth] Failed to open welcome login:", error);
     });
   }
@@ -376,9 +382,6 @@ export async function initTaskpane(opts: {
   // Workbook structure context is injected separately by transformContext.
 
   const streamFn = createOfficeStreamFn(async () => {
-    // In dev mode, Vite's reverse proxy handles CORS — don't double-proxy.
-    if (import.meta.env.DEV) return undefined;
-
     try {
       const storage = getAppStorage();
       const enabled = await storage.settings.get("proxy.enabled");
@@ -425,7 +428,7 @@ export async function initTaskpane(opts: {
     },
   ];
 
-  appEl.innerHTML = "";
+  appEl.replaceChildren();
   appEl.appendChild(sidebar);
 
   let rulesActive = false;
@@ -507,7 +510,7 @@ export async function initTaskpane(opts: {
     try {
       const discoverableSkills = await loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
       mergedSkills = mergeAgentSkillDefinitions(bundledSkills, discoverableSkills);
-    } catch (error: unknown) {
+    } catch (error) {
       console.warn("[skills] Failed to load discoverable workspace skills:", error);
     }
 
@@ -518,7 +521,7 @@ export async function initTaskpane(opts: {
         disabledSkillNames,
       });
       return buildAgentSkillPromptEntries(enabledSkills);
-    } catch (error: unknown) {
+    } catch (error) {
       console.warn("[skills] Failed to load skill activation state:", error);
       return buildAgentSkillPromptEntries(mergedSkills);
     }
@@ -698,7 +701,7 @@ export async function initTaskpane(opts: {
     toolName: snapshot.toolName,
     address: snapshot.address,
     changedCount: snapshot.changedCount,
-    restoredFromSnapshotId: snapshot.restoredFromSnapshotId,
+    ...(snapshot.restoredFromSnapshotId !== undefined ? { restoredFromSnapshotId: snapshot.restoredFromSnapshotId } : {}),
   });
 
   const formatSessionTitle = (title: string): string => {
@@ -788,7 +791,7 @@ export async function initTaskpane(opts: {
 
       try {
         await refresh();
-      } catch (error: unknown) {
+      } catch (error) {
         console.warn("[pi] Failed to refresh runtime capabilities:", error);
       }
     }
@@ -878,7 +881,7 @@ export async function initTaskpane(opts: {
       localServicesSnapshot = result;
       void refreshCapabilitiesForAllRuntimes();
     },
-    (error: unknown) => { console.warn("[pi] Local services probe failed:", error); },
+    (error: DynamicValue) => { console.warn("[pi] Local services probe failed:", error); },
   );
 
   const normalizeApprovalMessage = (title: string, message: string): string => {
@@ -907,7 +910,7 @@ export async function initTaskpane(opts: {
       overlayId: TOOL_APPROVAL_OVERLAY_ID,
       title: args.title,
       message: normalizeApprovalMessage(args.title, args.message),
-      confirmLabel: args.confirmLabel,
+      ...(args.confirmLabel !== undefined ? { confirmLabel: args.confirmLabel } : {}),
       cancelLabel: t("confirm.cancel"),
       restoreFocusOnClose: true,
     });
@@ -1090,7 +1093,7 @@ export async function initTaskpane(opts: {
         return customProviderApiKeys.get(provider) ?? undefined;
       }
 
-      const success = await ApiKeyPromptDialog.prompt(provider);
+      const success = await promptForProviderConnection(provider);
       await refreshConfiguredProviders();
       if (success) {
         clearErrorBanner(errorRoot);
@@ -1201,7 +1204,7 @@ export async function initTaskpane(opts: {
   const createRuntimeFromUi = async (): Promise<SessionRuntime | null> => {
     try {
       return await createRuntime({ activate: true, autoRestoreLatest: false });
-    } catch (error: unknown) {
+    } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.warn("[pi] Failed to create a new runtime:", error);
       showToast(t("init.couldNotOpenNewTab", { message }));
@@ -1305,11 +1308,7 @@ export async function initTaskpane(opts: {
   };
 
   const openRulesEditor = async (): Promise<void> => {
-    await showRulesDialog({
-      onSaved: async () => {
-        await refreshWorkbookState();
-      },
-    });
+    await openSettings("rules");
   };
 
   type ReopenRecentlyClosedResult = "reopened" | "missing" | "failed";
@@ -1622,29 +1621,35 @@ export async function initTaskpane(opts: {
   });
 
   const openExtensionsHub = (tab?: ExtensionsHubTab): void => {
-    void showExtensionsHubDialog(
-      {
-        getActiveSessionId: () => getActiveRuntime()?.persistence.getSessionId() ?? null,
-        resolveWorkbookContext: async () => {
-          const workbookContext = await resolveWorkbookContext();
-          return {
-            workbookId: workbookContext.workbookId,
-            workbookLabel: formatWorkbookLabel(workbookContext),
-          };
-        },
-        extensionManager,
-        connectionManager,
-        onChanged: refreshCapabilitiesForAllRuntimes,
-      },
-      { tab },
-    );
+    void openSettings(tab ?? "connections");
   };
 
   const openRecoveryDialog = async (): Promise<void> => {
-    const workbookContext = await resolveWorkbookContext();
+    await openSettings("backups");
+  };
 
-    await showRecoveryDialog({
-      workbookLabel: formatWorkbookLabel(workbookContext),
+  configureSettingsPages({
+    getExecutionMode,
+    setExecutionMode,
+    getModelSwitchBehavior,
+    setModelSwitchBehavior,
+    onRulesSaved: async () => {
+      await refreshWorkbookState();
+    },
+    extensionsHub: {
+      getActiveSessionId: () => getActiveRuntime()?.persistence.getSessionId() ?? null,
+      resolveWorkbookContext: async () => {
+        const workbookContext = await resolveWorkbookContext();
+        return {
+          workbookId: workbookContext.workbookId,
+          workbookLabel: formatWorkbookLabel(workbookContext),
+        };
+      },
+      extensionManager,
+      connectionManager,
+      onChanged: refreshCapabilitiesForAllRuntimes,
+    },
+    backups: {
       loadCheckpoints: async () => {
         const checkpoints = await workbookRecoveryLog.listForCurrentWorkbook(40);
         return checkpoints.map((checkpoint) => toRecoveryCheckpointSummary(checkpoint));
@@ -1668,17 +1673,7 @@ export async function initTaskpane(opts: {
       setRetentionConfig: async (config) => {
         await writeRetentionLimit(config.maxSnapshots);
       },
-    });
-  };
-
-  configureSettingsDialogDependencies({
-    openRulesDialog: openRulesEditor,
-    openRecoveryDialog,
-    openShortcutsDialog: showShortcutsDialog,
-    getExecutionMode,
-    setExecutionMode,
-    getModelSwitchBehavior,
-    setModelSwitchBehavior,
+    },
   });
 
   const applyModelSelection = async (runtimeId: string, nextModel: RuntimeModel): Promise<void> => {
@@ -1734,14 +1729,17 @@ export async function initTaskpane(opts: {
     void (async () => {
       try {
         await refreshConfiguredProviders();
-      } catch (error: unknown) {
+      } catch (error) {
         console.warn("[auth] Failed to refresh providers before opening model selector:", error);
       }
 
       closeStatusPopover();
 
-      await ModelSelector.open(currentModel, (model) => {
-        void applyModelSelection(targetRuntimeId, model);
+      openModelSelectorDialog({
+        currentModel,
+        onSelect: (model) => {
+          void applyModelSelection(targetRuntimeId, model);
+        },
       });
     })();
   };
@@ -1769,7 +1767,7 @@ export async function initTaskpane(opts: {
     revertLatestCheckpoint: async () => {
       try {
         await revertLatestCheckpoint();
-      } catch (error: unknown) {
+      } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         showToast(t("init.revertFailed", { message }));
       }
@@ -1800,7 +1798,7 @@ export async function initTaskpane(opts: {
   // Slash commands chosen from the popup menu dispatch this event.
   const onCommandRun: EventListener = (event) => {
     if (!(event instanceof CustomEvent)) return;
-    if (!isRecord(event.detail)) return;
+    if (!isTaskpaneInitPayloadShape(event.detail)) return;
 
     const name = typeof event.detail.name === "string" ? event.detail.name : "";
     const args = typeof event.detail.args === "string" ? event.detail.args : "";
@@ -1887,7 +1885,7 @@ export async function initTaskpane(opts: {
     openExtensionsHub();
   };
   sidebar.onOpenSettings = () => {
-    void showSettingsDialog();
+    void openSettings();
   };
   sidebar.onOpenFilesWorkspace = () => {
     void showFilesWorkspaceDialog();
@@ -1907,7 +1905,7 @@ export async function initTaskpane(opts: {
         const importedLabel = `${count} file${count === 1 ? "" : "s"}`;
         showToast(t("init.importedIntoFiles", { label: importedLabel }));
       })
-      .catch((error: unknown) => {
+      .catch((error: DynamicValue) => {
         showToast(t("init.importFailed", { error: error instanceof Error ? error.message : t("init.unknownError") }));
       });
   };
@@ -1918,7 +1916,7 @@ export async function initTaskpane(opts: {
     void openRecoveryDialog();
   };
   sidebar.onOpenShortcuts = () => {
-    showShortcutsDialog();
+    void openSettings("shortcuts");
   };
 
 
@@ -1937,7 +1935,7 @@ export async function initTaskpane(opts: {
     const { createDisclosureBar } = await import("../ui/disclosure-bar.js");
     const disclosureEl = createDisclosureBar({
       providerCount: availableProviders.length,
-      onOpenSettings: () => void showSettingsDialog(),
+      onOpenSettings: () => void openSettings(),
     });
     if (disclosureEl) {
       const messagesContainer = sidebar.querySelector(".pi-messages");
@@ -1958,8 +1956,8 @@ export async function initTaskpane(opts: {
 
       document.addEventListener("pi:proxy-state-changed", (event: Event) => {
         if (!(event instanceof CustomEvent)) return;
-        const detail: unknown = event.detail;
-        if (!isRecord(detail)) return;
+        const detail: DynamicValue = event.detail;
+        if (!isTaskpaneInitPayloadShape(detail)) return;
         const state = detail.state;
         if (state === "detected" || state === "not-detected" || state === "unknown") {
           proxyBanner.update(state);
@@ -1974,13 +1972,13 @@ export async function initTaskpane(opts: {
   // is still in-flight, and let extensions finish loading in the background.
   const extensionInitialization = extensionManager.initialize();
 
-  void extensionInitialization.catch((error: unknown) => {
+  void extensionInitialization.catch((error: DynamicValue) => {
     console.warn("[pi] Extension initialization failed:", error);
   });
 
   try {
     await awaitWithTimeout("Extension initialization", 5000, extensionInitialization);
-  } catch (error: unknown) {
+  } catch (error) {
     console.warn("[pi] Extension initialization did not complete during startup:", error);
   }
 
@@ -2023,7 +2021,12 @@ export async function initTaskpane(opts: {
       const nextIndex = (activeIndex + direction + tabs.length) % tabs.length;
 
       suppressNextInputAutofocus = true;
-      runtimeManager.switchRuntime(tabs[nextIndex].runtimeId);
+      const nextTab = tabs[nextIndex];
+      if (!nextTab) {
+        return;
+      }
+
+      runtimeManager.switchRuntime(nextTab.runtimeId);
       requestAnimationFrame(() => {
         sidebar.focusTabNavigationAnchor();
       });
@@ -2102,8 +2105,8 @@ export async function initTaskpane(opts: {
     toggleContextPopover({
       anchor: trigger,
       description,
-      tokenDetail,
-      warning,
+      ...(tokenDetail !== undefined ? { tokenDetail } : {}),
+      ...(warning !== undefined ? { warning } : {}),
       onRunCommand: (command) => {
         runSlashCommand(command);
       },

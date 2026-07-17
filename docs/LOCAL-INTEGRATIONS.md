@@ -41,3 +41,9 @@ node --import ./scripts/register-test-ts-loader.mjs --test "tests/**/*.test.ts"
 # 构建
 npm run build
 ```
+
+## 本次合并后待办（2026-07-17，merge upstream v0.10.0-pre）
+
+- 🔴 **scripts security 测试（10 失败）**：`scripts/cors-proxy-server.mjs` 的 ALLOWED_TARGET_HOSTS 缺 403 block 响应（expected 403 actual 502）+ default allowlist startup log；`scripts/background-verify-bridge-server.mjs` token 行为细节。上游 security 测试强化，本地 scripts 实现不完整，需适配。属 proxy/bridge 独立领域，非 UI 融合核心。
+- **rules-page 迁移**：settings shell 重命名（rules-overlay → settings-pages/rules-page 取上游），本地 rules-overlay 的 copy 按钮 + custom hints 丢失，待按需迁入新结构。
+- **品牌统一**：`src/taskpane/welcome-login.ts` 等不冲突文件自动合并成上游 "π"/"Pi for Excel"，待统一改 "AI for Excel" / img icon-32.png。

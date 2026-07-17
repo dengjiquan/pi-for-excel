@@ -1,6 +1,9 @@
 import { APP_NAME, APP_VERSION } from "../../app/metadata.js";
 import { type IntegrationSettingsStore } from "../../integrations/store.js";
-import { getEnabledProxyBaseUrl, resolveOutboundRequestUrl } from "../../tools/external-fetch.js";
+import {
+  getEnabledProxyBaseUrl,
+  resolveOutboundRequestUrl,
+} from "../../tools/external-fetch.js";
 import { type McpServerConfig } from "../../tools/mcp-config.js";
 import {
   MCP_HTTP_ACCEPT,
@@ -11,14 +14,18 @@ import {
   getHttpErrorReason,
   runWithTimeoutAbort,
 } from "../../utils/network.js";
-import { isRecord } from "../../utils/type-guards.js";
+function isExtensionsHubMcpProbePayloadShape(
+  value: DynamicValue,
+): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 const MCP_PROBE_TIMEOUT_MS = 8_000;
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 
-function parseToolCountFromListResponse(value: unknown): number {
-  if (!isRecord(value)) return 0;
-  if (!isRecord(value.result)) return 0;
+function parseToolCountFromListResponse(value: DynamicValue): number {
+  if (!isExtensionsHubMcpProbePayloadShape(value)) return 0;
+  if (!isExtensionsHubMcpProbePayloadShape(value.result)) return 0;
   const tools = value.result.tools;
   return Array.isArray(tools) ? tools.length : 0;
 }
@@ -26,20 +33,32 @@ function parseToolCountFromListResponse(value: unknown): number {
 async function postJsonRpc(args: {
   server: McpServerConfig;
   method: string;
-  params?: unknown;
+  params?: DynamicValue;
   settings: IntegrationSettingsStore;
   expectResponse?: boolean;
-  sessionId?: string;
-}): Promise<{ response: unknown; proxied: boolean; proxyBaseUrl?: string; sessionId?: string } | null> {
-  const { server, method, params, settings, expectResponse = true, sessionId } = args;
+  sessionId?: string | undefined;
+}): Promise<{
+  response: DynamicValue;
+  proxied: boolean;
+  proxyBaseUrl?: string;
+  sessionId?: string | undefined;
+} | null> {
+  const {
+    server,
+    method,
+    params,
+    settings,
+    expectResponse = true,
+    sessionId,
+  } = args;
 
   const proxyBaseUrl = await getEnabledProxyBaseUrl(settings);
   const resolved = resolveOutboundRequestUrl({
     targetUrl: server.url,
-    proxyBaseUrl,
+    ...(proxyBaseUrl !== undefined ? { proxyBaseUrl } : {}),
   });
 
-  const body: Record<string, unknown> = {
+  const body: DynamicObject = {
     jsonrpc: "2.0",
     method,
   };
@@ -86,22 +105,26 @@ async function postJsonRpc(args: {
         return {
           response: null,
           proxied: resolved.proxied,
-          proxyBaseUrl: resolved.proxyBaseUrl,
+          ...(resolved.proxyBaseUrl !== undefined
+            ? { proxyBaseUrl: resolved.proxyBaseUrl }
+            : {}),
           sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
         };
       }
 
       const text = await response.text();
-      const payload = parseMcpHttpResponseBody({
+      const payload: DynamicValue = parseMcpHttpResponseBody({
         text,
         contentType: response.headers.get("Content-Type"),
         requestId: requestId ?? "",
-      });
+      }) as DynamicValue;
 
       return {
         response: payload,
         proxied: resolved.proxied,
-        proxyBaseUrl: resolved.proxyBaseUrl,
+        ...(resolved.proxyBaseUrl !== undefined
+          ? { proxyBaseUrl: resolved.proxyBaseUrl }
+          : {}),
         sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
       };
     },
@@ -150,6 +173,8 @@ export async function probeMcpServer(
   return {
     toolCount: parseToolCountFromListResponse(list.response),
     proxied: list.proxied,
-    proxyBaseUrl: list.proxyBaseUrl,
+    ...(list.proxyBaseUrl !== undefined
+      ? { proxyBaseUrl: list.proxyBaseUrl }
+      : {}),
   };
 }

@@ -6,6 +6,8 @@
  * tab builders compose them and wire event listeners.
  */
 
+import { setSafeInnerHTML } from "../utils/html.js";
+
 // ── Icon type (emoji string or pre-built SVG element) ───
 
 /** Accepts either an emoji string or a pre-built SVG/HTMLElement. */
@@ -103,8 +105,8 @@ export function createToggleRow(opts: ToggleRowOptions): {
   }
 
   const toggle = createToggle({
-    checked: opts.checked,
-    onChange: opts.onChange,
+    ...(opts.checked !== undefined ? { checked: opts.checked } : {}),
+    ...(opts.onChange !== undefined ? { onChange: opts.onChange } : {}),
   });
 
   row.append(labels, toggle.root);
@@ -132,7 +134,7 @@ export function createSectionHeader(opts: SectionHeaderOptions): HTMLDivElement 
   if (opts.count != null) {
     const count = document.createElement("span");
     count.className = "pi-section-header__count";
-    count.textContent = `${opts.count} ${opts.count === 1 ? "skill" : "skills"}`;
+    count.textContent = String(opts.count);
     header.appendChild(count);
   }
 
@@ -231,7 +233,7 @@ export function createItemCard(opts: ItemCardOptions): ItemCardResult {
 
   if (opts.expandable) {
     const chevron = document.createElement("span");
-    chevron.innerHTML = CHEVRON_SVG;
+    setSafeInnerHTML(chevron, CHEVRON_SVG, "trusted static chevron SVG constant");
     // The SVG is the first child, extract it
     const svg = chevron.firstElementChild;
     if (svg) right.appendChild(svg);

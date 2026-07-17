@@ -13,7 +13,7 @@ import { excelRun, getRange, qualifiedAddress, parseCell, colToLetter } from "..
 import { formatAsMarkdownTable, extractFormulas, findErrors } from "../utils/format.js";
 import { getErrorMessage } from "../utils/errors.js";
 import { buildResolvedFormatLabels, getResolvedConventions, humanizeFormat } from "../conventions/index.js";
-import { getAppStorage } from "@earendil-works/pi-web-ui/dist/storage/app-storage.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
 import type { ReadRangeCsvDetails } from "./tool-details.js";
 
 const schema = Type.Object({
@@ -47,9 +47,9 @@ interface ReadRangeResult {
   address: string;
   rows: number;
   cols: number;
-  values: unknown[][];
-  formulas: unknown[][];
-  numberFormats: unknown[][];
+  values: DynamicValue[][];
+  formulas: DynamicValue[][];
+  numberFormats: DynamicValue[][];
   comments: CommentSummary[];
 }
 
@@ -98,8 +98,9 @@ export function createReadRangeTool(): AgentTool<typeof schema> {
 
             const rangeAddr = range.address;
             for (const { comment, location, replyCount } of entries) {
-              const locCell = location.address.includes("!")
-                ? location.address.split("!")[1]
+              const locBangIndex = location.address.indexOf("!");
+              const locCell = locBangIndex >= 0
+                ? location.address.slice(locBangIndex + 1)
                 : location.address;
               if (isCellInRange(locCell, rangeAddr)) {
                 comments.push({
@@ -127,8 +128,10 @@ export function createReadRangeTool(): AgentTool<typeof schema> {
 
         const fullAddress = qualifiedAddress(result.sheetName, result.address);
         // Extract just the cell part (without sheet!) for offset calculations
-        const cellPart = result.address.includes("!") ? result.address.split("!")[1] : result.address;
-        const startCell = cellPart.split(":")[0];
+        const bangIndex = result.address.indexOf("!");
+        const cellPart = bangIndex >= 0 ? result.address.slice(bangIndex + 1) : result.address;
+        const colonIndex = cellPart.indexOf(":");
+        const startCell = colonIndex >= 0 ? cellPart.slice(0, colonIndex) : cellPart;
 
         if (mode === "compact") {
           return formatCompact(fullAddress, result, startCell);
@@ -145,7 +148,7 @@ export function createReadRangeTool(): AgentTool<typeof schema> {
 
           return formatDetailed(fullAddress, result, startCell, resolvedLabels);
         }
-      } catch (e: unknown) {
+      } catch (e) {
         return {
           content: [{ type: "text", text: `Error reading "${params.range}": ${getErrorMessage(e)}` }],
           details: undefined,
@@ -157,10 +160,16 @@ export function createReadRangeTool(): AgentTool<typeof schema> {
 
 /** Check if a cell address falls within a range address (both without sheet prefix). */
 function isCellInRange(cellAddr: string, rangeAddr: string): boolean {
-  const clean = rangeAddr.includes("!") ? rangeAddr.split("!")[1] : rangeAddr;
+  const bangIndex = rangeAddr.indexOf("!");
+  const clean = bangIndex >= 0 ? rangeAddr.slice(bangIndex + 1) : rangeAddr;
   const parts = clean.includes(":") ? clean.split(":") : [clean, clean];
-  const start = parseCell(parts[0]);
-  const end = parseCell(parts[1]);
+  const startPart = parts[0];
+  const endPart = parts[1];
+  if (startPart === undefined || endPart === undefined) {
+    return false;
+  }
+  const start = parseCell(startPart);
+  const end = parseCell(endPart);
   const cell = parseCell(cellAddr);
   return (
     cell.col >= start.col &&
@@ -170,7 +179,7 @@ function isCellInRange(cellAddr: string, rangeAddr: string): boolean {
   );
 }
 
-function hasAnyNonEmptyCell(values: unknown[][]): boolean {
+function hasAnyNonEmptyCell(values: DynamicValue[][]): boolean {
   for (const row of values) {
     for (const v of row) {
       if (v !== null && v !== undefined && v !== "") return true;
@@ -179,21 +188,22 @@ function hasAnyNonEmptyCell(values: unknown[][]): boolean {
   return false;
 }
 
-function formatAsExcelMarkdownTable(values: unknown[][], startCell: string): string {
+function formatAsExcelMarkdownTable(values: DynamicValue[][], startCell: string): string {
   if (!values || values.length === 0) return "(empty)";
 
   const start = parseCell(startCell);
   const numCols = Math.max(...values.map((r) => r.length));
 
-  const header: unknown[] = [""];
+  const header: DynamicValue[] = [""];
   for (let c = 0; c < numCols; c++) {
     header.push(colToLetter(start.col + c));
   }
 
-  const rows: unknown[][] = [header];
+  const rows: DynamicValue[][] = [header];
 
   for (let r = 0; r < values.length; r++) {
-    const row: unknown[] = [start.row + r, ...values[r]];
+    const valueRow = values[r] ?? [];
+    const row: DynamicValue[] = [start.row + r, ...valueRow];
     while (row.length < numCols + 1) row.push("");
     rows.push(row);
   }
@@ -279,8 +289,9 @@ function formatDetailed(
   const formatMap = new Map<string, string[]>();
   const start = parseCell(startCell);
   for (let r = 0; r < result.numberFormats.length; r++) {
-    for (let c = 0; c < result.numberFormats[r].length; c++) {
-      const fmt = result.numberFormats[r][c];
+    const numberFormatRow = result.numberFormats[r] ?? [];
+    for (let c = 0; c < numberFormatRow.length; c++) {
+      const fmt = numberFormatRow[c];
       if (typeof fmt === "string" && fmt !== "" && fmt !== "General") {
         const addr = `${colToLetter(start.col + c)}${start.row + r}`;
         const existing = formatMap.get(fmt) || [];
@@ -324,7 +335,7 @@ function formatDetailed(
 
 /* ── CSV helpers (migrated from get-range-as-csv) ──────────────────── */
 
-function toCsvField(value: unknown): string {
+function toCsvField(value: DynamicValue): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value.includes(",") || value.includes('"') || value.includes("\n") || value.includes("\r") ? `"${value.replace(/"/g, '""')}"` : value;
   const str = typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value);
@@ -334,7 +345,7 @@ function toCsvField(value: unknown): string {
   return str;
 }
 
-function valuesToCsv(values: unknown[][]): string {
+function valuesToCsv(values: DynamicValue[][]): string {
   if (!values || values.length === 0) return "";
   return values
     .map((row) => row.map((v) => toCsvField(v)).join(","))

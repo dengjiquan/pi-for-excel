@@ -15,7 +15,7 @@ function encodeBase64Url(value: string): string {
     .replace(/=+$/g, "");
 }
 
-function fakeJwt(payload: Record<string, unknown>): string {
+function fakeJwt(payload: DynamicObject): string {
   return [
     encodeBase64Url(JSON.stringify({ alg: "none" })),
     encodeBase64Url(JSON.stringify(payload)),
@@ -27,6 +27,13 @@ function requestUrlToString(url: string | URL | Request): string {
   if (typeof url === "string") return url;
   if (url instanceof URL) return url.toString();
   return url.url;
+}
+
+function parseRequestBody(raw: DynamicValue): DynamicObject {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("request body must be an object");
+  }
+  return raw as DynamicObject;
 }
 
 void test("PKCE SHA-256 falls back when Web Crypto digest is unavailable", async (t) => {
@@ -52,7 +59,7 @@ void test("PKCE SHA-256 falls back when Web Crypto digest is unavailable", async
 
 void test("Anthropic OAuth provider uses the browser-safe implementation", async (t) => {
   const originalFetch = globalThis.fetch;
-  const requests: Array<{ url: string; body: unknown }> = [];
+  const requests: Array<{ url: string; body: DynamicValue }> = [];
 
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     requests.push({ url: requestUrlToString(url), body: init?.body });
@@ -92,7 +99,7 @@ void test("Anthropic OAuth provider uses the browser-safe implementation", async
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.url, "https://platform.claude.com/v1/oauth/token");
-  const body = JSON.parse(String(requests[0]?.body)) as Record<string, unknown>;
+  const body = parseRequestBody(JSON.parse(String(requests[0]?.body)) as DynamicValue);
   assert.equal(body.grant_type, "authorization_code");
   assert.equal(body.code, "anthropic-code");
   assert.equal(body.state, new URL(authUrl).searchParams.get("state"));
@@ -100,7 +107,7 @@ void test("Anthropic OAuth provider uses the browser-safe implementation", async
 
 void test("OpenAI Codex browser OAuth matches official Codex CLI authorize parameters", async (t) => {
   const originalFetch = globalThis.fetch;
-  const requests: Array<{ url: string; body: unknown }> = [];
+  const requests: Array<{ url: string; body: DynamicValue }> = [];
   const accessToken = fakeJwt({
     "https://api.openai.com/auth": {
       chatgpt_account_id: "acct_browser_test",
@@ -184,7 +191,7 @@ void test("OpenAI Codex browser OAuth accepts pi-sourced credentials with connec
   assert.equal(provider.getApiKey(piSourcedCredentials), scopedAccessToken);
 
   const originalFetch = globalThis.fetch;
-  const requests: Array<{ url: string; body: unknown }> = [];
+  const requests: Array<{ url: string; body: DynamicValue }> = [];
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     requests.push({ url: requestUrlToString(url), body: init?.body });
     return Promise.resolve(new Response(JSON.stringify({

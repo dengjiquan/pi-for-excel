@@ -4,8 +4,9 @@
  * `@earendil-works/pi-ai` ships an OpenAI Codex OAuth provider that relies on a
  * local Node callback server, which cannot run inside Office webviews.
  *
- * This implementation keeps the same OAuth endpoints/client config, but uses a
- * manual paste flow (redirect URL or code#state) so login works in-browser.
+ * This implementation keeps the same OAuth endpoints/client config, then accepts
+ * either an auto-captured local callback URL from the proxy helper or a manual
+ * paste fallback (redirect URL or code#state) so login works in-browser.
  */
 
 import type {
@@ -39,7 +40,7 @@ type VersionedOpenAICodexCredentials = OAuthCredentials & {
   scopes?: string;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isOpenaiCodexBrowserOauthPayloadShape(value: DynamicValue): value is DynamicObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -58,38 +59,49 @@ function createState(): string {
     .replace(/=+$/g, "");
 }
 
+function createParsedAuthorizationInput(
+  code: string | null | undefined,
+  state: string | null | undefined,
+): ParsedAuthorizationInput {
+  const parsed: ParsedAuthorizationInput = {};
+  if (code !== null && code !== undefined) {
+    parsed.code = code;
+  }
+  if (state !== null && state !== undefined) {
+    parsed.state = state;
+  }
+  return parsed;
+}
+
 function parseAuthorizationInput(input: string): ParsedAuthorizationInput {
   const value = input.trim();
   if (!value) return {};
 
   try {
     const url = new URL(value);
-    return {
-      code: url.searchParams.get("code") ?? undefined,
-      state: url.searchParams.get("state") ?? undefined,
-    };
+    return createParsedAuthorizationInput(
+      url.searchParams.get("code"),
+      url.searchParams.get("state"),
+    );
   } catch {
     // not a URL
   }
 
   if (value.includes("#")) {
-    const [code, state] = value.split("#", 2);
-    return { code, state };
+    const parts = value.split("#", 2);
+    return createParsedAuthorizationInput(parts[0], parts[1]);
   }
 
   if (value.includes("code=")) {
     const params = new URLSearchParams(value.startsWith("?") ? value.slice(1) : value);
-    return {
-      code: params.get("code") ?? undefined,
-      state: params.get("state") ?? undefined,
-    };
+    return createParsedAuthorizationInput(params.get("code"), params.get("state"));
   }
 
   return { code: value };
 }
 
-function parseTokenPayload(payload: unknown): TokenPayload | null {
-  if (!isRecord(payload)) {
+function parseTokenPayload(payload: DynamicValue): TokenPayload | null {
+  if (!isOpenaiCodexBrowserOauthPayloadShape(payload)) {
     return null;
   }
 
@@ -106,12 +118,15 @@ function parseTokenPayload(payload: unknown): TokenPayload | null {
     return null;
   }
 
-  return {
-    idToken: typeof idToken === "string" ? idToken : undefined,
+  const tokenPayload: TokenPayload = {
     accessToken,
     refreshToken,
     expiresInSeconds: expiresIn,
   };
+  if (typeof idToken === "string") {
+    tokenPayload.idToken = idToken;
+  }
+  return tokenPayload;
 }
 
 async function exchangeAuthorizationCode(code: string, verifier: string): Promise<TokenPayload> {
@@ -175,7 +190,7 @@ function decodeBase64Url(encoded: string): string {
   return atob(padded);
 }
 
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
+function decodeJwtPayload(token: string): DynamicObject | null {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) {
@@ -184,9 +199,9 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
     const payloadSegment = parts[1] ?? "";
     const decoded = decodeBase64Url(payloadSegment);
-    const parsed: unknown = JSON.parse(decoded);
+    const parsed: DynamicValue = JSON.parse(decoded);
 
-    if (!isRecord(parsed)) {
+    if (!isOpenaiCodexBrowserOauthPayloadShape(parsed)) {
       return null;
     }
 
@@ -203,7 +218,7 @@ function getAccountId(accessToken: string): string | null {
   }
 
   const authClaim = payload[JWT_CLAIM_PATH];
-  if (!isRecord(authClaim)) {
+  if (!isOpenaiCodexBrowserOauthPayloadShape(authClaim)) {
     return null;
   }
 
@@ -215,7 +230,7 @@ function getAccountId(accessToken: string): string | null {
   return accountId;
 }
 
-export function isOpenAICodexCredentialRefreshRequired(error: unknown): boolean {
+export function isOpenAICodexCredentialRefreshRequired(error: DynamicValue): boolean {
   return error instanceof Error && error.message.includes(STALE_CREDENTIAL_ERROR);
 }
 
@@ -232,7 +247,7 @@ const REQUIRED_SCOPES = SCOPE.split(" ");
  * sourced Codex credential would be rejected as stale even when the
  * underlying grant already includes the connector scopes.
  */
-function accessTokenHasRequiredScopes(accessToken: unknown): boolean {
+function accessTokenHasRequiredScopes(accessToken: DynamicValue): boolean {
   if (typeof accessToken !== "string") {
     return false;
   }
@@ -315,8 +330,8 @@ export async function loginOpenAICodexInBrowser(
   callbacks.onAuth({
     url: flow.url,
     instructions:
-      "After login, your browser will show a page that says \"can't be reached\" \u2014 that's expected! " +
-      "Copy the full URL from the browser address bar and paste it back in AI for Excel.",
+      "After login, Pi for Excel will try to capture the localhost callback automatically if the local proxy is running. " +
+      "If it does not continue, copy the full callback URL from the browser address bar and paste it back in Pi for Excel.",
   });
 
   if (callbacks.signal?.aborted) {

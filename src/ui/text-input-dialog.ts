@@ -33,7 +33,9 @@ function canRenderTextInputDialog(): boolean {
   return document.body instanceof HTMLElement;
 }
 
-export function requestTextInputDialog(options: TextInputDialogOptions): Promise<string | null> {
+export function requestTextInputDialog(
+  options: TextInputDialogOptions,
+): Promise<string | null> {
   if (!canRenderTextInputDialog()) {
     return Promise.reject(new Error(getTextInputUiUnavailableError()));
   }
@@ -44,8 +46,12 @@ export function requestTextInputDialog(options: TextInputDialogOptions): Promise
   return new Promise((resolve) => {
     const dialog = createOverlayDialog({
       overlayId,
-      cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
-      restoreFocusOnClose: options.restoreFocusOnClose,
+      cardClassName:
+        options.cardClassName ??
+        "pi-welcome-card pi-overlay-card pi-overlay-card--s",
+      ...(options.restoreFocusOnClose !== undefined
+        ? { restoreFocusOnClose: options.restoreFocusOnClose }
+        : {}),
       zIndex: NESTED_OVERLAY_Z_INDEX,
     });
 

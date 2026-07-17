@@ -91,7 +91,9 @@ function buildExternalSkillDefinition(args: {
   return {
     name: parsed.frontmatter.name,
     description: parsed.frontmatter.description,
-    compatibility: parsed.frontmatter.compatibility,
+    ...(parsed.frontmatter.compatibility !== undefined
+      ? { compatibility: parsed.frontmatter.compatibility }
+      : {}),
     location: args.location,
     sourceKind: args.sourceKind,
     markdown: args.markdown,
@@ -132,7 +134,7 @@ async function loadSkillDefinitionsFromFiles(args: {
         mode: "text",
         maxChars: MAX_EXTERNAL_SKILL_MARKDOWN_CHARS,
       });
-    } catch (error: unknown) {
+    } catch (error) {
       console.warn(`[skills] Failed reading ${args.invalidWarningLabel}: ${file.path}`, error);
       continue;
     }
@@ -307,7 +309,7 @@ export async function upsertExternalAgentSkill(args: {
   return upsertExternalAgentSkillInWorkspace({
     workspace: getFilesWorkspace(),
     markdown: args.markdown,
-    expectedName: args.expectedName,
+    ...(args.expectedName !== undefined ? { expectedName: args.expectedName } : {}),
   });
 }
 

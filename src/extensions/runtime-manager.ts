@@ -154,7 +154,7 @@ export class ExtensionRuntimeManager {
   private readonly getActiveAgent: () => Agent | null;
   private readonly refreshRuntimeTools: () => Promise<void>;
   private readonly reservedToolNames: ReadonlySet<string>;
-  private readonly afterInjectAgentContext?: () => Promise<void> | void;
+  private readonly afterInjectAgentContext: (() => Promise<void> | void) | undefined;
   private readonly loadExtensionFromSource: typeof loadExtension;
   private readonly activateInSandbox: typeof activateExtensionInSandbox;
   private readonly showToastMessage: typeof showToast;
@@ -376,7 +376,7 @@ export class ExtensionRuntimeManager {
     for (const listener of this.listeners) {
       try {
         listener();
-      } catch (error: unknown) {
+      } catch (error) {
         console.warn("[pi] Extension manager listener failed:", getRuntimeManagerErrorMessage(error));
       }
     }
@@ -411,7 +411,7 @@ export class ExtensionRuntimeManager {
 
     const model = resolveModelForCompletion({
       fallbackModel: agent.state.model,
-      requestedModel: request.model,
+      ...(request.model !== undefined ? { requestedModel: request.model } : {}),
     });
 
     const apiKey = agent.getApiKey ? await agent.getApiKey(model.provider) : undefined;
@@ -426,7 +426,7 @@ export class ExtensionRuntimeManager {
     const stream = await agent.streamFn(
       model,
       {
-        systemPrompt: request.systemPrompt,
+        ...(request.systemPrompt !== undefined ? { systemPrompt: request.systemPrompt } : {}),
         messages: parseLlmMessages(request.messages, model),
       },
       {
@@ -435,7 +435,7 @@ export class ExtensionRuntimeManager {
           agentSessionId: agent.sessionId,
           extensionId: entry.id,
         }),
-        maxTokens: request.maxTokens,
+        ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
       },
     );
 
@@ -475,19 +475,21 @@ export class ExtensionRuntimeManager {
     const proxyBaseUrl = await getEnabledProxyBaseUrl(this.settings);
     const resolved = resolveOutboundRequestUrl({
       targetUrl: parsedUrl.toString(),
-      proxyBaseUrl,
+      ...(proxyBaseUrl !== undefined ? { proxyBaseUrl } : {}),
     });
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), normalizedOptions.timeoutMs);
 
     try {
-      const response = await fetch(resolved.requestUrl, {
+      const requestInit: RequestInit = {
         method: normalizedOptions.method,
         headers: normalizedOptions.headers,
-        body: normalizedOptions.body,
         signal: controller.signal,
-      });
+        ...(normalizedOptions.body !== undefined ? { body: normalizedOptions.body } : {}),
+      };
+
+      const response = await fetch(resolved.requestUrl, requestInit);
 
       const responseBody = await readLimitedResponseBody(response);
       const headers: Record<string, string> = {};
@@ -501,7 +503,7 @@ export class ExtensionRuntimeManager {
         headers,
         body: responseBody,
       };
-    } catch (error: unknown) {
+    } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         throw new Error(`HTTP request timed out after ${normalizedOptions.timeoutMs}ms.`);
       }
@@ -579,7 +581,7 @@ export class ExtensionRuntimeManager {
     try {
       await this.activateEntry(entry);
       this.lastErrors.delete(entry.id);
-    } catch (error: unknown) {
+    } catch (error) {
       const message = getRuntimeManagerErrorMessage(error);
       this.lastErrors.set(entry.id, message);
       console.warn(`[pi] Failed to load extension "${entry.name}": ${message}`);
@@ -611,7 +613,7 @@ export class ExtensionRuntimeManager {
       for (const connectionId of requiredConnectionIds) {
         try {
           this.connectionManager.assertConnectionOwnedBy(entry.id, connectionId);
-        } catch (error: unknown) {
+        } catch (error) {
           const message = getRuntimeManagerErrorMessage(error);
           throw new Error(`Tool "${toolName}" requires an invalid connection "${connectionId}": ${message}`);
         }
@@ -625,7 +627,7 @@ export class ExtensionRuntimeManager {
     };
 
     const refreshToolsForDynamicChange = (): void => {
-      void this.refreshRuntimeTools().catch((error: unknown) => {
+      void this.refreshRuntimeTools().catch((error: DynamicValue) => {
         console.warn(`[pi] Failed to refresh tools after extension tool update: ${getRuntimeManagerErrorMessage(error)}`);
       });
     };
@@ -677,7 +679,7 @@ export class ExtensionRuntimeManager {
         execute: async (toolCallId, params, signal, onUpdate) => {
           try {
             return await tool.execute(toolCallId, params, signal, onUpdate);
-          } catch (error: unknown) {
+          } catch (error) {
             const message = getRuntimeManagerErrorMessage(error);
             throw new Error(
               `[Extension ${entry.name}] Tool "${tool.name}" failed: ${message}`,
@@ -765,7 +767,9 @@ export class ExtensionRuntimeManager {
       settings: this.settings,
       connectionManager: this.connectionManager,
       getRequiredActiveAgent: () => this.getRequiredActiveAgent(),
-      afterInjectAgentContext: this.afterInjectAgentContext,
+      ...(this.afterInjectAgentContext !== undefined
+        ? { afterInjectAgentContext: this.afterInjectAgentContext }
+        : {}),
       runExtensionLlmCompletion: (request) => this.runExtensionLlmCompletion(entry, request),
       runExtensionHttpFetch: (url, options) => this.runExtensionHttpFetch(url, options),
       writeExtensionClipboard: (text) => this.writeExtensionClipboard(text),
@@ -830,10 +834,10 @@ export class ExtensionRuntimeManager {
       if (toolsChangedDuringActivation) {
         await this.refreshRuntimeTools();
       }
-    } catch (error: unknown) {
+    } catch (error) {
       try {
         await this.cleanupState(state);
-      } catch (cleanupError: unknown) {
+      } catch (cleanupError) {
         console.warn(
           `[pi] Extension cleanup after failed activation also failed: ${getRuntimeManagerErrorMessage(cleanupError)}`,
         );
@@ -859,21 +863,21 @@ export class ExtensionRuntimeManager {
     if (state.handle) {
       try {
         await state.handle.deactivate();
-      } catch (error: unknown) {
+      } catch (error) {
         failures.push(getRuntimeManagerErrorMessage(error));
       }
     }
 
     try {
       clearExtensionWidgets(state.entryId);
-    } catch (error: unknown) {
+    } catch (error) {
       failures.push(getRuntimeManagerErrorMessage(error));
     }
 
     for (const unsubscribe of state.eventUnsubscribers) {
       try {
         unsubscribe();
-      } catch (error: unknown) {
+      } catch (error) {
         failures.push(getRuntimeManagerErrorMessage(error));
       }
     }
@@ -906,7 +910,7 @@ export class ExtensionRuntimeManager {
 
     try {
       this.connectionManager.unregisterDefinitionsByOwner(state.entryId);
-    } catch (error: unknown) {
+    } catch (error) {
       failures.push(getRuntimeManagerErrorMessage(error));
     }
 
@@ -918,7 +922,7 @@ export class ExtensionRuntimeManager {
     if (toolsChanged) {
       try {
         await this.refreshRuntimeTools();
-      } catch (error: unknown) {
+      } catch (error) {
         failures.push(getRuntimeManagerErrorMessage(error));
       }
     }

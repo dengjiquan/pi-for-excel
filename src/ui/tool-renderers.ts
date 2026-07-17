@@ -6,8 +6,8 @@
  */
 
 import type { ImageContent, TextContent, ToolResultMessage } from "@earendil-works/pi-ai/compat";
-import { registerToolRenderer } from "@earendil-works/pi-web-ui/dist/tools/renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "@earendil-works/pi-web-ui/dist/tools/types.js";
+import { registerToolRenderer } from "./messages/tool-renderer-registry.js";
+import type { ToolRenderer, ToolRenderResult } from "./messages/tool-renderer-registry.js";
 import { t } from "../language/index.js";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -54,14 +54,15 @@ import { renderCsvTable } from "./render-csv-table.js";
 import { renderDepTree } from "./render-dep-tree.js";
 
 // Ensure <markdown-block> custom element is registered before we render it.
-import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
+import "./messages/markdown-block.js";
+import "./messages/code-block.js";
 
 type ToolState = "inprogress" | "complete" | "error";
 type SupportedToolName = UiToolName;
 
 /* ── Helpers ────────────────────────────────────────────────── */
 
-function formatParamsJson(params: unknown): string {
+function formatParamsJson(params: DynamicValue): string {
   if (params === undefined) return "";
 
   try {
@@ -78,20 +79,20 @@ function formatParamsJson(params: unknown): string {
   }
 }
 
-function safeParseParams(params: unknown): Record<string, unknown> {
+function safeParseParams(params: DynamicValue): DynamicObject {
   if (!params) return {};
-  if (typeof params === "object" && params !== null) return params as Record<string, unknown>;
+  if (typeof params === "object" && params !== null) return params as DynamicObject;
   if (typeof params === "string") {
     try {
-      const parsed: unknown = JSON.parse(params);
-      if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
+      const parsed: DynamicValue = JSON.parse(params);
+      if (typeof parsed === "object" && parsed !== null) return parsed as DynamicObject;
       return {};
     } catch { return {}; }
   }
   return {};
 }
 
-function splitToolResultContent(result: ToolResultMessage<unknown>): {
+function splitToolResultContent(result: ToolResultMessage<DynamicValue>): {
   text: string;
   images: ImageContent[];
 } {
@@ -110,7 +111,7 @@ function tryFormatJsonOutput(text: string): { isJson: boolean; formatted: string
   if (!trimmed) return { isJson: false, formatted: text };
 
   try {
-    const parsed: unknown = JSON.parse(trimmed);
+    const parsed: DynamicValue = JSON.parse(trimmed);
     return { isJson: true, formatted: JSON.stringify(parsed, null, 2) };
   } catch {
     return { isJson: false, formatted: text };
@@ -198,12 +199,15 @@ function toFileUrl(path: string): string {
 
   const win = /^([A-Za-z]):\\(.*)$/.exec(path);
   if (win) {
-    const drive = win[1].toUpperCase();
-    const rest = win[2]
-      .split("\\")
-      .map((seg) => encodeURIComponent(seg))
-      .join("/");
-    return `file:///${drive}:/${rest}`;
+    const drive = win[1];
+    const restPath = win[2];
+    if (drive && restPath !== undefined) {
+      const rest = restPath
+        .split("\\")
+        .map((seg) => encodeURIComponent(seg))
+        .join("/");
+      return `file:///${drive.toUpperCase()}:/${rest}`;
+    }
   }
 
   const encoded = path
@@ -217,12 +221,12 @@ function renderImages(images: ImageContent[]): TemplateResult {
   if (!images.length) return html``;
 
   return html`
-    <div class="mt-2 grid grid-cols-1 gap-2">
+    <div class="pi-tool-images">
       ${images.map((img) => {
         const src = `data:${img.mimeType};base64,${img.data}`;
         return html`
-          <div class="border border-border rounded-lg overflow-hidden bg-background">
-            <img src=${src} alt="Tool result image" class="block w-full h-auto" />
+          <div class="pi-tool-image-frame">
+            <img src=${src} alt="Tool result image" class="pi-tool-image" />
           </div>
         `;
       })}
@@ -230,7 +234,7 @@ function renderImages(images: ImageContent[]): TemplateResult {
   `;
 }
 
-function getWorkbookCellChanges(details: unknown): WriteCellsDetails["changes"] | undefined {
+function getWorkbookCellChanges(details: DynamicValue): WriteCellsDetails["changes"] | undefined {
   if (isWriteCellsDetails(details)) {
     return details.changes;
   }
@@ -250,7 +254,7 @@ function formatDiffValue(value: string): string {
   return value.length > 0 ? value : "∅";
 }
 
-function renderWorkbookCellDiff(details: unknown): TemplateResult {
+function renderWorkbookCellDiff(details: DynamicValue): TemplateResult {
   const changes = getWorkbookCellChanges(details);
   if (!changes || changes.changedCount <= 0) return html``;
 
@@ -294,20 +298,20 @@ function renderWorkbookCellDiff(details: unknown): TemplateResult {
   `;
 }
 
-function renderChartImageDetails(details: unknown, hasImageContent: boolean): TemplateResult {
+function renderChartImageDetails(details: DynamicValue, hasImageContent: boolean): TemplateResult {
   if (hasImageContent || !isChartsDetails(details) || !details.image) return html``;
 
   const src = `data:${details.image.mimeType};base64,${details.image.base64}`;
   const alt = details.name ? `Chart ${details.name}` : "Chart image";
 
   return html`
-    <div class="mt-2 border border-border rounded-lg overflow-hidden bg-background">
-      <img src=${src} alt=${alt} class="block w-full h-auto" />
+    <div class="pi-tool-image-frame">
+      <img src=${src} alt=${alt} class="pi-tool-image" />
     </div>
   `;
 }
 
-function renderExplainFormulaDetails(details: unknown): TemplateResult | null {
+function renderExplainFormulaDetails(details: DynamicValue): TemplateResult | null {
   if (!isExplainFormulaDetails(details)) return null;
 
   if (!details.hasFormula) {
@@ -341,8 +345,30 @@ function renderExplainFormulaDetails(details: unknown): TemplateResult | null {
   `;
 }
 
-function optionalString(value: unknown): string | undefined {
+function optionalString(value: DynamicValue): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function createChangeExplanationInput(args: {
+  toolName: SupportedToolName;
+  blocked: boolean;
+  changedCount?: number | undefined;
+  summary?: string | undefined;
+  error?: string | undefined;
+  inputAddress?: string | undefined;
+  outputAddress?: string | undefined;
+  changes?: ChangeExplanationInput["changes"] | undefined;
+}): ChangeExplanationInput {
+  return {
+    toolName: args.toolName,
+    blocked: args.blocked,
+    ...(args.changedCount !== undefined ? { changedCount: args.changedCount } : {}),
+    ...(args.summary !== undefined ? { summary: args.summary } : {}),
+    ...(args.error !== undefined ? { error: args.error } : {}),
+    ...(args.inputAddress !== undefined ? { inputAddress: args.inputAddress } : {}),
+    ...(args.outputAddress !== undefined ? { outputAddress: args.outputAddress } : {}),
+    ...(args.changes !== undefined ? { changes: args.changes } : {}),
+  };
 }
 
 function extractResultError(resultText: string | undefined): string | undefined {
@@ -361,9 +387,9 @@ function extractResultError(resultText: string | undefined): string | undefined 
 
 function buildChangeExplanationInputForTool(
   toolName: SupportedToolName,
-  params: unknown,
+  params: DynamicValue,
   resultText: string | undefined,
-  details: unknown,
+  details: DynamicValue,
 ): ChangeExplanationInput | null {
   if (getToolExecutionMode(toolName, params) !== "mutate") return null;
 
@@ -378,7 +404,7 @@ function buildChangeExplanationInputForTool(
   const blockedFromText = Boolean(resultText && isBlocked(resultText));
 
   if (isWriteCellsDetails(details)) {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: details.blocked,
       changedCount: details.changes?.changedCount,
@@ -386,11 +412,11 @@ function buildChangeExplanationInputForTool(
       error,
       outputAddress: details.address ?? startCell,
       changes: details.changes,
-    };
+    });
   }
 
   if (isFillFormulaDetails(details)) {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: details.blocked,
       changedCount: details.changes?.changedCount,
@@ -398,11 +424,11 @@ function buildChangeExplanationInputForTool(
       error,
       outputAddress: details.address ?? range,
       changes: details.changes,
-    };
+    });
   }
 
   if (isPythonTransformRangeDetails(details)) {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: details.blocked || blockedFromText,
       changedCount: details.changes?.changedCount,
@@ -411,95 +437,95 @@ function buildChangeExplanationInputForTool(
       inputAddress: details.inputAddress,
       outputAddress: details.outputAddress,
       changes: details.changes,
-    };
+    });
   }
 
   if (isWorkbookHistoryDetails(details) && details.action === "restore") {
     const historyError = optionalString(details.error);
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText || Boolean(historyError),
       changedCount: details.changedCount,
       summary,
       error: historyError ?? error,
       outputAddress: details.address,
-    };
+    });
   }
 
   if (toolName === "format_cells") {
     const detailsAddress = isFormatCellsDetails(details) ? details.address : undefined;
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       summary,
       error,
       outputAddress: detailsAddress ?? range,
-    };
+    });
   }
 
   if (toolName === "conditional_format") {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       summary,
       error,
       outputAddress: range,
-    };
+    });
   }
 
   if (toolName === "modify_structure") {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       summary,
       error,
       outputAddress: range ?? sheet,
-    };
+    });
   }
 
   if (toolName === "comments") {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       changedCount: blockedFromText ? 0 : 1,
       summary,
       error,
       outputAddress: range,
-    };
+    });
   }
 
   if (toolName === "view_settings") {
     const outputAddress = range ?? sheet;
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       changedCount: blockedFromText ? 0 : 1,
       summary,
       error,
       outputAddress,
-    };
+    });
   }
 
   if (toolName === "charts") {
     const detailsAddress = isChartsDetails(details) ? details.address : undefined;
     const detailsSource = isChartsDetails(details) ? details.sourceRange : undefined;
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       changedCount: blockedFromText ? 0 : 1,
       summary,
       error,
       outputAddress: detailsAddress ?? detailsSource ?? range,
-    };
+    });
   }
 
   if (toolName === "workbook_history" && action === "restore") {
-    return {
+    return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
       summary,
       error,
-    };
+    });
   }
 
   return null;
@@ -515,9 +541,9 @@ function renderCitations(citations: readonly string[]): TemplateResult {
 
 function renderChangeExplanationSection(
   toolName: SupportedToolName,
-  params: unknown,
+  params: DynamicValue,
   resultText: string | undefined,
-  details: unknown,
+  details: DynamicValue,
 ): TemplateResult {
   const input = buildChangeExplanationInputForTool(toolName, params, resultText, details);
   if (!input) return html``;
@@ -569,7 +595,7 @@ function compactRange(range: string): string {
       : { sheet: "", addr: p };
   });
 
-  const first = parsed[0].sheet;
+  const first = parsed[0]?.sheet;
   if (first && parsed.every((p) => p.sheet === first)) {
     return `${first}!${parsed.map((p) => p.addr).join(",")}`;
   }
@@ -600,13 +626,13 @@ function compactRangesInMarkdown(text: string): string {
 function extractWrittenAddress(text: string): string | null {
   // "Written to **Sheet1!A1:C10** (…)" or "Filled formula across **Sheet1!A1:B20** (…)"
   const m = /(?:Written to|Filled formula across)\s+\*\*([^*]+)\*\*/.exec(text);
-  return m ? m[1] : null;
+  return m?.[1] ?? null;
 }
 
 /** Count formula errors mentioned in tool result text. */
 function countResultErrors(text: string): number {
   const m = /(\d+)\s+formula error/i.exec(text);
-  return m ? parseInt(m[1], 10) : 0;
+  return m?.[1] ? parseInt(m[1], 10) : 0;
 }
 
 /** True when result text starts with the blocked sentinel. */
@@ -663,7 +689,7 @@ function withRecoveryBadge(base: string, recovery: RecoveryCheckpointDetails | u
   return base.length > 0 ? `${base}, no backup` : " — no backup";
 }
 
-function recoveryBadgeForDetails(details: unknown): string {
+function recoveryBadgeForDetails(details: DynamicValue): string {
   if (isFormatCellsDetails(details)) {
     return withRecoveryBadge("", details.recovery);
   }
@@ -695,7 +721,7 @@ function recoveryBadgeForDetails(details: unknown): string {
 function badge(
   toolName: SupportedToolName,
   resultText: string | undefined,
-  details: unknown,
+  details: DynamicValue,
 ): string {
   if (toolName === "write_cells" && isWriteCellsDetails(details)) {
     if (details.blocked) return " — blocked";
@@ -738,6 +764,10 @@ interface ToolDesc {
   address?: string;
 }
 
+function toolDescWithAddress(action: string, detail: string, address: string | undefined): ToolDesc {
+  return address !== undefined ? { action, detail, address } : { action, detail };
+}
+
 /** Split a result-text summary line into action (first word) + rest. */
 function splitFirstWord(text: string): ToolDesc {
   const i = text.indexOf(" ");
@@ -749,9 +779,9 @@ function splitFirstWord(text: string): ToolDesc {
 /** Structured description: bold action + normal-weight detail. */
 function describeToolCall(
   toolName: SupportedToolName,
-  params: unknown,
+  params: DynamicValue,
   resultText: string | undefined,
-  details: unknown,
+  details: DynamicValue,
 ): ToolDesc {
   const p = safeParseParams(params);
   const range = p.range as string | undefined;
@@ -762,7 +792,7 @@ function describeToolCall(
     case "read_range": {
       const mode = p.mode as string | undefined;
       const label = mode === "csv" ? "Export" : "Read";
-      return { action: label, detail: range ? compactRange(range) + (mode === "csv" ? " (CSV)" : "") : "range", address: range };
+      return toolDescWithAddress(label, range ? compactRange(range) + (mode === "csv" ? " (CSV)" : "") : "range", range);
     }
     case "get_workbook_overview": {
       const sheet = p.sheet as string | undefined;
@@ -775,26 +805,26 @@ function describeToolCall(
 
       if (isWriteCellsDetails(details) && details.address) {
         const action = details.blocked ? "Write" : "Edit";
-        return { action, detail: details.address + b, address: details.address };
+        return toolDescWithAddress(action, details.address + b, details.address);
       }
 
       const addr = resultText ? extractWrittenAddress(resultText) : null;
       return addr
-        ? { action: "Edit", detail: addr + b, address: addr }
-        : { action: "Write", detail: (startCell ?? "cells") + b, address: startCell };
+        ? toolDescWithAddress("Edit", addr + b, addr)
+        : toolDescWithAddress("Write", (startCell ?? "cells") + b, startCell);
     }
     case "fill_formula": {
       const b = badge(toolName, resultText, details);
 
       if (isFillFormulaDetails(details) && details.address) {
         const action = details.blocked ? "Fill" : "Filled";
-        return { action, detail: details.address + b, address: details.address };
+        return toolDescWithAddress(action, details.address + b, details.address);
       }
 
       const addr = resultText ? extractWrittenAddress(resultText) : null;
       return addr
-        ? { action: "Filled", detail: addr + b, address: addr }
-        : { action: "Fill", detail: (range ? compactRange(range) : "formula") + b, address: range };
+        ? toolDescWithAddress("Filled", addr + b, addr)
+        : toolDescWithAddress("Fill", (range ? compactRange(range) : "formula") + b, range);
     }
     case "python_transform_range": {
       const b = badge(toolName, resultText, details);
@@ -804,17 +834,13 @@ function describeToolCall(
         if (address) {
           const hasError = typeof details.error === "string" && details.error.length > 0;
           const action = details.blocked || hasError ? "Transform" : "Transformed";
-          return { action, detail: address + b, address };
+          return toolDescWithAddress(action, address + b, address);
         }
       }
 
       const outputStart = p.output_start_cell as string | undefined;
       const fallbackAddress = outputStart ?? range;
-      return {
-        action: "Transform",
-        detail: (fallbackAddress ?? "range") + b,
-        address: fallbackAddress,
-      };
+      return toolDescWithAddress("Transform", (fallbackAddress ?? "range") + b, fallbackAddress);
     }
 
     // ── Format tools ──
@@ -822,19 +848,11 @@ function describeToolCall(
       const addr = isFormatCellsDetails(details) ? details.address : undefined;
       const resolved = addr ?? range;
       const recovery = recoveryBadgeForDetails(details);
-      return {
-        action: "Format",
-        detail: (resolved ? compactRange(resolved) : "cells") + recovery,
-        address: resolved,
-      };
+      return toolDescWithAddress("Format", (resolved ? compactRange(resolved) : "cells") + recovery, resolved);
     }
     case "conditional_format": {
       const recovery = recoveryBadgeForDetails(details);
-      return {
-        action: "Cond. format",
-        detail: (range ? compactRange(range) : "cells") + recovery,
-        address: range,
-      };
+      return toolDescWithAddress("Cond. format", (range ? compactRange(range) : "cells") + recovery, range);
     }
 
     // ── Result-text tools (split first word as action) ──
@@ -866,19 +884,15 @@ function describeToolCall(
     case "trace_dependencies": {
       const cell = (p.cell ?? p.range) as string | undefined;
       const mode = p.mode === "dependents" ? "dependents" : "precedents";
-      return {
-        action: mode === "dependents" ? "Trace dependents" : "Trace precedents",
-        detail: cell ?? mode,
-        address: cell,
-      };
+      return toolDescWithAddress(
+        mode === "dependents" ? "Trace dependents" : "Trace precedents",
+        cell ?? mode,
+        cell,
+      );
     }
     case "explain_formula": {
       const cell = p.cell as string | undefined;
-      return {
-        action: "Explain formula",
-        detail: cell ?? "cell",
-        address: cell,
-      };
+      return toolDescWithAddress("Explain formula", cell ?? "cell", cell);
     }
     case "charts": {
       const op = p.action as string | undefined;
@@ -894,19 +908,19 @@ function describeToolCall(
       }
 
       if (op === "create") {
-        return {
-          action: "Chart",
-          detail: `'${chartName ?? "new"}' created${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
-          address: source,
-        };
+        return toolDescWithAddress(
+          "Chart",
+          `'${chartName ?? "new"}' created${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
+          source,
+        );
       }
 
       if (op === "update") {
-        return {
-          action: "Chart",
-          detail: `'${chartName ?? "chart"}' updated${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
-          address: source,
-        };
+        return toolDescWithAddress(
+          "Chart",
+          `'${chartName ?? "chart"}' updated${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
+          source,
+        );
       }
 
       if (op === "delete") {
@@ -935,21 +949,21 @@ function describeToolCall(
 
       switch (op) {
         case "read":
-          return { action: "Comments", detail: addr, address: range };
+          return toolDescWithAddress("Comments", addr, range);
         case "add":
-          return { action: "Add", detail: `comment ${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Add", `comment ${addr}${recovery}`, range);
         case "update":
-          return { action: "Update", detail: `comment ${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Update", `comment ${addr}${recovery}`, range);
         case "reply":
-          return { action: "Reply", detail: `${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Reply", `${addr}${recovery}`, range);
         case "delete":
-          return { action: "Delete", detail: `comment ${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Delete", `comment ${addr}${recovery}`, range);
         case "resolve":
-          return { action: "Resolve", detail: `${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Resolve", `${addr}${recovery}`, range);
         case "reopen":
-          return { action: "Reopen", detail: `${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Reopen", `${addr}${recovery}`, range);
         default:
-          return { action: "Comment", detail: `${addr}${recovery}`, address: range };
+          return toolDescWithAddress("Comment", `${addr}${recovery}`, range);
       }
     }
     case "view_settings": {
@@ -971,11 +985,7 @@ function describeToolCall(
 
       if (op === "freeze_at") {
         const freezeTarget = qualifiedRange ?? targetSheetLabel;
-        return {
-          action: "Freeze",
-          detail: `${compactRange(freezeTarget)}${recovery}`,
-          address: qualifiedRange,
-        };
+        return toolDescWithAddress("Freeze", `${compactRange(freezeTarget)}${recovery}`, qualifiedRange);
       }
 
       if (op.startsWith("hide_") || op.startsWith("show_")) {
@@ -1113,11 +1123,11 @@ function describeToolCall(
 
 /* ── Renderer ───────────────────────────────────────────────── */
 
-function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<unknown, unknown> {
+function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<DynamicValue, DynamicValue> {
   return {
     render(
-      params: unknown,
-      result: ToolResultMessage<unknown> | undefined,
+      params: DynamicValue,
+      result: ToolResultMessage<DynamicValue> | undefined,
       isStreaming?: boolean,
     ): ToolRenderResult {
       const state: ToolState = result
@@ -1167,7 +1177,7 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
         const formulaExplanation = renderExplainFormulaDetails(result.details);
 
         // Search setup card: show inline guided setup when web_search fails
-        const resultDetails: unknown = result.details;
+        const resultDetails: DynamicValue = result.details;
         const searchSetupDetails = shouldShowSearchSetupCard(resultDetails) ? resultDetails : null;
         const initSearchSetup = (el: Element | undefined): void => {
           if (el instanceof HTMLElement && searchSetupDetails) {
@@ -1190,7 +1200,7 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
                 ${renderCollapsibleToolCardHeader(state, title, contentRef, chevronRef, defaultExpanded)}
               </div>
               <div ${ref(contentRef)}
-                class="pi-tool-card__body overflow-hidden transition-all duration-300 max-h-0"
+                class="pi-tool-card__body pi-tool-card__body--collapsed"
               >
                 <div class="pi-tool-card__inner">
                   <div class="pi-tool-card__detail">
@@ -1214,14 +1224,14 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
                       ? html`<div class="pi-tool-card__plain-text pi-tool-card__echo-result">✓ Done</div>`
                       : standaloneImagePath
                       ? html`
-                        <div class="text-sm">
+                        <div class="pi-tool-image-link">
                           <div>Image:
                             <a href=${toFileUrl(standaloneImagePath)} target="_blank"
-                              rel="noopener noreferrer" class="underline">
+                              rel="noopener noreferrer" class="pi-tool-image-link__anchor">
                               ${pathBasename(standaloneImagePath)}
                             </a>
                           </div>
-                          <div class="mt-1 text-xs font-mono text-muted-foreground break-all">
+                          <div class="pi-tool-image-link__path">
                             ${standaloneImagePath}
                           </div>
                         </div>
@@ -1255,7 +1265,7 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
                 ${renderCollapsibleToolCardHeader(state, title, contentRef, chevronRef, defaultExpanded)}
               </div>
               <div ${ref(contentRef)}
-                class="pi-tool-card__body overflow-hidden transition-all duration-300 max-h-0"
+                class="pi-tool-card__body pi-tool-card__body--collapsed"
               >
                 <div class="pi-tool-card__inner">
                   <div class="pi-tool-card__detail">

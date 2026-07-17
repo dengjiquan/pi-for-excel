@@ -1,3 +1,7 @@
+function isConventionsStorePayloadShape(value: DynamicValue): value is DynamicObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Persistent conventions storage + resolution.
  */
@@ -19,13 +23,12 @@ import type {
   StoredHeaderStyle,
   StoredVisualDefaults,
 } from "./types.js";
-import { isRecord } from "../utils/type-guards.js";
 
 const CONVENTIONS_KEY = "conventions.v1";
 
 export interface ConventionsStore {
-  get: (key: string) => Promise<unknown>;
-  set: (key: string, value: unknown) => Promise<void>;
+  get: (key: string) => Promise<DynamicValue>;
+  set: (key: string, value: DynamicValue) => Promise<void>;
 }
 
 export interface ConventionDiff {
@@ -48,31 +51,47 @@ function cloneBuilderParams(value: FormatBuilderParams | undefined): FormatBuild
     return undefined;
   }
 
-  return {
-    dp: value.dp,
-    negativeStyle: value.negativeStyle,
-    zeroStyle: value.zeroStyle,
-    thousandsSeparator: value.thousandsSeparator,
-    currencySymbol: value.currencySymbol,
-  };
+  const cloned: FormatBuilderParams = {};
+  if (value.dp !== undefined) cloned.dp = value.dp;
+  if (value.negativeStyle !== undefined) cloned.negativeStyle = value.negativeStyle;
+  if (value.zeroStyle !== undefined) cloned.zeroStyle = value.zeroStyle;
+  if (value.thousandsSeparator !== undefined) cloned.thousandsSeparator = value.thousandsSeparator;
+  if (value.currencySymbol !== undefined) cloned.currencySymbol = value.currencySymbol;
+
+  return cloned;
 }
 
 function cloneFormatPreset(value: StoredFormatPreset): StoredFormatPreset {
-  return {
+  const cloned: StoredFormatPreset = {
     format: value.format,
-    builderParams: cloneBuilderParams(value.builderParams),
   };
+
+  const builderParams = cloneBuilderParams(value.builderParams);
+  if (builderParams !== undefined) {
+    cloned.builderParams = builderParams;
+  }
+
+  return cloned;
 }
 
 function cloneCustomPreset(value: StoredCustomPreset): StoredCustomPreset {
-  return {
+  const cloned: StoredCustomPreset = {
     format: value.format,
-    description: value.description,
-    builderParams: cloneBuilderParams(value.builderParams),
   };
+
+  if (value.description !== undefined) {
+    cloned.description = value.description;
+  }
+
+  const builderParams = cloneBuilderParams(value.builderParams);
+  if (builderParams !== undefined) {
+    cloned.builderParams = builderParams;
+  }
+
+  return cloned;
 }
 
-function normalizeNumberInRange(value: unknown, min: number, max: number): number | null {
+function normalizeNumberInRange(value: DynamicValue, min: number, max: number): number | null {
   if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) {
     return null;
   }
@@ -84,7 +103,7 @@ function normalizeNumberInRange(value: unknown, min: number, max: number): numbe
   return value;
 }
 
-function normalizeIntegerInRange(value: unknown, min: number, max: number): number | null {
+function normalizeIntegerInRange(value: DynamicValue, min: number, max: number): number | null {
   const n = normalizeNumberInRange(value, min, max);
   if (n === null || !Number.isInteger(n)) {
     return null;
@@ -100,14 +119,19 @@ function normalizeHexColor(value: string): string | null {
   }
 
   const shortMatch = /^#([0-9a-fA-F]{3})$/u.exec(trimmed);
-  if (shortMatch) {
-    const [r, g, b] = shortMatch[1].split("");
+  const shortHex = shortMatch?.[1];
+  if (shortHex) {
+    const [r, g, b] = shortHex.split("");
+    if (r === undefined || g === undefined || b === undefined) {
+      return null;
+    }
     return `#${r}${r}${g}${g}${b}${b}`.toUpperCase();
   }
 
   const fullMatch = /^#([0-9a-fA-F]{6})$/u.exec(trimmed);
-  if (fullMatch) {
-    return `#${fullMatch[1].toUpperCase()}`;
+  const fullHex = fullMatch?.[1];
+  if (fullHex) {
+    return `#${fullHex.toUpperCase()}`;
   }
 
   return null;
@@ -119,17 +143,19 @@ function normalizeRgbColor(value: string): string | null {
     return null;
   }
 
-  const channels = match.slice(1).map((v) => Number(v));
+  const r = Number(match[1]);
+  const g = Number(match[2]);
+  const b = Number(match[3]);
+  const channels = [r, g, b];
   if (channels.some((channel) => Number.isNaN(channel) || channel < 0 || channel > 255)) {
     return null;
   }
 
-  const [r, g, b] = channels;
   const toHex = (channel: number) => channel.toString(16).padStart(2, "0").toUpperCase();
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-export function normalizeConventionColor(value: unknown): string | null {
+export function normalizeConventionColor(value: DynamicValue): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -137,8 +163,8 @@ export function normalizeConventionColor(value: unknown): string | null {
   return normalizeHexColor(value) ?? normalizeRgbColor(value);
 }
 
-function normalizeBuilderParams(raw: unknown): FormatBuilderParams | undefined {
-  if (!isRecord(raw)) {
+function normalizeBuilderParams(raw: DynamicValue): FormatBuilderParams | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -168,8 +194,8 @@ function normalizeBuilderParams(raw: unknown): FormatBuilderParams | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function normalizeStoredFormatPreset(raw: unknown): StoredFormatPreset | null {
-  if (!isRecord(raw)) {
+function normalizeStoredFormatPreset(raw: DynamicValue): StoredFormatPreset | null {
+  if (!isConventionsStorePayloadShape(raw)) {
     return null;
   }
 
@@ -178,16 +204,18 @@ function normalizeStoredFormatPreset(raw: unknown): StoredFormatPreset | null {
     return null;
   }
 
+  const preset: StoredFormatPreset = { format };
   const builderParams = normalizeBuilderParams(raw.builderParams);
-  return {
-    format,
-    builderParams,
-  };
+  if (builderParams !== undefined) {
+    preset.builderParams = builderParams;
+  }
+
+  return preset;
 }
 
-function normalizeStoredCustomPreset(raw: unknown): StoredCustomPreset | null {
+function normalizeStoredCustomPreset(raw: DynamicValue): StoredCustomPreset | null {
   const base = normalizeStoredFormatPreset(raw);
-  if (!base || !isRecord(raw)) {
+  if (!base || !isConventionsStorePayloadShape(raw)) {
     return null;
   }
 
@@ -195,14 +223,16 @@ function normalizeStoredCustomPreset(raw: unknown): StoredCustomPreset | null {
     ? raw.description.trim()
     : undefined;
 
-  return {
-    ...base,
-    description: description && description.length > 0 ? description : undefined,
-  };
+  const preset: StoredCustomPreset = { ...base };
+  if (description && description.length > 0) {
+    preset.description = description;
+  }
+
+  return preset;
 }
 
-function normalizePresetFormats(raw: unknown): Partial<Record<NumberPreset, StoredFormatPreset>> | undefined {
-  if (!isRecord(raw)) {
+function normalizePresetFormats(raw: DynamicValue): Partial<Record<NumberPreset, StoredFormatPreset>> | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -227,8 +257,8 @@ function normalizeCustomPresetName(name: string): string | null {
   return trimmed;
 }
 
-function normalizeCustomPresets(raw: unknown): Record<string, StoredCustomPreset> | undefined {
-  if (!isRecord(raw)) {
+function normalizeCustomPresets(raw: DynamicValue): Record<string, StoredCustomPreset> | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -251,8 +281,8 @@ function normalizeCustomPresets(raw: unknown): Record<string, StoredCustomPreset
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function normalizeVisualDefaults(raw: unknown): StoredVisualDefaults | undefined {
-  if (!isRecord(raw)) {
+function normalizeVisualDefaults(raw: DynamicValue): StoredVisualDefaults | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -270,8 +300,8 @@ function normalizeVisualDefaults(raw: unknown): StoredVisualDefaults | undefined
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function normalizeColorConventions(raw: unknown): StoredColorConventions | undefined {
-  if (!isRecord(raw)) {
+function normalizeColorConventions(raw: DynamicValue): StoredColorConventions | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -290,8 +320,8 @@ function normalizeColorConventions(raw: unknown): StoredColorConventions | undef
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function normalizeHeaderStyle(raw: unknown): StoredHeaderStyle | undefined {
-  if (!isRecord(raw)) {
+function normalizeHeaderStyle(raw: DynamicValue): StoredHeaderStyle | undefined {
+  if (!isConventionsStorePayloadShape(raw)) {
     return undefined;
   }
 
@@ -318,8 +348,8 @@ function normalizeHeaderStyle(raw: unknown): StoredHeaderStyle | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function validateStoredConventions(raw: unknown): StoredConventions {
-  if (!isRecord(raw)) {
+function validateStoredConventions(raw: DynamicValue): StoredConventions {
+  if (!isConventionsStorePayloadShape(raw)) {
     return {};
   }
 
@@ -436,13 +466,18 @@ export function mergeStoredConventions(
   const normalizedCurrent = validateStoredConventions(current);
   const normalizedUpdates = validateStoredConventions(updates);
 
-  const merged: StoredConventions = {
-    presetFormats: mergeSection(normalizedCurrent.presetFormats, normalizedUpdates.presetFormats),
-    customPresets: mergeSection(normalizedCurrent.customPresets, normalizedUpdates.customPresets),
-    visualDefaults: mergeSection(normalizedCurrent.visualDefaults, normalizedUpdates.visualDefaults),
-    colorConventions: mergeSection(normalizedCurrent.colorConventions, normalizedUpdates.colorConventions),
-    headerStyle: mergeSection(normalizedCurrent.headerStyle, normalizedUpdates.headerStyle),
-  };
+  const merged: StoredConventions = {};
+  const presetFormats = mergeSection(normalizedCurrent.presetFormats, normalizedUpdates.presetFormats);
+  const customPresets = mergeSection(normalizedCurrent.customPresets, normalizedUpdates.customPresets);
+  const visualDefaults = mergeSection(normalizedCurrent.visualDefaults, normalizedUpdates.visualDefaults);
+  const colorConventions = mergeSection(normalizedCurrent.colorConventions, normalizedUpdates.colorConventions);
+  const headerStyle = mergeSection(normalizedCurrent.headerStyle, normalizedUpdates.headerStyle);
+
+  if (presetFormats !== undefined) merged.presetFormats = presetFormats;
+  if (customPresets !== undefined) merged.customPresets = customPresets;
+  if (visualDefaults !== undefined) merged.visualDefaults = visualDefaults;
+  if (colorConventions !== undefined) merged.colorConventions = colorConventions;
+  if (headerStyle !== undefined) merged.headerStyle = headerStyle;
 
   return validateStoredConventions(merged);
 }
@@ -463,10 +498,14 @@ export function removeCustomPresets(
     delete custom[normalized];
   }
 
-  return validateStoredConventions({
-    ...normalizedCurrent,
-    customPresets: Object.keys(custom).length > 0 ? custom : undefined,
-  });
+  const next: StoredConventions = { ...normalizedCurrent };
+  if (Object.keys(custom).length > 0) {
+    next.customPresets = custom;
+  } else {
+    delete next.customPresets;
+  }
+
+  return validateStoredConventions(next);
 }
 
 function formatBoolean(value: boolean): string {
