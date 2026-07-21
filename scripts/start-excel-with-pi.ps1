@@ -127,7 +127,7 @@ try {
   Start-PiService -Name "Pi for Excel web app" -Command "npm run dev"
   Wait-Port -Port 3000 -Name "Pi for Excel web app"
 
-  Start-PiService -Name "Pi for Excel proxy" -Command "`$env:HOST='127.0.0.1'; npm run proxy:https"
+  Start-PiService -Name "Pi for Excel proxy" -Command "`$env:HOST='127.0.0.1'; `$env:ALLOW_LOOPBACK_TARGETS='1'; npm run proxy:https"
   Wait-Port -Port 3003 -Name "Pi for Excel proxy"
 
   # Python bridge (optional — skip gracefully if Python is not installed)
