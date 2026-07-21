@@ -10,10 +10,7 @@ import { html, LitElement, nothing, type PropertyValues } from "lit";
 import { icon } from "./icons.js";
 import { customElement, property, query, state } from "lit/decorators.js";
 import type { Agent, AgentEvent } from "@earendil-works/pi-agent-core";
-import type {
-  ImageContent,
-  ToolResultMessage,
-} from "@earendil-works/pi-ai/compat";
+import type { ImageContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { StreamingMessageContainer } from "./messages/streaming-message-container.js";
 import {
   Archive,

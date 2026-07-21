@@ -2,12 +2,7 @@
  * Default model selection for the taskpane.
  */
 
-import {
-  getModel,
-  getModels,
-  type Api,
-  type Model,
-} from "@earendil-works/pi-ai/compat";
+import type { Api, Model, Models } from "@earendil-works/pi-ai";
 
 import {
   compareOpenAiModelIds,
@@ -26,13 +21,8 @@ type DefaultProvider =
 
 type DefaultModelRule = { provider: DefaultProvider; match: RegExp };
 
-function getProviderModels(provider: string): Model<Api>[] {
-  try {
-    return getModels(provider as Parameters<typeof getModels>[0]) ?? [];
-  } catch {
-    // Unknown/custom provider names are not in the built-in registry.
-    return [];
-  }
+function getProviderModels(modelsRuntime: Models, provider: string): Model<Api>[] {
+  return [...modelsRuntime.getModels(provider)];
 }
 
 const DEFAULT_MODEL_RULES: DefaultModelRule[] = [
@@ -56,10 +46,11 @@ const DEFAULT_MODEL_RULES: DefaultModelRule[] = [
 ];
 
 function pickLatestMatchingModel(
+  modelsRuntime: Models,
   provider: DefaultProvider,
   match: RegExp,
 ): Model<Api> | null {
-  const models: Model<Api>[] = getProviderModels(provider);
+  const models: Model<Api>[] = getProviderModels(modelsRuntime, provider);
   const candidates = models.filter((m) => match.test(m.id));
   candidates.sort((a, b) => {
     const recency = modelRecencyScore(b.id) - modelRecencyScore(a.id);
@@ -70,9 +61,10 @@ function pickLatestMatchingModel(
 }
 
 function pickPreferredOpenAiModel(
+  modelsRuntime: Models,
   provider: "openai-codex" | "openai",
 ): Model<Api> | null {
-  const models: Model<Api>[] = getProviderModels(provider);
+  const models: Model<Api>[] = getProviderModels(modelsRuntime, provider);
   const bestGpt = models
     .filter((m) => isOpenAiGeneralGptModelId(m.id))
     .sort((a, b) => compareOpenAiModelIds(a.id, b.id))[0];
@@ -95,6 +87,7 @@ function pickPreferredOpenAiModel(
 }
 
 export function pickDefaultModel(
+  modelsRuntime: Models,
   availableProviders: string[],
   customDefaultModel?: Model<Api> | null,
 ): Model<Api> {
@@ -104,7 +97,7 @@ export function pickDefaultModel(
   // Sol → Terra → Luna; upstream intentionally exposes no bare gpt-5.6 alias.
   for (const provider of ["openai", "openai-codex"] as const) {
     if (!availableProviders.includes(provider)) continue;
-    const model = pickPreferredOpenAiModel(provider);
+    const model = pickPreferredOpenAiModel(modelsRuntime, provider);
     if (model) return model;
   }
 
@@ -113,7 +106,7 @@ export function pickDefaultModel(
   // for normal Anthropic use. Keep Sonnet/Fable as fallbacks for resilience if
   // a future registry/provider configuration has no Opus entry.
   if (availableProviders.includes("anthropic")) {
-    const models: Model<Api>[] = getProviderModels("anthropic");
+    const models: Model<Api>[] = getProviderModels(modelsRuntime, "anthropic");
     const latestWithPrefix = (prefix: string): Model<Api> | undefined =>
       models
         .filter((m) => m.id.startsWith(prefix))
@@ -131,7 +124,7 @@ export function pickDefaultModel(
   // Other providers: pattern-based rules
   for (const rule of DEFAULT_MODEL_RULES) {
     if (!availableProviders.includes(rule.provider)) continue;
-    const m = pickLatestMatchingModel(rule.provider, rule.match);
+    const m = pickLatestMatchingModel(modelsRuntime, rule.provider, rule.match);
     if (m) return m;
   }
 
@@ -144,19 +137,23 @@ export function pickDefaultModel(
   // (e.g. github-copilot- or mistral-only setups). An unusable default just
   // produces an API-key prompt for the wrong provider.
   for (const provider of availableProviders) {
-    const models = getProviderModels(provider);
-    const best = models.slice().sort((a, b) => {
-      const recency = modelRecencyScore(b.id) - modelRecencyScore(a.id);
-      if (recency !== 0) return recency;
-      return a.id.localeCompare(b.id);
-    })[0];
+    const models = getProviderModels(modelsRuntime, provider);
+    const best = models
+      .slice()
+      .sort((a, b) => {
+        const recency = modelRecencyScore(b.id) - modelRecencyScore(a.id);
+        if (recency !== 0) return recency;
+        return a.id.localeCompare(b.id);
+      })[0];
     if (best) return best;
   }
 
   // Absolute fallback: keep this resilient across pi-ai version bumps.
   // Sol is the maintainer-preferred GPT-5.6 quality tier.
-  // ponytail: gpt-5.6-sol is the maintainer-preferred tier but pi-ai 0.80.3's
-  // openai enum hasn't added it yet; cast keeps this fallback compiling until
-  // upstream catches up. Rarely reached (only when no provider has any model).
-  return getModel("openai", "gpt-5.6-sol" as never);
+  const preferredFallback = modelsRuntime.getModel("openai", "gpt-5.6-sol");
+  if (preferredFallback) return preferredFallback;
+
+  const firstKnownModel = modelsRuntime.getModels()[0];
+  if (firstKnownModel) return firstKnownModel;
+  throw new Error("No models are registered.");
 }
