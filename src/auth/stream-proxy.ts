@@ -104,6 +104,12 @@ function applyProxy(
   // Avoid double-proxying
   if (model.baseUrl.startsWith(`${normalizedProxy}/?`)) return model;
 
+  // ponytail: dev-mode Vite /api-proxy/ routes are same-origin on the taskpane
+  // and already handle CORS + forwarding; wrapping them through the cors-proxy
+  // makes node fetch a self-signed localhost cert (502). Let the browser hit Vite directly.
+  if (import.meta.env.DEV && model.baseUrl.includes("/api-proxy/"))
+    return model;
+
   const transportQuery = transport ? `pi_transport=${transport}&` : "";
   return {
     ...model,
@@ -170,7 +176,10 @@ function pickPreferredGoogleOAuthModel(
   return geminiAny[geminiAny.length - 1] ?? null;
 }
 
-function normalizeGoogleOAuthModel(modelsRuntime: Models, model: Model<Api>): Model<Api> {
+function normalizeGoogleOAuthModel(
+  modelsRuntime: Models,
+  model: Model<Api>,
+): Model<Api> {
   const provider = model.provider;
   if (!isGoogleOAuthProvider(provider)) {
     return model;
@@ -179,7 +188,10 @@ function normalizeGoogleOAuthModel(modelsRuntime: Models, model: Model<Api>): Mo
   let normalized: Model<Api> = model;
 
   if (/preview/i.test(normalized.id)) {
-    const fallbackModel = pickPreferredGoogleOAuthModel(modelsRuntime, provider);
+    const fallbackModel = pickPreferredGoogleOAuthModel(
+      modelsRuntime,
+      provider,
+    );
     if (fallbackModel) {
       normalized = fallbackModel;
     }
@@ -636,7 +648,11 @@ export function createOfficeStreamFn(
   modelsRuntime: Models,
   isRuntimeProvider?: (providerId: string) => boolean,
 ): OfficeStreamFn {
-  return async (model: Model<Api>, context: Context, options?: StreamOptions) => {
+  return async (
+    model: Model<Api>,
+    context: Context,
+    options?: StreamOptions,
+  ) => {
     const continuation = isToolContinuation(context.messages);
 
     // Always expose tools (via deterministic bundle selection), including
@@ -656,7 +672,9 @@ export function createOfficeStreamFn(
       return contextWithoutTools;
     })();
 
-    const normalizedModel = applyDevProxy(normalizeGoogleOAuthModel(modelsRuntime, model));
+    const normalizedModel = applyDevProxy(
+      normalizeGoogleOAuthModel(modelsRuntime, model),
+    );
 
     const callRecord = recordCall(
       normalizedModel,
@@ -681,11 +699,25 @@ export function createOfficeStreamFn(
             "Enable Proxy in Settings and run: npx -y pi-for-excel-proxy@latest",
         );
       }
-      return modelsRuntime.streamSimple(normalizedModel, effectiveContext, effectiveOptions);
+      return modelsRuntime.streamSimple(
+        normalizedModel,
+        effectiveContext,
+        effectiveOptions,
+      );
     }
 
-    if (!shouldProxyProvider(normalizedModel.provider, options?.apiKey, isRuntimeProvider)) {
-      return modelsRuntime.streamSimple(normalizedModel, effectiveContext, effectiveOptions);
+    if (
+      !shouldProxyProvider(
+        normalizedModel.provider,
+        options?.apiKey,
+        isRuntimeProvider,
+      )
+    ) {
+      return modelsRuntime.streamSimple(
+        normalizedModel,
+        effectiveContext,
+        effectiveOptions,
+      );
     }
 
     // Guardrails: fail fast for known-bad proxy configs (e.g., HTTP proxy from HTTPS taskpane).
