@@ -20,7 +20,7 @@ function collectFiles(dir, out = []) {
 for (const dir of searchRoots) {
   for (const file of collectFiles(join(root, dir))) {
     const rel = relative(root, file);
-    if (allowedFiles.has(rel)) continue;
+    if (allowedFiles.has(rel.replace(/\\/g, "/"))) continue;
     const lines = readFileSync(file, "utf8").split("\n");
     for (const [index, line] of lines.entries()) {
       if (/\.innerHTML\b/u.test(line)) {
@@ -32,7 +32,9 @@ for (const dir of searchRoots) {
 
 if (offenders.length > 0) {
   console.error("innerHTML usage check failed.");
-  console.error("Use DOM APIs when practical, or setSafeInnerHTML(...) from src/utils/html.ts with escaped dynamic values and a local safety reason.");
+  console.error(
+    "Use DOM APIs when practical, or setSafeInnerHTML(...) from src/utils/html.ts with escaped dynamic values and a local safety reason.",
+  );
   for (const offender of offenders) console.error(`- ${offender}`);
   process.exit(1);
 }
