@@ -8,6 +8,7 @@ import {
   findTrailingContextOverflowError,
   recoverFromContextOverflow,
 } from "../src/compaction/overflow-recovery.ts";
+import { failOnUnexpectedStream } from "./fail-on-unexpected-stream.ts";
 
 const EMPTY_USAGE: Usage = {
   input: 0,
@@ -82,6 +83,7 @@ function createTestAgent(args: {
   }
 
   return new RecordingAgent({
+    streamFn: failOnUnexpectedStream,
     initialState: {
       model: args.model,
       messages: args.messages,
