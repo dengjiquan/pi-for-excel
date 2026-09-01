@@ -586,6 +586,7 @@
   "message-renderers.summaryLabel": "Summary",
   "messages.aborted": "Request aborted",
   "messages.errorLabel": "Error:",
+  "messages.lengthTruncated": "Output stopped early: the model hit its output token limit (long thinking can consume it). Try again, or switch to a model with a higher limit.",
   "messages.noOutput": "(no output)",
   "messages.preparingParams": "Preparing tool parameters…",
   "messages.thinking": "Thinking…",

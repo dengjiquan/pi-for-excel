@@ -32,7 +32,8 @@ import "./thinking-block.js";
 
 @customElement("user-message")
 export class UserMessage extends LitElement {
-  @property({ type: Object }) message?: UserMessageType | UserMessageWithAttachments;
+  @property({ type: Object }) message?:
+    UserMessageType | UserMessageWithAttachments;
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment {
     return this;
@@ -61,15 +62,20 @@ export class UserMessage extends LitElement {
       <div class="pi-user-row">
         <div class="user-message-container">
           <markdown-block .content=${content}></markdown-block>
-          ${attachments
-            ? html`
-                <div class="pi-user-attachments">
-                  ${attachments.map(
-                    (attachment) => html`<attachment-tile .attachment=${attachment}></attachment-tile>`,
+          ${
+            attachments
+              ? html`
+                  <div class="pi-user-attachments">
+                    ${attachments.map(
+                    (attachment) =>
+                      html`<attachment-tile
+                        .attachment=${attachment}
+                      ></attachment-tile>`,
                   )}
-                </div>
-              `
-            : nothing}
+                  </div>
+                `
+              : nothing
+          }
         </div>
       </div>
     `;
@@ -103,15 +109,22 @@ export class AssistantMessage extends LitElement {
     const orderedParts: TemplateResult[] = [];
     for (const chunk of message.content) {
       if (chunk.type === "text" && chunk.text.trim() !== "") {
-        orderedParts.push(html`<markdown-block .content=${chunk.text}></markdown-block>`);
+        orderedParts.push(
+          html`<markdown-block .content=${chunk.text}></markdown-block>`,
+        );
       } else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
         orderedParts.push(
-          html`<thinking-block .content=${chunk.thinking} .isStreaming=${this.isStreaming}></thinking-block>`,
+          html`<thinking-block
+            .content=${chunk.thinking}
+            .isStreaming=${this.isStreaming}
+          ></thinking-block>`,
         );
       } else if (chunk.type === "toolCall") {
         if (this.hideToolCalls) continue;
 
-        const tool = this.tools?.find((candidate) => candidate.name === chunk.name);
+        const tool = this.tools?.find(
+          (candidate) => candidate.name === chunk.name,
+        );
         const pending = this.pendingToolCalls?.has(chunk.id) ?? false;
         const result = this.toolResultsById?.get(chunk.id);
 
@@ -140,16 +153,30 @@ export class AssistantMessage extends LitElement {
     return html`
       <div>
         ${orderedParts.length ? html`<div class="pi-assistant-body">${orderedParts}</div>` : nothing}
-        ${message.stopReason === "error" && message.errorMessage
-          ? html`
-              <div class="pi-assistant-error">
-                <strong>${t("messages.errorLabel")}</strong> ${message.errorMessage}
-              </div>
-            `
-          : nothing}
-        ${message.stopReason === "aborted"
-          ? html`<span class="pi-assistant-aborted">${t("messages.aborted")}</span>`
-          : nothing}
+        ${
+          message.stopReason === "error" && message.errorMessage
+            ? html`
+                <div class="pi-assistant-error">
+                  <strong>${t("messages.errorLabel")}</strong>
+                  ${message.errorMessage}
+                </div>
+              `
+            : nothing
+        }
+        ${
+          message.stopReason === "aborted"
+            ? html`<span class="pi-assistant-aborted"
+                >${t("messages.aborted")}</span
+              >`
+            : nothing
+        }
+        ${
+          message.stopReason === "length"
+            ? html`<div class="pi-assistant-error">
+                ${t("messages.lengthTruncated")}
+              </div>`
+            : nothing
+        }
       </div>
     `;
   }
@@ -203,7 +230,9 @@ export class ToolMessage extends LitElement {
       return renderResult.content;
     }
 
-    return html`<div class="pi-tool-card-fallback">${renderResult.content}</div>`;
+    return html`<div class="pi-tool-card-fallback">
+      ${renderResult.content}
+    </div>`;
   }
 }
 

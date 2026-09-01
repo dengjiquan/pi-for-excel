@@ -586,6 +586,7 @@
   "message-renderers.summaryLabel": "摘要",
   "messages.aborted": "请求已中止",
   "messages.errorLabel": "错误：",
+  "messages.lengthTruncated": "输出提前停止：模型达到了输出 token 上限（过长的思考也会消耗额度）。请重试，或换用上限更高的模型。",
   "messages.noOutput": "（无输出）",
   "messages.preparingParams": "正在准备工具参数…",
   "messages.thinking": "思考中…",

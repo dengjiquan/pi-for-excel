@@ -10,7 +10,8 @@ export const OPENAI_GATEWAY_PROVIDER_PREFIX = "Gateway · ";
 const OPENAI_GATEWAY_TYPE = "openai-completions";
 
 export const DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW = 16_384;
-const DEFAULT_OPENAI_GATEWAY_MAX_TOKENS = 4_096;
+// ponytail: fixed default; expose per-model override in gateway settings if users need lower
+const DEFAULT_OPENAI_GATEWAY_MAX_TOKENS = 65_536;
 
 type StoredModel = NonNullable<CustomProvider["models"]>[number];
 
@@ -86,7 +87,9 @@ export function normalizeGatewayModelId(modelId: string): string {
   return normalizeRequiredString(modelId, "Model ID");
 }
 
-export function normalizeGatewayContextWindow(contextWindow: number | null | undefined): number {
+export function normalizeGatewayContextWindow(
+  contextWindow: number | null | undefined,
+): number {
   if (contextWindow == null) {
     return DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW;
   }
@@ -103,7 +106,10 @@ export function normalizeGatewayContextWindow(contextWindow: number | null | und
   return normalized;
 }
 
-function deriveDisplayName(rawName: string | undefined, endpointUrl: string): string {
+function deriveDisplayName(
+  rawName: string | undefined,
+  endpointUrl: string,
+): string {
   const explicit = normalizeOptionalString(rawName);
   if (explicit.length > 0) {
     return explicit;
@@ -111,7 +117,8 @@ function deriveDisplayName(rawName: string | undefined, endpointUrl: string): st
 
   try {
     const url = new URL(endpointUrl);
-    const host = url.port.length > 0 ? `${url.hostname}:${url.port}` : url.hostname;
+    const host =
+      url.port.length > 0 ? `${url.hostname}:${url.port}` : url.hostname;
     if (host.trim().length > 0) {
       return host;
     }
@@ -153,7 +160,9 @@ export function isOpenAiGatewayProvider(provider: CustomProvider): boolean {
   return providerName.length > 0 && modelId.length > 0;
 }
 
-function providerToGatewayConfig(provider: CustomProvider): OpenAiGatewayConfig | null {
+function providerToGatewayConfig(
+  provider: CustomProvider,
+): OpenAiGatewayConfig | null {
   if (!isOpenAiGatewayProvider(provider)) {
     return null;
   }
@@ -174,7 +183,9 @@ function providerToGatewayConfig(provider: CustomProvider): OpenAiGatewayConfig 
     return null;
   }
 
-  const defaultDisplayName = providerName.startsWith(OPENAI_GATEWAY_PROVIDER_PREFIX)
+  const defaultDisplayName = providerName.startsWith(
+    OPENAI_GATEWAY_PROVIDER_PREFIX,
+  )
     ? providerName.slice(OPENAI_GATEWAY_PROVIDER_PREFIX.length)
     : providerName;
 
@@ -195,7 +206,10 @@ function createGatewayModel(args: {
   providerName: string;
   contextWindow: number;
 }): Model<"openai-completions"> {
-  const maxTokens = Math.min(DEFAULT_OPENAI_GATEWAY_MAX_TOKENS, args.contextWindow);
+  const maxTokens = Math.min(
+    DEFAULT_OPENAI_GATEWAY_MAX_TOKENS,
+    args.contextWindow,
+  );
 
   return {
     id: args.modelId,
@@ -324,7 +338,10 @@ function matchesPersistedCustomModel(
   storedModel: StoredModel,
   persistedModel: Pick<Model<Api>, "api" | "id" | "provider" | "baseUrl">,
 ): storedModel is Model<Api> {
-  return storedModel.api === persistedModel.api && storedModel.id === persistedModel.id;
+  return (
+    storedModel.api === persistedModel.api &&
+    storedModel.id === persistedModel.id
+  );
 }
 
 export function resolveCustomProviderModel(
