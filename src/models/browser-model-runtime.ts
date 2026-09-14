@@ -51,6 +51,8 @@ export interface BrowserProviderModelDefinition {
   input?: readonly ("text" | "image")[];
   contextWindow?: number;
   maxTokens?: number;
+  /** Static per-model headers merged into every API request (pi-ai Model.headers). */
+  headers?: Record<string, string>;
 }
 
 export interface BrowserProviderRegistration {
@@ -64,6 +66,8 @@ export interface BrowserProviderRegistration {
   resolveApiKey: () => Promise<string | undefined>;
   /** Keyless local providers can opt in while still satisfying Pi AI auth semantics. */
   allowKeyless?: boolean;
+  /** Extra static headers merged into every API request (e.g. x-opencode-session). */
+  headers?: Record<string, string>;
 }
 
 export interface CreateBrowserModelRuntimeOptions {
@@ -197,6 +201,9 @@ function createModel(args: {
     },
     contextWindow,
     maxTokens,
+    ...(args.definition.headers !== undefined
+      ? { headers: args.definition.headers }
+      : {}),
   };
 }
 
@@ -445,6 +452,9 @@ function createRegisteredProvider(
     id,
     name,
     baseUrl,
+    ...(registration.headers !== undefined
+      ? { headers: registration.headers }
+      : {}),
     auth: {
       apiKey: createStoredApiKeyAuth({
         name: `${name} credential`,
@@ -519,6 +529,9 @@ function customProviderRegistrations(
 
   for (const model of storedModels) {
     const definitions = modelsByProvider.get(model.provider) ?? [];
+    // Fall back to provider-level headers: gateways saved before per-model
+    // headers existed store them on the provider only.
+    const headers = model.headers ?? provider.headers;
     definitions.push({
       id: model.id,
       name: model.name,
@@ -526,6 +539,7 @@ function customProviderRegistrations(
       input: model.input,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
+      ...(headers !== undefined ? { headers } : {}),
     });
     modelsByProvider.set(model.provider, definitions);
   }
@@ -548,6 +562,7 @@ function customProviderRegistrations(
     models,
     resolveApiKey: () => Promise.resolve(provider.apiKey),
     allowKeyless: !provider.apiKey,
+    ...(provider.headers !== undefined ? { headers: provider.headers } : {}),
   }));
 }
 

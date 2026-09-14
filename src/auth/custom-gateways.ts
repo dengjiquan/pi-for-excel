@@ -8,6 +8,25 @@ import type { CustomProvider } from "../storage/local/custom-providers-store.js"
 const OPENAI_GATEWAY_ID_PREFIX = "pi-openai-gateway:";
 export const OPENAI_GATEWAY_PROVIDER_PREFIX = "Gateway · ";
 const OPENAI_GATEWAY_TYPE = "openai-completions";
+const OPENAI_RESPONSES_GATEWAY_TYPE = "openai-responses";
+
+/** Wire protocol the gateway speaks; providers like opencode GO route some
+ * models (gpt-5.6-luna, grok-4.6) only through the Responses API. */
+export type GatewayApiType = "openai-completions" | "openai-responses";
+
+/** UI choice: "auto" resolves the protocol from the model name at save time. */
+export type GatewayApiChoice = "auto" | GatewayApiType;
+
+/**
+ * opencode GO route table (https://opencode.ai/docs/go/): responses-only
+ * models are gpt-*, grok-*, muse-spark*; everything else is chat completions.
+ * Manual override exists for models this table does not know yet.
+ */
+export function resolveGatewayApiType(modelId: string): GatewayApiType {
+  return /^(gpt-|grok-|muse-spark)/i.test(modelId)
+    ? "openai-responses"
+    : "openai-completions";
+}
 
 export const DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW = 16_384;
 // ponytail: fixed default; expose per-model override in gateway settings if users need lower
@@ -30,6 +49,11 @@ export interface OpenAiGatewayConfig {
   apiKey: string;
   providerName: string;
   contextWindow: number;
+  headers?: Record<string, string>;
+  /** Resolved protocol actually used for requests. */
+  api: GatewayApiType;
+  /** The stored UI choice ("auto" or a locked protocol). */
+  apiMode: GatewayApiChoice;
 }
 
 export interface SaveOpenAiGatewayInput {
@@ -39,6 +63,8 @@ export interface SaveOpenAiGatewayInput {
   modelId: string;
   apiKey?: string;
   contextWindow?: number;
+  headers?: Record<string, string>;
+  api?: GatewayApiChoice;
 }
 
 export interface CustomProviderRuntimeInfo {
@@ -85,6 +111,42 @@ export function normalizeGatewayEndpointUrl(endpointUrl: string): string {
 
 export function normalizeGatewayModelId(modelId: string): string {
   return normalizeRequiredString(modelId, "Model ID");
+}
+
+/**
+ * Parse "Header-Name: value" lines into a header record.
+ * Blank lines are skipped; a line without ":" is an error.
+ */
+export function parseGatewayHeaderText(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) continue;
+
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      throw new Error(`Invalid header line (expected "Name: value"): ${line}`);
+    }
+
+    const name = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (name.length === 0 || value.length === 0) {
+      throw new Error(`Invalid header line (expected "Name: value"): ${line}`);
+    }
+
+    headers[name] = value;
+  }
+  return headers;
+}
+
+/** Render a header record back as "Name: value" lines for editing. */
+export function formatGatewayHeaders(
+  headers: Record<string, string> | undefined,
+): string {
+  if (!headers) return "";
+  return Object.entries(headers)
+    .map(([name, value]) => `${name}: ${value}`)
+    .join("\n");
 }
 
 export function normalizeGatewayContextWindow(
@@ -146,7 +208,10 @@ export function isOpenAiGatewayProvider(provider: CustomProvider): boolean {
     return false;
   }
 
-  if (provider.type !== OPENAI_GATEWAY_TYPE) {
+  if (
+    provider.type !== OPENAI_GATEWAY_TYPE &&
+    provider.type !== OPENAI_RESPONSES_GATEWAY_TYPE
+  ) {
     return false;
   }
 
@@ -197,6 +262,20 @@ function providerToGatewayConfig(
     apiKey: normalizeOptionalString(provider.apiKey),
     providerName,
     contextWindow: normalizeGatewayContextWindow(model.contextWindow),
+    ...(provider.headers !== undefined &&
+    Object.keys(provider.headers).length > 0
+      ? { headers: provider.headers }
+      : {}),
+    api:
+      provider.type === OPENAI_RESPONSES_GATEWAY_TYPE
+        ? "openai-responses"
+        : "openai-completions",
+    apiMode:
+      provider.apiMode === "auto" ||
+      provider.apiMode === "openai-completions" ||
+      provider.apiMode === "openai-responses"
+        ? provider.apiMode
+        : "auto",
   };
 }
 
@@ -205,7 +284,9 @@ function createGatewayModel(args: {
   modelId: string;
   providerName: string;
   contextWindow: number;
-}): Model<"openai-completions"> {
+  headers?: Record<string, string>;
+  api: GatewayApiType;
+}): Model<Api> {
   const maxTokens = Math.min(
     DEFAULT_OPENAI_GATEWAY_MAX_TOKENS,
     args.contextWindow,
@@ -214,7 +295,7 @@ function createGatewayModel(args: {
   return {
     id: args.modelId,
     name: args.modelId,
-    api: "openai-completions",
+    api: args.api,
     provider: args.providerName,
     baseUrl: args.endpointUrl,
     reasoning: false,
@@ -227,6 +308,7 @@ function createGatewayModel(args: {
     },
     contextWindow: args.contextWindow,
     maxTokens,
+    ...(args.headers !== undefined ? { headers: args.headers } : {}),
   };
 }
 
@@ -302,23 +384,44 @@ export async function saveOpenAiGatewayConfig(
 
   const id = input.id ?? `${OPENAI_GATEWAY_ID_PREFIX}${crypto.randomUUID()}`;
   const apiKey = normalizeOptionalString(input.apiKey);
+  const headers = input.headers
+    ? Object.fromEntries(
+        Object.entries(input.headers)
+          .filter(([, value]) => value.trim().length > 0)
+          .map(([name, value]) => [name, value.trim()]),
+      )
+    : undefined;
+  const hasHeaders = headers !== undefined && Object.keys(headers).length > 0;
+  const normalizedHeaders = hasHeaders ? headers : undefined;
+
+  const apiChoice: GatewayApiChoice = input.api ?? "auto";
+  const api: GatewayApiType =
+    apiChoice === "auto" ? resolveGatewayApiType(modelId) : apiChoice;
 
   const provider: CustomProvider = {
     id,
     name: displayName,
-    type: OPENAI_GATEWAY_TYPE,
+    type: api,
     baseUrl: endpointUrl,
+    apiMode: apiChoice,
     models: [
       createGatewayModel({
         endpointUrl,
         modelId,
         providerName,
         contextWindow,
+        api,
+        ...(normalizedHeaders !== undefined
+          ? { headers: normalizedHeaders }
+          : {}),
       }),
     ],
   };
   if (apiKey.length > 0) {
     provider.apiKey = apiKey;
+  }
+  if (normalizedHeaders !== undefined) {
+    provider.headers = normalizedHeaders;
   }
 
   await customProvidersStore.set(provider);
@@ -331,6 +434,9 @@ export async function saveOpenAiGatewayConfig(
     apiKey,
     providerName,
     contextWindow,
+    ...(provider.headers !== undefined ? { headers: provider.headers } : {}),
+    api,
+    apiMode: apiChoice,
   };
 }
 

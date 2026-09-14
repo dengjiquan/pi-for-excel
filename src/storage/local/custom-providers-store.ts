@@ -10,7 +10,8 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { Store } from "./store.js";
 import type { StoreConfig } from "./types.js";
 
-export type AutoDiscoveryProviderType = "ollama" | "llama.cpp" | "vllm" | "lmstudio";
+export type AutoDiscoveryProviderType =
+  "ollama" | "llama.cpp" | "vllm" | "lmstudio";
 
 export type CustomProviderType =
   | AutoDiscoveryProviderType
@@ -24,6 +25,10 @@ export interface CustomProvider {
   type: CustomProviderType;
   baseUrl: string;
   apiKey?: string;
+  /** Extra HTTP headers sent with every request to this provider (e.g. x-opencode-session). */
+  headers?: Record<string, string>;
+  /** Gateway protocol choice: "auto" resolves per model name, else a fixed GatewayApiType. */
+  apiMode?: string;
   models?: Model<Api>[];
 }
 

@@ -7,8 +7,11 @@ import { getAppStorage } from "../../storage/local/app-storage.js";
 import {
   DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW,
   deleteOpenAiGatewayConfig,
+  formatGatewayHeaders,
   listOpenAiGatewayConfigs,
+  parseGatewayHeaderText,
   saveOpenAiGatewayConfig,
+  type GatewayApiChoice,
   type OpenAiGatewayConfig,
 } from "../../auth/custom-gateways.js";
 import { requestConfirmationDialog } from "../../ui/confirm-dialog.js";
@@ -88,19 +91,28 @@ function createGatewayCard(args: {
 
   const endpoint = document.createElement("p");
   endpoint.className = "pi-settings-gateway-item__meta";
-  endpoint.textContent = t("custom-gateway.gatewayEndpoint", { url: args.gateway.endpointUrl });
+  endpoint.textContent = t("custom-gateway.gatewayEndpoint", {
+    url: args.gateway.endpointUrl,
+  });
 
   const model = document.createElement("p");
   model.className = "pi-settings-gateway-item__meta";
-  model.textContent = t("custom-gateway.gatewayModel", { id: args.gateway.modelId });
+  model.textContent = t("custom-gateway.gatewayModel", {
+    id: args.gateway.modelId,
+  });
 
   const contextWindow = document.createElement("p");
   contextWindow.className = "pi-settings-gateway-item__meta";
-  contextWindow.textContent = t("custom-gateway.gatewayContextWindow", { tokens: formatTokenCount(args.gateway.contextWindow) });
+  contextWindow.textContent = t("custom-gateway.gatewayContextWindow", {
+    tokens: formatTokenCount(args.gateway.contextWindow),
+  });
 
   const keyState = document.createElement("p");
   keyState.className = "pi-settings-gateway-item__meta";
-  keyState.textContent = args.gateway.apiKey.length > 0 ? t("custom-gateway.gatewayApiKeyConfigured") : t("custom-gateway.gatewayApiKeyNone");
+  keyState.textContent =
+    args.gateway.apiKey.length > 0
+      ? t("custom-gateway.gatewayApiKeyConfigured")
+      : t("custom-gateway.gatewayApiKeyNone");
 
   card.append(topRow, endpoint, model, contextWindow, keyState);
   return card;
@@ -148,6 +160,25 @@ export async function buildCustomGatewaySection(
     type: "password",
   });
 
+  const headersInput = document.createElement("textarea");
+  headersInput.className = "pi-item-card__config-input";
+  headersInput.rows = 2;
+  headersInput.spellcheck = false;
+  headersInput.placeholder = t("custom-gateway.headersPlaceholder");
+
+  const apiSelect = document.createElement("select");
+  apiSelect.className = "pi-item-card__config-input";
+  for (const [value, label] of [
+    ["auto", t("custom-gateway.apiAuto")],
+    ["openai-completions", t("custom-gateway.apiCompletions")],
+    ["openai-responses", t("custom-gateway.apiResponses")],
+  ] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    apiSelect.appendChild(option);
+  }
+
   const errorText = document.createElement("p");
   errorText.className = "pi-overlay-hint pi-overlay-text-warning";
   errorText.hidden = true;
@@ -171,11 +202,14 @@ export async function buildCustomGatewaySection(
     createConfigRow(t("custom-gateway.configLabelName"), nameInput),
     createConfigRow(t("custom-gateway.configLabelEndpoint"), endpointInput),
     createConfigRow(t("custom-gateway.configLabelModel"), modelInput),
-    createConfigRow(t("custom-gateway.configLabelContextWindow"), contextWindowInput),
-    createHint(
-      t("custom-gateway.contextWindowHint"),
+    createConfigRow(t("custom-gateway.configLabelApi"), apiSelect),
+    createConfigRow(
+      t("custom-gateway.configLabelContextWindow"),
+      contextWindowInput,
     ),
+    createHint(t("custom-gateway.contextWindowHint")),
     createConfigRow(t("custom-gateway.configLabelApiKey"), apiKeyInput),
+    createConfigRow(t("custom-gateway.configLabelHeaders"), headersInput),
     errorText,
     formActions,
   );
@@ -208,6 +242,8 @@ export async function buildCustomGatewaySection(
     modelInput.value = "";
     contextWindowInput.value = "";
     apiKeyInput.value = "";
+    headersInput.value = "";
+    apiSelect.value = "auto";
     cancelButton.hidden = true;
     saveButton.textContent = t("custom-gateway.saveGateway");
     setError(null);
@@ -220,6 +256,8 @@ export async function buildCustomGatewaySection(
     modelInput.value = gateway.modelId;
     contextWindowInput.value = String(gateway.contextWindow);
     apiKeyInput.value = gateway.apiKey;
+    headersInput.value = formatGatewayHeaders(gateway.headers);
+    apiSelect.value = gateway.apiMode;
     cancelButton.hidden = false;
     saveButton.textContent = t("custom-gateway-settings.update-gateway");
     setError(null);
@@ -239,40 +277,52 @@ export async function buildCustomGatewaySection(
     }
 
     for (const gateway of gateways) {
-      listHost.appendChild(createGatewayCard({
-        gateway,
-        onEdit: startEditing,
-        onDelete: (targetGateway) => {
-          void (async () => {
-            try {
-              const confirmed = await requestConfirmationDialog({
-                title: t("custom-gateway.deleteConfirmTitle"),
-                message: t("custom-gateway.deleteConfirmMsg", { name: targetGateway.displayName }),
-                confirmLabel: t("custom-gateway.deleteButton"),
-                confirmButtonTone: "danger",
-                restoreFocusOnClose: false,
-              });
+      listHost.appendChild(
+        createGatewayCard({
+          gateway,
+          onEdit: startEditing,
+          onDelete: (targetGateway) => {
+            void (async () => {
+              try {
+                const confirmed = await requestConfirmationDialog({
+                  title: t("custom-gateway.deleteConfirmTitle"),
+                  message: t("custom-gateway.deleteConfirmMsg", {
+                    name: targetGateway.displayName,
+                  }),
+                  confirmLabel: t("custom-gateway.deleteButton"),
+                  confirmButtonTone: "danger",
+                  restoreFocusOnClose: false,
+                });
 
-              if (!confirmed) {
-                return;
+                if (!confirmed) {
+                  return;
+                }
+
+                await deleteOpenAiGatewayConfig(
+                  getAppStorage().customProviders,
+                  targetGateway.id,
+                );
+                await reloadGateways();
+                renderList();
+                options.onProvidersChanged();
+                showToast(
+                  t("custom-gateway.deletedGateway", {
+                    name: targetGateway.displayName,
+                  }),
+                );
+
+                if (editingGatewayId === targetGateway.id) {
+                  resetForm();
+                }
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                showToast(t("custom-gateway.toast.deleteFailed", { message }));
               }
-
-              await deleteOpenAiGatewayConfig(getAppStorage().customProviders, targetGateway.id);
-              await reloadGateways();
-              renderList();
-              options.onProvidersChanged();
-              showToast(t("custom-gateway.deletedGateway", { name: targetGateway.displayName }));
-
-              if (editingGatewayId === targetGateway.id) {
-                resetForm();
-              }
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              showToast(t("custom-gateway.toast.deleteFailed", { message }));
-            }
-          })();
-        },
-      }));
+            })();
+          },
+        }),
+      );
     }
   };
 
@@ -288,18 +338,24 @@ export async function buildCustomGatewaySection(
 
       try {
         const rawContextWindow = contextWindowInput.value.trim();
-        const contextWindow = rawContextWindow.length > 0
-          ? Number(rawContextWindow)
-          : undefined;
+        const contextWindow =
+          rawContextWindow.length > 0 ? Number(rawContextWindow) : undefined;
+        const headers = parseGatewayHeaderText(headersInput.value);
+        const hasHeaders = Object.keys(headers).length > 0;
 
-        const saved = await saveOpenAiGatewayConfig(getAppStorage().customProviders, {
-          ...(editingGatewayId ? { id: editingGatewayId } : {}),
-          displayName: nameInput.value,
-          endpointUrl: endpointInput.value,
-          modelId: modelInput.value,
-          apiKey: apiKeyInput.value,
-          ...(contextWindow !== undefined ? { contextWindow } : {}),
-        });
+        const saved = await saveOpenAiGatewayConfig(
+          getAppStorage().customProviders,
+          {
+            ...(editingGatewayId ? { id: editingGatewayId } : {}),
+            displayName: nameInput.value,
+            endpointUrl: endpointInput.value,
+            modelId: modelInput.value,
+            apiKey: apiKeyInput.value,
+            ...(contextWindow !== undefined ? { contextWindow } : {}),
+            ...(hasHeaders ? { headers } : {}),
+            api: apiSelect.value as GatewayApiChoice,
+          },
+        );
 
         await reloadGateways();
         renderList();

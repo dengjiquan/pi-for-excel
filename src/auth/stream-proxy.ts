@@ -24,7 +24,11 @@ import {
   type ToolBundleId,
 } from "../context/tool-disclosure.js";
 import { modelRecencyScore } from "../models/model-ordering.js";
-import { OPENAI_GATEWAY_PROVIDER_PREFIX } from "./custom-gateways.js";
+import {
+  listOpenAiGatewayConfigs,
+  OPENAI_GATEWAY_PROVIDER_PREFIX,
+} from "./custom-gateways.js";
+import { getAppStorage } from "../storage/local/app-storage.js";
 import { rewriteDevProxyUrl } from "./dev-rewrites.js";
 import { isRecord } from "../utils/type-guards.js";
 import {
@@ -643,6 +647,42 @@ async function proxySupportsCodexWebSocketBridge(
   return supported;
 }
 
+/**
+ * Gateway header injection: custom gateways may require provider-specific
+ * headers (e.g. x-opencode-session for opencode Console Go routing) on every
+ * request. The stored gateway record is the source of truth, so the headers
+ * survive even when the in-memory model object was rebuilt from a dynamic
+ * model refresh that drops them.
+ */
+async function applyGatewayHeaders(
+  model: Model<Api>,
+  options: StreamOptions | undefined,
+): Promise<StreamOptions | undefined> {
+  if (
+    !model.provider
+      .toLowerCase()
+      .startsWith(OPENAI_GATEWAY_PROVIDER_PREFIX.toLowerCase())
+  ) {
+    return options;
+  }
+
+  // ponytail: per-stream IndexedDB read; cache if the gateway list grows
+  const gateways = await listOpenAiGatewayConfigs(
+    getAppStorage().customProviders,
+  );
+  const gateway = gateways.find(
+    (entry) => entry.providerName === model.provider,
+  );
+  if (!gateway?.headers) {
+    return options;
+  }
+
+  return {
+    ...options,
+    headers: { ...gateway.headers, ...options?.headers },
+  };
+}
+
 export function createOfficeStreamFn(
   getProxyUrl: GetProxyUrl,
   modelsRuntime: Models,
@@ -676,15 +716,20 @@ export function createOfficeStreamFn(
       normalizeGoogleOAuthModel(modelsRuntime, model),
     );
 
+    const optionsWithGatewayHeaders = await applyGatewayHeaders(
+      normalizedModel,
+      options,
+    );
+
     const callRecord = recordCall(
       normalizedModel,
       effectiveContext,
-      options,
+      optionsWithGatewayHeaders,
       continuation,
       toolSelection.bundleId,
     );
     const effectiveOptions = withPayloadHook(
-      options,
+      optionsWithGatewayHeaders,
       callRecord.call,
       callRecord.captureSnapshot,
       normalizedModel,

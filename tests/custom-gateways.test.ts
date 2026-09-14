@@ -7,7 +7,9 @@ import {
   DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW,
   collectCustomProviderRuntimeInfo,
   deleteOpenAiGatewayConfig,
+  formatGatewayHeaders,
   listOpenAiGatewayConfigs,
+  parseGatewayHeaderText,
   resolveCustomProviderModel,
   saveOpenAiGatewayConfig,
   type CustomProvidersStoreLike,
@@ -144,7 +146,10 @@ void test("resolveCustomProviderModel refreshes renamed gateway models by base U
     contextWindow: 262_144,
   });
 
-  const refreshed = resolveCustomProviderModel(await store.getAll(), persistedModel);
+  const refreshed = resolveCustomProviderModel(
+    await store.getAll(),
+    persistedModel,
+  );
   assert.ok(refreshed);
   assert.equal(refreshed?.contextWindow, 262_144);
   assert.match(refreshed?.provider ?? "", /^Gateway · Warehouse API EU/);
@@ -188,18 +193,20 @@ void test("deleteOpenAiGatewayConfig only removes managed gateway entries", asyn
     name: "Manual provider",
     type: "openai-completions",
     baseUrl: "https://manual.example.com/v1",
-    models: [{
-      id: "manual-model",
-      name: "manual-model",
-      api: "openai-completions",
-      provider: "manual-provider",
-      baseUrl: "https://manual.example.com/v1",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 8192,
-      maxTokens: 1024,
-    }],
+    models: [
+      {
+        id: "manual-model",
+        name: "manual-model",
+        api: "openai-completions",
+        provider: "manual-provider",
+        baseUrl: "https://manual.example.com/v1",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 8192,
+        maxTokens: 1024,
+      },
+    ],
   });
 
   await deleteOpenAiGatewayConfig(store, saved.id);
@@ -234,4 +241,129 @@ void test("collectCustomProviderRuntimeInfo includes custom provider names and a
   assert.equal(runtimeInfo.apiKeys.get(gateway.providerName), "runtime-key");
   assert.equal(runtimeInfo.apiKeys.get("Local Ollama"), undefined);
   assert.equal(runtimeInfo.defaultModel?.id, "runtime-model");
+});
+
+void test("gateway headers round-trip through save and parse", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const parsed = parseGatewayHeaderText(
+    "x-opencode-session: abc-123\r\n\r\n  X-Custom : spaced  \n",
+  );
+  assert.deepEqual(parsed, {
+    "x-opencode-session": "abc-123",
+    "X-Custom": "spaced",
+  });
+
+  assert.throws(
+    () => parseGatewayHeaderText("no-colon-here"),
+    /Invalid header line/,
+  );
+  assert.deepEqual(parseGatewayHeaderText("  \n "), {});
+  assert.equal(formatGatewayHeaders(undefined), "");
+  assert.equal(
+    formatGatewayHeaders({ "x-opencode-session": "abc-123" }),
+    "x-opencode-session: abc-123",
+  );
+
+  const saved = await saveOpenAiGatewayConfig(store, {
+    displayName: "opencode-go",
+    endpointUrl: "https://api.opencode.ai/v1",
+    modelId: "grok-code",
+    apiKey: "sk-test",
+    headers: parsed,
+  });
+  assert.deepEqual(saved.headers, parsed);
+
+  const listed = await listOpenAiGatewayConfigs(store);
+  assert.equal(listed.length, 1);
+  assert.deepEqual(listed[0]?.headers, parsed);
+
+  // pi-ai merges Model.headers (not provider.headers) into requests.
+  const storedModel = (await store.get(saved.id))?.models?.[0];
+  assert.deepEqual(storedModel?.headers, parsed);
+
+  // Saving without headers drops the field instead of merging stale values.
+  await saveOpenAiGatewayConfig(store, {
+    id: saved.id,
+    displayName: "opencode-go",
+    endpointUrl: "https://api.opencode.ai/v1",
+    modelId: "grok-code",
+    apiKey: "sk-test",
+  });
+  const relisted = await listOpenAiGatewayConfigs(store);
+  assert.equal(relisted[0]?.headers, undefined);
+});
+
+void test("gateway api type selects the responses protocol end to end", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const saved = await saveOpenAiGatewayConfig(store, {
+    displayName: "opencode-go-luna",
+    endpointUrl: "https://opencode.ai/zen/go/v1",
+    modelId: "gpt-5.6-luna",
+    headers: { "x-opencode-session": "sess-1" },
+    api: "openai-responses",
+  });
+  assert.equal(saved.api, "openai-responses");
+
+  const storedProvider = await store.get(saved.id);
+  assert.equal(storedProvider?.type, "openai-responses");
+  assert.equal(storedProvider?.models?.[0]?.api, "openai-responses");
+
+  const listed = await listOpenAiGatewayConfigs(store);
+  assert.equal(listed[0]?.api, "openai-responses");
+  assert.equal(listed[0]?.modelId, "gpt-5.6-luna");
+
+  // Default stays chat completions for existing configs.
+  const legacy = await saveOpenAiGatewayConfig(store, {
+    displayName: "legacy",
+    endpointUrl: "https://legacy.example.com/v1",
+    modelId: "m",
+  });
+  assert.equal(legacy.api, "openai-completions");
+});
+
+void test("auto api mode resolves the protocol from the model name", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  // gpt-* → responses, no manual switching needed
+  const luna = await saveOpenAiGatewayConfig(store, {
+    displayName: "go-luna",
+    endpointUrl: "https://opencode.ai/zen/go/v1",
+    modelId: "gpt-5.6-luna",
+  });
+  assert.equal(luna.api, "openai-responses");
+  assert.equal(luna.apiMode, "auto");
+
+  // glm/deepseek/kimi → completions
+  const glm = await saveOpenAiGatewayConfig(store, {
+    displayName: "go-glm",
+    endpointUrl: "https://opencode.ai/zen/go/v1",
+    modelId: "glm-5.3",
+  });
+  assert.equal(glm.api, "openai-completions");
+
+  // grok-* and muse-spark* → responses
+  assert.equal(
+    (await saveOpenAiGatewayConfig(store, {
+      endpointUrl: "https://opencode.ai/zen/go/v1",
+      modelId: "grok-4.6",
+    })).api,
+    "openai-responses",
+  );
+
+  // Explicit lock wins over the name table (unknown future models)
+  const locked = await saveOpenAiGatewayConfig(store, {
+    endpointUrl: "https://opencode.ai/zen/go/v1",
+    modelId: "gpt-future-model",
+    api: "openai-completions",
+  });
+  assert.equal(locked.api, "openai-completions");
+  assert.equal(locked.apiMode, "openai-completions");
+
+  // Round-trip preserves the choice
+  const listed = await listOpenAiGatewayConfigs(store);
+  const reluna = listed.find((g) => g.id === luna.id);
+  assert.equal(reluna?.apiMode, "auto");
+  assert.equal(reluna?.api, "openai-responses");
 });
