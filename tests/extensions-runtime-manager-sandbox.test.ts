@@ -1,22 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
-import { Script } from "node:vm";
-
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import {
   InMemoryModelsStore,
   type ImageContent,
   type TextContent,
 } from "@earendil-works/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
 
 import { ConnectionManager } from "../src/connections/manager.ts";
 import { CONNECTION_STORE_KEY } from "../src/connections/store.ts";
 import { setExperimentalFeatureEnabled } from "../src/experiments/flags.ts";
 import { ExtensionRuntimeManager } from "../src/extensions/runtime-manager.ts";
+import {
+  activateExtensionInSandbox,
+  type SandboxActivationOptions,
+} from "../src/extensions/sandbox-runtime.ts";
 import { BrowserModelRuntime } from "../src/models/browser-model-runtime.ts";
 import type { ProviderKeysStoreLike } from "../src/storage/local/provider-credentials-store.ts";
-import { isConnectionToolErrorDetails } from "../src/tools/tool-details.ts";
+import { failOnUnexpectedStream } from "./fail-on-unexpected-stream.ts";
+import { decodeToolDetailsOfKind } from "../src/tools/tool-details.ts";
 import { withConnectionPreflight } from "../src/tools/with-connection-preflight.ts";
 import {
   SANDBOX_BOOTSTRAP_KIND,
@@ -25,7 +28,6 @@ import {
   isSandboxEnvelope,
   serializeForSandboxInlineScript,
 } from "../src/extensions/sandbox/protocol.ts";
-import { buildSandboxSrcdoc } from "../src/extensions/sandbox/srcdoc.ts";
 import { EXTENSIONS_REGISTRY_STORAGE_KEY } from "../src/extensions/store.ts";
 import {
   getDefaultPermissionsForTrust,
@@ -34,19 +36,35 @@ import {
 } from "../src/extensions/permissions.ts";
 
 class MemorySettingsStore {
-  private readonly values = new Map<string, DynamicValue>();
+  private readonly values = new Map<string, unknown>();
 
-  get(key: string): Promise<DynamicValue> {
+  get(key: string): Promise<unknown> {
     return Promise.resolve(this.values.has(key) ? this.values.get(key) ?? null : null);
   }
 
-  set(key: string, value: DynamicValue): Promise<void> {
+  set(key: string, value: unknown): Promise<void> {
     this.values.set(key, value);
     return Promise.resolve();
   }
 
-  writeRaw(key: string, value: DynamicValue): void {
+  writeRaw(key: string, value: unknown): void {
     this.values.set(key, value);
+  }
+}
+
+class TransientExtensionReadSettings extends MemorySettingsStore {
+  private failNextRead = false;
+
+  armReadFailure(): void {
+    this.failNextRead = true;
+  }
+
+  override get(key: string): Promise<unknown> {
+    if (this.failNextRead) {
+      this.failNextRead = false;
+      return Promise.reject(new Error("transient runtime registry read failure"));
+    }
+    return super.get(key);
   }
 }
 
@@ -57,7 +75,7 @@ class FailingConnectionStoreSettings extends MemorySettingsStore {
     this.failNextConnectionStoreWrite = true;
   }
 
-  override set(key: string, value: DynamicValue): Promise<void> {
+  override set(key: string, value: unknown): Promise<void> {
     if (this.failNextConnectionStoreWrite && key === CONNECTION_STORE_KEY) {
       this.failNextConnectionStoreWrite = false;
       return Promise.reject(new Error("simulated connection store failure"));
@@ -141,7 +159,7 @@ function createStoredEntry(input: {
   trust: StoredExtensionTrust;
   enabled?: boolean;
   permissions?: StoredExtensionPermissions;
-}): DynamicObject {
+}): Record<string, unknown> {
   const now = new Date().toISOString();
   const source = input.trust === "inline-code"
     ? {
@@ -164,6 +182,34 @@ function createStoredEntry(input: {
     updatedAt: now,
   };
 }
+
+void test("runtime manager retries initialization after a transient registry read failure", async () => {
+  const settings = new TransientExtensionReadSettings();
+  settings.writeRaw(EXTENSIONS_REGISTRY_STORAGE_KEY, {
+    version: 2,
+    items: [createStoredEntry({
+      id: "ext.persisted.disabled",
+      name: "Persisted disabled",
+      trust: "inline-code",
+      enabled: false,
+    })],
+  });
+  const manager = new ExtensionRuntimeManager({
+    settings,
+    connectionManager: createConnectionManager(settings),
+    getActiveAgent: () => null,
+    refreshRuntimeTools: () => Promise.resolve(),
+    refreshRuntimeModels: () => Promise.resolve(),
+    reservedToolNames: new Set<string>(),
+  });
+  settings.armReadFailure();
+
+  await assert.rejects(() => manager.initialize(), /transient runtime registry read failure/u);
+  assert.deepEqual(manager.list(), []);
+
+  await manager.initialize();
+  assert.equal(manager.list()[0]?.id, "ext.persisted.disabled");
+});
 
 void test("runtime manager passes sandbox activation options and runtime metadata", async () => {
   const restoreLocalStorage = installLocalStorageStub();
@@ -231,12 +277,6 @@ void test("runtime manager passes sandbox activation options and runtime metadat
   } finally {
     restoreLocalStorage();
   }
-});
-
-void test("extensions hub plugins source includes runtime metadata for installed rows", async () => {
-  const source = await readFile(new URL("../src/commands/builtins/extensions-hub-plugins.ts", import.meta.url), "utf8");
-
-  assert.match(source, /description:\s*`\$\{status\.sourceLabel\} · \$\{status\.runtimeLabel\}`/);
 });
 
 void test("untrusted extensions default to sandbox runtime when rollback kill switch is unset", async () => {
@@ -393,6 +433,87 @@ void test("trusted local-module extensions stay on host runtime even when sandbo
     assert.equal(status.loaded, true);
     assert.equal(hostLoadCalls, 1);
     assert.equal(sandboxLoadCalls, 0);
+  } finally {
+    restoreLocalStorage();
+  }
+});
+
+void test("host and sandbox bridges retain distinct authority and owner boundaries", async () => {
+  const restoreLocalStorage = installLocalStorageStub();
+
+  try {
+    clearLocalStorageKey(EXTENSION_SANDBOX_RUNTIME_STORAGE_KEY);
+
+    const settings = new MemorySettingsStore();
+    settings.writeRaw(EXTENSIONS_REGISTRY_STORAGE_KEY, {
+      version: 2,
+      items: [
+        createStoredEntry({
+          id: "ext.local.authority",
+          name: "Local Authority",
+          trust: "local-module",
+        }),
+        createStoredEntry({
+          id: "ext.inline.authority",
+          name: "Sandbox Authority",
+          trust: "inline-code",
+        }),
+      ],
+    });
+
+    const agent = new Agent({
+      streamFn: failOnUnexpectedStream,
+      initialState: {
+        messages: [],
+        tools: [],
+      },
+    });
+    let hostRawAgent: Agent | null = null;
+    let hostConnectionId = "";
+    let sandboxConnectionId = "";
+    let sandboxHasRawAgentCallback = true;
+
+    const manager = new ExtensionRuntimeManager({
+      settings,
+      connectionManager: createConnectionManager(settings),
+      getActiveAgent: () => agent,
+      refreshRuntimeTools: async () => {},
+      reservedToolNames: new Set<string>(),
+      loadExtensionFromSource: (api) => {
+        hostRawAgent = api.agent.raw;
+        hostConnectionId = api.connections.register({
+          id: "ext.other.host-secret",
+          title: "Host connection",
+          capability: "host test",
+          authKind: "api_key",
+          secretFields: [],
+        });
+        return Promise.resolve({
+          deactivate: () => Promise.resolve(),
+        });
+      },
+      activateInSandbox: (activation) => {
+        sandboxHasRawAgentCallback = Reflect.has(activation, "getAgent");
+        sandboxConnectionId = activation.registerConnection({
+          id: "ext.other.sandbox-secret",
+          title: "Sandbox connection",
+          capability: "sandbox test",
+          authKind: "api_key",
+          secretFields: [],
+        });
+        return Promise.resolve({
+          deactivate: () => Promise.resolve(),
+        });
+      },
+    });
+
+    await manager.initialize();
+
+    assert.equal(hostRawAgent, agent);
+    assert.equal(hostConnectionId, "ext.local.authority.ext.other.host-secret");
+    assert.equal(sandboxHasRawAgentCallback, false);
+    assert.equal(sandboxConnectionId, "ext.inline.authority.ext.other.sandbox-secret");
+    assert.deepEqual(manager.list().map((status) => status.loaded), [true, true]);
   } finally {
     restoreLocalStorage();
   }
@@ -687,62 +808,15 @@ void test("host runtime extension tool errors include extension ownership contex
   }
 });
 
-void test("sandbox srcdoc builder emits expected bridge hooks and config", () => {
-  const html = buildSandboxSrcdoc({
-    instanceId: "ext.inline.srcdoc",
-    extensionName: "Inline Srcdoc",
-    source: {
-      kind: "inline",
-      code: "export function activate(api) { api.toast('hello'); }",
-    },
-    widgetApiV2Enabled: true,
-  });
-
-  assert.match(html, /"instanceId":"ext\.inline\.srcdoc"/);
-  assert.match(html, /"widgetApiV2Enabled":true/);
-  assert.match(html, /"bootstrapKind":"bootstrap"/);
-  assert.match(html, /if \(method === "ui_action"\)/);
-  assert.match(html, /Unknown sandbox UI action id:/);
-  assert.match(html, /api\.agent is not available in sandbox runtime/);
-  assert.match(html, /event\.source !== parent/);
-  assert.match(html, /message\.kind !== config\.bootstrapKind/);
-  assert.match(html, /hostPort\.addEventListener\("message", handleHostMessage\)/);
-  assert.match(html, /placement: payload\.placement === "above-input" \|\| payload\.placement === "below-input"/);
-  assert.match(html, /payload\.minHeightPx === null/);
-  assert.match(html, /model_provider_register/);
-  assert.match(html, /model_provider_unregister/);
-  assert.match(html, /model_providers_refresh/);
-});
-
-void test("sandbox srcdoc bootstrap is syntactically valid JavaScript", () => {
-  const html = buildSandboxSrcdoc({
-    instanceId: "ext.inline.syntax",
-    extensionName: "Inline Syntax",
-    source: {
-      kind: "inline",
-      code: "export function activate(api) { return () => api.toast('clean'); }",
-    },
-    widgetApiV2Enabled: false,
-  });
-  const match = /<script type="module">([\s\S]*)<\/script>/u.exec(html);
-  assert.ok(match);
-  const script = match[1];
-  assert.equal(typeof script, "string");
-  if (typeof script !== "string") return;
-
-  assert.doesNotThrow(() => new Script(script));
-  assert.match(script, /Extension cleanup failed:\\n-/u);
-});
-
 void test("sandbox protocol helpers validate envelope shapes and escape inline script payloads", () => {
-  const validBootstrap: DynamicValue = {
+  const validBootstrap: unknown = {
     channel: SANDBOX_CHANNEL,
     instanceId: "ext.inline.proto",
     direction: "host_to_sandbox",
     kind: SANDBOX_BOOTSTRAP_KIND,
   };
 
-  const validRequest: DynamicValue = {
+  const validRequest: unknown = {
     channel: SANDBOX_CHANNEL,
     instanceId: "ext.inline.proto",
     direction: "sandbox_to_host",
@@ -751,7 +825,7 @@ void test("sandbox protocol helpers validate envelope shapes and escape inline s
     method: "register_tool",
   };
 
-  const invalidDirection: DynamicValue = {
+  const invalidDirection: unknown = {
     channel: SANDBOX_CHANNEL,
     instanceId: "ext.inline.proto",
     direction: "sideways",
@@ -760,7 +834,7 @@ void test("sandbox protocol helpers validate envelope shapes and escape inline s
     method: "register_tool",
   };
 
-  const invalidKind: DynamicValue = {
+  const invalidKind: unknown = {
     channel: SANDBOX_CHANNEL,
     instanceId: "ext.inline.proto",
     direction: "sandbox_to_host",
@@ -779,16 +853,216 @@ void test("sandbox protocol helpers validate envelope shapes and escape inline s
   assert.equal(serialized.includes("\\u003cdiv>safe\\u003c/div>"), true);
 });
 
-void test("sandbox runtime host source retains isolation boundary guards", async () => {
-  const hostSource = await readFile(new URL("../src/extensions/sandbox-runtime.ts", import.meta.url), "utf8");
+void test("sandbox activation uses a script-only iframe and dedicated, direction-checked message port", async () => {
+  const previousDocument = Reflect.get(globalThis, "document");
+  const previousWindow = Reflect.get(globalThis, "window");
+  const previousHTMLElement = Reflect.get(globalThis, "HTMLElement");
+  let iframe: HTMLElement | null = null;
+  let sandboxPort: MessagePort | null = null;
+  let activationSettled = false;
+  let registeredModelInputLimits: unknown;
+  const getIframe = (): HTMLElement | null => iframe;
+  const getSandboxPort = (): MessagePort | null => sandboxPort;
 
-  assert.match(hostSource, /setAttribute\("sandbox", "allow-scripts"\)/);
-  assert.match(hostSource, /new MessageChannel\(\)/);
-  assert.match(hostSource, /postMessage\(bootstrap,/);
-  assert.match(hostSource, /channel\.port2/);
-  assert.match(hostSource, /this\.getSandboxPort\(\)\.postMessage\(envelope\)/);
-  assert.match(hostSource, /if \(envelope\.direction !== "sandbox_to_host"\)/);
-  assert.match(hostSource, /if \(!isSandboxEnvelope\(envelope\)\)/);
+  const body = {
+    appendChild: (element: HTMLElement): HTMLElement => {
+      iframe = element;
+      return element;
+    },
+  };
+  const fakeDocument = {
+    body,
+    createElement: (tagName: string): HTMLElement => {
+      assert.equal(tagName, "iframe");
+      const target = new EventTarget();
+      const attributes = new Map<string, string>();
+      const element = target as unknown as HTMLElement;
+      Reflect.set(element, "style", {});
+      Reflect.set(element, "setAttribute", (name: string, value: string) => attributes.set(name, value));
+      Reflect.set(element, "getAttribute", (name: string) => attributes.get(name) ?? null);
+      Reflect.set(element, "remove", () => {});
+      Reflect.set(element, "contentWindow", {
+        postMessage: (bootstrap: unknown, targetOrigin: string, transfer: MessagePort[]) => {
+          assert.equal(targetOrigin, "*");
+          assert.equal(transfer.length, 1);
+          sandboxPort = transfer[0] ?? null;
+          assert.deepEqual(bootstrap, {
+            channel: SANDBOX_CHANNEL,
+            instanceId: "ext.sandbox.boundary",
+            direction: "host_to_sandbox",
+            kind: SANDBOX_BOOTSTRAP_KIND,
+          });
+        },
+      });
+      return element;
+    },
+    getElementById: () => null,
+  };
+
+  const options: SandboxActivationOptions = {
+    instanceId: "ext.sandbox.boundary",
+    extensionName: "Boundary contract",
+    source: { kind: "inline", code: "export function activate() {}" },
+    registerCommand: () => {},
+    registerTool: () => {},
+    unregisterTool: () => {},
+    subscribeAgentEvents: () => () => {},
+    llmComplete: () => Promise.reject(new Error("not expected")),
+    httpFetch: () => Promise.reject(new Error("not expected")),
+    storageGet: () => Promise.resolve(null),
+    storageSet: () => Promise.resolve(),
+    storageDelete: () => Promise.resolve(),
+    storageKeys: () => Promise.resolve([]),
+    clipboardWriteText: () => Promise.resolve(),
+    injectAgentContext: () => {},
+    steerAgent: () => {},
+    followUpAgent: () => {},
+    listSkills: () => Promise.resolve([]),
+    readSkill: () => Promise.reject(new Error("not expected")),
+    installSkill: () => Promise.resolve(),
+    uninstallSkill: () => Promise.resolve(),
+    downloadFile: () => {},
+    registerConnection: () => "connection-id",
+    unregisterConnection: () => {},
+    listConnections: () => Promise.resolve([]),
+    getConnection: () => Promise.resolve(null),
+    getConnectionSecrets: () => Promise.resolve(null),
+    setConnectionSecrets: () => Promise.resolve(),
+    clearConnectionSecrets: () => Promise.resolve(),
+    markConnectionValidated: () => Promise.resolve(),
+    markConnectionInvalid: () => Promise.resolve(),
+    markConnectionStatus: () => Promise.resolve(),
+    registerModelProvider: (definition) => {
+      registeredModelInputLimits = definition.models[0]?.inputLimits;
+      return "provider-id";
+    },
+    unregisterModelProvider: () => {},
+    refreshModelProviders: () => Promise.resolve(),
+    isCapabilityEnabled: (capability) => capability === "models.register",
+    formatCapabilityError: (capability) => `Denied ${capability}`,
+    toast: () => {},
+  };
+
+  Reflect.set(globalThis, "document", fakeDocument);
+  Reflect.set(globalThis, "window", {});
+  Reflect.set(globalThis, "HTMLElement", EventTarget);
+
+  try {
+    const activation = activateExtensionInSandbox(options).then((handle) => {
+      activationSettled = true;
+      return handle;
+    });
+
+    const mountedIframe = getIframe();
+    assert.ok(mountedIframe);
+    assert.equal(mountedIframe.getAttribute("sandbox"), "allow-scripts");
+    assert.equal(mountedIframe.getAttribute("aria-hidden"), "true");
+    mountedIframe.dispatchEvent(new Event("load"));
+    const transferredPort = getSandboxPort();
+    assert.ok(transferredPort);
+
+    transferredPort.postMessage({
+      channel: SANDBOX_CHANNEL,
+      instanceId: options.instanceId,
+      direction: "host_to_sandbox",
+      kind: "event",
+      event: "ready",
+      data: null,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    assert.equal(activationSettled, false, "host-direction messages must not activate the sandbox");
+
+    transferredPort.postMessage({
+      channel: SANDBOX_CHANNEL,
+      instanceId: options.instanceId,
+      direction: "sandbox_to_host",
+      kind: "event",
+      event: "ready",
+      data: null,
+    });
+    const handle = await activation;
+
+    const providerResponse = new Promise<Record<string, unknown>>((resolve) => {
+      transferredPort.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const envelope = event.data;
+        if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return;
+        const payload = envelope as Record<string, unknown>;
+        if (payload.kind !== "response" || payload.requestId !== "provider-1") return;
+        resolve(payload);
+      });
+      transferredPort.start();
+    });
+    transferredPort.postMessage({
+      channel: SANDBOX_CHANNEL,
+      instanceId: options.instanceId,
+      direction: "sandbox_to_host",
+      kind: "request",
+      requestId: "provider-1",
+      method: "model_provider_register",
+      params: {
+        definition: {
+          id: "images",
+          name: "Image provider",
+          api: "openai-responses",
+          baseUrl: "https://images.example.com/v1",
+          allowKeyless: true,
+          models: [{
+            id: "image-model",
+            inputLimits: {
+              maxRequestBytes: 8_388_608,
+              images: {
+                maxPerMessage: 4,
+                maxPerRequest: 6,
+                resize: { maxWidth: 900, maxHeight: 700, maxBytes: 1_048_576, jpegQuality: 75 },
+              },
+            },
+          }],
+        },
+      },
+    });
+    assert.equal((await providerResponse).ok, true);
+    assert.deepEqual(registeredModelInputLimits, {
+      maxRequestBytes: 8_388_608,
+      images: {
+        maxPerMessage: 4,
+        maxPerRequest: 6,
+        resize: { maxWidth: 900, maxHeight: 700, maxBytes: 1_048_576, jpegQuality: 75 },
+      },
+    });
+
+    const deactivateRequest = new Promise<Record<string, unknown>>((resolve) => {
+      transferredPort.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const envelope = event.data;
+        if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return;
+        const payload = envelope as Record<string, unknown>;
+        if (payload.kind !== "request" || payload.method !== "deactivate") return;
+        resolve(payload);
+        transferredPort.postMessage({
+          channel: SANDBOX_CHANNEL,
+          instanceId: options.instanceId,
+          direction: "sandbox_to_host",
+          kind: "response",
+          requestId: payload.requestId,
+          ok: true,
+          result: null,
+        });
+      });
+      transferredPort.start();
+    });
+
+    const deactivated = handle.deactivate();
+    const request = await deactivateRequest;
+    assert.equal(request.direction, "host_to_sandbox");
+    await deactivated;
+  } finally {
+    if (previousDocument === undefined) Reflect.deleteProperty(globalThis, "document");
+    else Reflect.set(globalThis, "document", previousDocument);
+    if (previousWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Reflect.set(globalThis, "window", previousWindow);
+    if (previousHTMLElement === undefined) Reflect.deleteProperty(globalThis, "HTMLElement");
+    else Reflect.set(globalThis, "HTMLElement", previousHTMLElement);
+    getSandboxPort()?.close();
+  }
 });
 
 void test("sandbox activation failures are isolated per extension during initialize", async () => {
@@ -1076,11 +1350,10 @@ void test("connection preflight blocks missing connections before tool execution
   const result = await tools[0].execute("tool-call-1", { company: "Acme" });
 
   assert.equal(executed, false);
-  assert.equal(isConnectionToolErrorDetails(result.details), true);
-  if (isConnectionToolErrorDetails(result.details)) {
-    assert.equal(result.details.errorCode, "missing_connection");
-    assert.equal(result.details.connectionId, "ext.apollo.apollo");
-  }
+  const connectionError = decodeToolDetailsOfKind(result.details, "connection_error");
+  assert.ok(connectionError);
+  assert.equal(connectionError.errorCode, "missing_connection");
+  assert.equal(connectionError.connectionId, "ext.apollo.apollo");
 });
 
 void test("connection preflight maps runtime auth failures to connection_auth_failed", async () => {
@@ -1118,12 +1391,10 @@ void test("connection preflight maps runtime auth failures to connection_auth_fa
   });
 
   const result = await tools[0].execute("tool-call-2", { company: "Acme" });
-  assert.equal(isConnectionToolErrorDetails(result.details), true);
-
-  if (isConnectionToolErrorDetails(result.details)) {
-    assert.equal(result.details.errorCode, "connection_auth_failed");
-    assert.ok(!result.details.reason?.includes("top-secret-api-key"));
-  }
+  const connectionError = decodeToolDetailsOfKind(result.details, "connection_error");
+  assert.ok(connectionError);
+  assert.equal(connectionError.errorCode, "connection_auth_failed");
+  assert.ok(!connectionError.reason?.includes("top-secret-api-key"));
 
   const text = result.content[0]?.type === "text" ? result.content[0].text : "";
   assert.ok(!text.includes("top-secret-api-key"));
@@ -1170,13 +1441,11 @@ void test("connection preflight still redacts auth failures when status persiste
   });
 
   const result = await tools[0].execute("tool-call-2b", { company: "Acme" });
-  assert.equal(isConnectionToolErrorDetails(result.details), true);
-
-  if (isConnectionToolErrorDetails(result.details)) {
-    assert.equal(result.details.errorCode, "connection_auth_failed");
-    assert.equal(result.details.status, "error");
-    assert.ok(!result.details.reason?.includes("top-secret-api-key"));
-  }
+  const connectionError = decodeToolDetailsOfKind(result.details, "connection_error");
+  assert.ok(connectionError);
+  assert.equal(connectionError.errorCode, "connection_auth_failed");
+  assert.equal(connectionError.status, "error");
+  assert.ok(!connectionError.reason?.includes("top-secret-api-key"));
 
   const text = result.content[0]?.type === "text" ? result.content[0].text : "";
   assert.ok(!text.includes("top-secret-api-key"));
@@ -1231,13 +1500,11 @@ void test("connection preflight attributes auth failures to the matching require
   });
 
   const result = await tools[0].execute("tool-call-3", { dryRun: false });
-  assert.equal(isConnectionToolErrorDetails(result.details), true);
-
-  if (isConnectionToolErrorDetails(result.details)) {
-    assert.equal(result.details.errorCode, "connection_auth_failed");
-    assert.equal(result.details.connectionId, "ext.multi.billing");
-    assert.ok(!result.details.reason?.includes("billing-key"));
-  }
+  const connectionError = decodeToolDetailsOfKind(result.details, "connection_error");
+  assert.ok(connectionError);
+  assert.equal(connectionError.errorCode, "connection_auth_failed");
+  assert.equal(connectionError.connectionId, "ext.multi.billing");
+  assert.ok(!connectionError.reason?.includes("billing-key"));
 
   const crmState = await connectionManager.getState("ext.multi.crm");
   const billingState = await connectionManager.getState("ext.multi.billing");
@@ -1304,7 +1571,15 @@ void test("extension model providers use host-owned connection secrets and unloa
         name: "Acme models",
         api: "openai-responses",
         baseUrl: "https://models.example.com/v1",
-        models: [{ id: "baseline-model", contextWindow: 128_000, maxTokens: 16_000 }],
+        models: [{
+          id: "baseline-model",
+          contextWindow: 128_000,
+          maxTokens: 16_000,
+          inputLimits: {
+            maxRequestBytes: 8_388_608,
+            images: { maxPerRequest: 6, resize: { maxWidth: 900, jpegQuality: 75 } },
+          },
+        }],
         connection: "account",
         apiKeySecret: "apiKey",
       });
@@ -1323,6 +1598,13 @@ void test("extension model providers use host-owned connection secrets and unloa
   assert.deepEqual(
     modelRuntime.models.getModels(providerId).map((model) => model.id),
     ["baseline-model", "discovered-model"],
+  );
+  assert.deepEqual(
+    modelRuntime.models.getModel(providerId, "discovered-model")?.inputLimits,
+    {
+      maxRequestBytes: 8_388_608,
+      images: { maxPerRequest: 6, resize: { maxWidth: 900, jpegQuality: 75 } },
+    },
   );
   assert.deepEqual(manager.list()[0]?.modelProviderIds, [providerId]);
 

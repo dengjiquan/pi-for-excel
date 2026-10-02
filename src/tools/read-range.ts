@@ -7,9 +7,16 @@
  * - "detailed": Full JSON with formulas, number formats. For debugging.
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { excelRun, getRange, qualifiedAddress, parseCell, colToLetter } from "../excel/helpers.js";
+import {
+  colToLetter,
+  excelRun,
+  getRange,
+  isCellInRange,
+  parseCell,
+  qualifiedAddress,
+} from "../excel/helpers.js";
 import { formatAsMarkdownTable, extractFormulas, findErrors } from "../utils/format.js";
 import { getErrorMessage } from "../utils/errors.js";
 import { buildResolvedFormatLabels, getResolvedConventions, humanizeFormat } from "../conventions/index.js";
@@ -47,9 +54,9 @@ interface ReadRangeResult {
   address: string;
   rows: number;
   cols: number;
-  values: DynamicValue[][];
-  formulas: DynamicValue[][];
-  numberFormats: DynamicValue[][];
+  values: unknown[][];
+  formulas: unknown[][];
+  numberFormats: unknown[][];
   comments: CommentSummary[];
 }
 
@@ -158,28 +165,7 @@ export function createReadRangeTool(): AgentTool<typeof schema> {
   };
 }
 
-/** Check if a cell address falls within a range address (both without sheet prefix). */
-function isCellInRange(cellAddr: string, rangeAddr: string): boolean {
-  const bangIndex = rangeAddr.indexOf("!");
-  const clean = bangIndex >= 0 ? rangeAddr.slice(bangIndex + 1) : rangeAddr;
-  const parts = clean.includes(":") ? clean.split(":") : [clean, clean];
-  const startPart = parts[0];
-  const endPart = parts[1];
-  if (startPart === undefined || endPart === undefined) {
-    return false;
-  }
-  const start = parseCell(startPart);
-  const end = parseCell(endPart);
-  const cell = parseCell(cellAddr);
-  return (
-    cell.col >= start.col &&
-    cell.col <= end.col &&
-    cell.row >= start.row &&
-    cell.row <= end.row
-  );
-}
-
-function hasAnyNonEmptyCell(values: DynamicValue[][]): boolean {
+function hasAnyNonEmptyCell(values: unknown[][]): boolean {
   for (const row of values) {
     for (const v of row) {
       if (v !== null && v !== undefined && v !== "") return true;
@@ -188,22 +174,22 @@ function hasAnyNonEmptyCell(values: DynamicValue[][]): boolean {
   return false;
 }
 
-function formatAsExcelMarkdownTable(values: DynamicValue[][], startCell: string): string {
+function formatAsExcelMarkdownTable(values: unknown[][], startCell: string): string {
   if (!values || values.length === 0) return "(empty)";
 
   const start = parseCell(startCell);
   const numCols = Math.max(...values.map((r) => r.length));
 
-  const header: DynamicValue[] = [""];
+  const header: unknown[] = [""];
   for (let c = 0; c < numCols; c++) {
     header.push(colToLetter(start.col + c));
   }
 
-  const rows: DynamicValue[][] = [header];
+  const rows: unknown[][] = [header];
 
   for (let r = 0; r < values.length; r++) {
     const valueRow = values[r] ?? [];
-    const row: DynamicValue[] = [start.row + r, ...valueRow];
+    const row: unknown[] = [start.row + r, ...valueRow];
     while (row.length < numCols + 1) row.push("");
     rows.push(row);
   }
@@ -335,7 +321,7 @@ function formatDetailed(
 
 /* ── CSV helpers (migrated from get-range-as-csv) ──────────────────── */
 
-function toCsvField(value: DynamicValue): string {
+function toCsvField(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value.includes(",") || value.includes('"') || value.includes("\n") || value.includes("\r") ? `"${value.replace(/"/g, '""')}"` : value;
   const str = typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value);
@@ -345,7 +331,7 @@ function toCsvField(value: DynamicValue): string {
   return str;
 }
 
-function valuesToCsv(values: DynamicValue[][]): string {
+function valuesToCsv(values: unknown[][]): string {
   if (!values || values.length === 0) return "";
   return values
     .map((row) => row.map((v) => toCsvField(v)).join(","))

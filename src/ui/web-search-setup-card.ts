@@ -20,14 +20,15 @@ import {
   checkApiKeyFormat,
   saveWebSearchApiKey,
   WEB_SEARCH_PROVIDER_INFO,
-  type WebSearchConfigStore,
   type WebSearchProvider,
 } from "../tools/web-search-config.js";
-import { isWebSearchDetails, type WebSearchDetails } from "../tools/tool-details.js";
+import type { ExcelToolDetails, WebSearchDetails } from "../tools/tool-details.js";
 import { validateWebSearchApiKey } from "../tools/web-search.js";
-import { AlertTriangle, Check, Copy, Search, lucide } from "./lucide-icons.js";
+import { createCopyableCommand } from "./command-copy.js";
+import { AlertTriangle, Search, lucide } from "./lucide-icons.js";
 import { showToast } from "./toast.js";
 import { t } from "../language/index.js";
+import type { SettingsAccess } from "../storage/local/settings-store.js";
 
 const PROXY_COMMAND = "npx pi-for-excel-proxy";
 
@@ -35,66 +36,6 @@ interface ProxyStepOptions {
   stepNumber: number | null;
   proxyBaseUrl: string | undefined;
   onProxyReady?: () => void;
-}
-
-function selectElementText(element: HTMLElement): void {
-  const selection = window.getSelection();
-  if (!selection) {
-    return;
-  }
-
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
-function copyToClipboard(text: string, onCopied: () => void, fallbackElement: HTMLElement): void {
-  if (!navigator.clipboard?.writeText) {
-    selectElementText(fallbackElement);
-    return;
-  }
-
-  void navigator.clipboard.writeText(text).then(onCopied, () => selectElementText(fallbackElement));
-}
-
-function createCopyableCommand(command: string): HTMLDivElement {
-  const row = document.createElement("div");
-  row.className = "pi-search-setup__code";
-
-  const code = document.createElement("code");
-  code.textContent = command;
-
-  const copyBtn = document.createElement("button");
-  copyBtn.type = "button";
-  copyBtn.className = "pi-search-setup__copy";
-  copyBtn.title = t("bridge-setup.copyCommandTitle");
-  copyBtn.setAttribute("aria-label", "Copy command");
-  copyBtn.replaceChildren(lucide(Copy));
-
-  let resetTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  copyBtn.addEventListener("click", () => {
-    copyToClipboard(command, () => {
-      copyBtn.replaceChildren(lucide(Check));
-      copyBtn.title = t("bridge-setup.copiedTitle");
-      copyBtn.setAttribute("aria-label", "Copied");
-
-      if (resetTimeout !== null) {
-        clearTimeout(resetTimeout);
-      }
-
-      resetTimeout = setTimeout(() => {
-        copyBtn.replaceChildren(lucide(Copy));
-        copyBtn.title = t("bridge-setup.copyCommandTitle");
-        copyBtn.setAttribute("aria-label", "Copy command");
-        resetTimeout = null;
-      }, 1400);
-    }, code);
-  });
-
-  row.append(code, copyBtn);
-  return row;
 }
 
 function createProxyStep(options: ProxyStepOptions): HTMLDivElement {
@@ -170,7 +111,7 @@ function createProxyStep(options: ProxyStepOptions): HTMLDivElement {
 function createKeyStep(
   provider: WebSearchProvider,
   stepNumber: number | null,
-  settings: WebSearchConfigStore,
+  settings: SettingsAccess,
   proxyBaseUrl: string | undefined,
   onSaved: () => void,
 ): HTMLDivElement {
@@ -278,7 +219,7 @@ function createKeyStep(
 
 function buildCardContent(
   context: WebSearchSetupContext,
-  settings: WebSearchConfigStore,
+  settings: SettingsAccess,
   onDismiss: () => void,
 ): { title: string; body: DocumentFragment } {
   const body = document.createDocumentFragment();
@@ -419,6 +360,6 @@ export function mountSearchSetupCard(container: HTMLElement, details: WebSearchD
  * Returns true when the details indicate a web search failure that should
  * show the inline setup card.
  */
-export function shouldShowSearchSetupCard(details: DynamicValue): details is WebSearchDetails {
-  return isWebSearchDetails(details) && details.ok === false;
+export function shouldShowSearchSetupCard(details: ExcelToolDetails): details is WebSearchDetails {
+  return details.kind === "web_search" && details.ok === false;
 }

@@ -7,17 +7,20 @@
  * - Supports formulas (strings starting with "=")
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { WriteCellsDetails } from "./tool-details.js";
 import {
   excelRun, getRange, qualifiedAddress, parseCell,
-  colToLetter, computeRangeAddress, padValues,
+  colToLetter, computeRangeAddress, padValues, parseRangeRef,
 } from "../excel/helpers.js";
 import { buildWorkbookCellChangeSummary } from "../audit/cell-diff.js";
 import { getWorkbookChangeAuditLog } from "../audit/workbook-change-audit.js";
-import { dispatchWorkbookSnapshotCreated } from "../workbook/recovery-events.js";
-import { getWorkbookRecoveryLog } from "../workbook/recovery-log.js";
+import {
+  getWorkbookRecoveryLog,
+  type AppendWorkbookRecoverySnapshotArgs,
+  type WorkbookRecoverySnapshot,
+} from "../workbook/recovery-log.js";
 import { formatAsMarkdownTable, findErrors } from "../utils/format.js";
 import { getErrorMessage } from "../utils/errors.js";
 import {
@@ -64,26 +67,45 @@ type WriteCellsResult =
     sheetName: string;
     address: string;
     existingCount: number;
-    existingValues: DynamicValue[][];
+    existingValues: unknown[][];
   }
   | {
     blocked: false;
     sheetName: string;
     address: string;
-    beforeValues: DynamicValue[][];
-    beforeFormulas: DynamicValue[][];
-    readBackValues: DynamicValue[][];
-    readBackFormulas: DynamicValue[][];
+    beforeValues: unknown[][];
+    beforeFormulas: unknown[][];
+    readBackValues: unknown[][];
+    readBackFormulas: unknown[][];
   };
 
 type BlockedWriteCellsResult = Extract<WriteCellsResult, { blocked: true }>;
 type SuccessWriteCellsResult = Extract<WriteCellsResult, { blocked: false }>;
 
-const mutationFinalizeDependencies: MutationFinalizeDependencies = {
+interface WriteCellsToolDependencies {
+  appendAuditEntry: MutationFinalizeDependencies["appendAuditEntry"];
+  appendRecoverySnapshot: (
+    args: AppendWorkbookRecoverySnapshotArgs,
+  ) => Promise<WorkbookRecoverySnapshot | null>;
+}
+
+const defaultDependencies: WriteCellsToolDependencies = {
   appendAuditEntry: (entry) => getWorkbookChangeAuditLog().append(entry),
+  appendRecoverySnapshot: (args) => getWorkbookRecoveryLog().append(args),
 };
 
-export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetails> {
+export function createWriteCellsTool(
+  dependencies: Partial<WriteCellsToolDependencies> = {},
+): AgentTool<typeof schema, WriteCellsDetails> {
+  const resolvedDependencies: WriteCellsToolDependencies = {
+    appendAuditEntry: dependencies.appendAuditEntry ?? defaultDependencies.appendAuditEntry,
+    appendRecoverySnapshot:
+      dependencies.appendRecoverySnapshot ?? defaultDependencies.appendRecoverySnapshot,
+  };
+  const mutationFinalizeDependencies: MutationFinalizeDependencies = {
+    appendAuditEntry: resolvedDependencies.appendAuditEntry,
+  };
+
   return {
     name: "write_cells",
     label: "Write Cells",
@@ -108,10 +130,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
 
         const { padded, rows, cols } = padValues(params.values);
 
-        const bangIndex = params.start_cell.indexOf("!");
-        const startCellRef = bangIndex >= 0
-          ? params.start_cell.slice(bangIndex + 1)
-          : params.start_cell;
+        const startCellRef = parseRangeRef(params.start_cell).address;
 
         if (startCellRef.includes(":")) {
           return {
@@ -220,7 +239,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
           },
           recovery: {
             result: successResult,
-            appendRecoverySnapshot: () => getWorkbookRecoveryLog().append({
+            appendRecoverySnapshot: () => resolvedDependencies.appendRecoverySnapshot({
               toolName: "write_cells",
               toolCallId,
               address: successResult.details.address ?? qualifiedAddress(result.sheetName, result.address),
@@ -231,14 +250,6 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
             appendResultNote: appendMutationResultNote,
             unavailableReason: CHECKPOINT_SKIPPED_REASON,
             unavailableNote: CHECKPOINT_SKIPPED_NOTE,
-            dispatchSnapshotCreated: (checkpoint) => {
-              dispatchWorkbookSnapshotCreated({
-                snapshotId: checkpoint.id,
-                toolName: checkpoint.toolName,
-                address: checkpoint.address,
-                changedCount: checkpoint.changedCount,
-              });
-            },
           },
         });
 
@@ -253,7 +264,7 @@ export function createWriteCellsTool(): AgentTool<typeof schema, WriteCellsDetai
   };
 }
 
-function findInvalidFormulas(values: DynamicValue[][], startCell: string): InvalidFormula[] {
+function findInvalidFormulas(values: unknown[][], startCell: string): InvalidFormula[] {
   const start = parseCell(startCell);
   const invalid: InvalidFormula[] = [];
 
@@ -309,7 +320,7 @@ export function validateFormula(formula: string): string | null {
   return null;
 }
 
-export function countOccupiedCells(values: DynamicValue[][], formulas: DynamicValue[][]): number {
+export function countOccupiedCells(values: unknown[][], formulas: unknown[][]): number {
   let count = 0;
   for (let r = 0; r < values.length; r++) {
     const valueRow = values[r] ?? [];
@@ -328,7 +339,7 @@ const VERIFIED_VALUES_PREVIEW_ROWS = 8;
 const VERIFIED_VALUES_PREVIEW_COLS = 6;
 
 interface VerifiedValuesPreview {
-  values: DynamicValue[][];
+  values: unknown[][];
   totalRows: number;
   totalCols: number;
   shownRows: number;
@@ -338,14 +349,14 @@ interface VerifiedValuesPreview {
   truncated: boolean;
 }
 
-function buildVerifiedValuesPreview(values: DynamicValue[][]): VerifiedValuesPreview {
+function buildVerifiedValuesPreview(values: unknown[][]): VerifiedValuesPreview {
   const totalRows = values.length;
   const totalCols = values.reduce((max, row) => Math.max(max, row.length), 0);
 
   const shownRows = Math.min(totalRows, VERIFIED_VALUES_PREVIEW_ROWS);
   const shownCols = Math.min(totalCols, VERIFIED_VALUES_PREVIEW_COLS);
 
-  const previewValues: DynamicValue[][] = [];
+  const previewValues: unknown[][] = [];
   for (let r = 0; r < shownRows; r += 1) {
     previewValues.push((values[r] ?? []).slice(0, shownCols));
   }

@@ -9,6 +9,11 @@
  */
 
 import { uuidv7 } from "@earendil-works/pi-agent-core";
+import {
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  hasApi,
+} from "@earendil-works/pi-ai";
 import type {
   Api,
   AssistantMessageEventStream,
@@ -16,6 +21,7 @@ import type {
   Model,
   Models,
   StreamOptions,
+  TranscriptContext,
 } from "@earendil-works/pi-ai";
 
 import { isDebugEnabled } from "../debug/debug.js";
@@ -45,7 +51,7 @@ import {
 export type GetProxyUrl = () => Promise<string | undefined>;
 type OfficeStreamFn = (
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: StreamOptions,
 ) => Promise<AssistantMessageEventStream>;
 
@@ -111,8 +117,10 @@ function applyProxy(
   // ponytail: dev-mode Vite /api-proxy/ routes are same-origin on the taskpane
   // and already handle CORS + forwarding; wrapping them through the cors-proxy
   // makes node fetch a self-signed localhost cert (502). Let the browser hit Vite directly.
-  if (import.meta.env.DEV && model.baseUrl.includes("/api-proxy/"))
+  // import.meta.env only exists under Vite; node tests run without it.
+  if (import.meta.env?.DEV === true && model.baseUrl.includes("/api-proxy/")) {
     return model;
+  }
 
   const transportQuery = transport ? `pi_transport=${transport}&` : "";
   return {
@@ -122,7 +130,8 @@ function applyProxy(
 }
 
 function applyDevProxy(model: Model<Api>): Model<Api> {
-  if (!import.meta.env.DEV) return model;
+  // ponytail: import.meta.env only exists under Vite; node tests run without it
+  if (!import.meta.env?.DEV) return model;
   if (!model.baseUrl) return model;
   if (!/^https?:\/\//i.test(model.baseUrl)) return model;
   if (typeof window === "undefined" || !window.location?.origin) return model;
@@ -218,7 +227,7 @@ function normalizeGoogleOAuthModel(
  * capability gating. Continuations still receive a deterministic tool bundle
  * so the agent can complete multi-step tool loops in a single turn.
  */
-function isToolContinuation(messages: Context["messages"]): boolean {
+function isToolContinuation(messages: TranscriptContext["messages"]): boolean {
   if (messages.length === 0) return false;
   const last = messages[messages.length - 1];
   if (!last) return false;
@@ -345,8 +354,8 @@ function getSessionId(options: StreamOptions | undefined): string | undefined {
 }
 
 function isAuthStreamProxyPayloadShape(
-  value: DynamicValue,
-): value is DynamicObject {
+  value: unknown,
+): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -376,7 +385,7 @@ function normalizeDeepSeekPayload(payload: unknown): unknown {
     : payload;
 }
 
-function summarizePayloadShape(payload: DynamicValue): PayloadShapeSummary {
+function summarizePayloadShape(payload: unknown): PayloadShapeSummary {
   if (payload === null) {
     return {
       rootType: "null",
@@ -440,7 +449,7 @@ function setSessionContext(sessionId: string, context: Context): void {
   }
 }
 
-function upsertPayloadShape(call: number, payload: DynamicValue): void {
+function upsertPayloadShape(call: number, payload: unknown): void {
   let index = -1;
   for (let i = payloadSnapshots.length - 1; i >= 0; i -= 1) {
     const snapshot = payloadSnapshots[i];
@@ -683,6 +692,17 @@ async function applyGatewayHeaders(
   };
 }
 
+function normalizeOpenRouterModel(model: Model<Api>): Model<Api> {
+  if (model.provider !== "openrouter" || !hasApi(model, "anthropic-messages"))
+    return model;
+  if (!model.compat?.supportsMidConvoEffort) return model;
+  // OpenRouter rejects the configuration_update beta; ordinary adaptive effort works.
+  return {
+    ...model,
+    compat: { ...model.compat, supportsMidConvoEffort: false },
+  };
+}
+
 export function createOfficeStreamFn(
   getProxyUrl: GetProxyUrl,
   modelsRuntime: Models,
@@ -690,30 +710,20 @@ export function createOfficeStreamFn(
 ): OfficeStreamFn {
   return async (
     model: Model<Api>,
-    context: Context,
+    context: TranscriptContext,
     options?: StreamOptions,
   ) => {
     const continuation = isToolContinuation(context.messages);
+    const replayedContext: Context = {
+      systemPrompt: getCurrentSystemPrompt(context.messages),
+      messages: context.messages,
+      tools: getCurrentTools(context.messages),
+    };
 
-    // Always expose tools (via deterministic bundle selection), including
-    // continuation calls after tool results. This preserves full agent loops.
-    const toolSelection = selectToolBundle(context);
-
-    const effectiveContext = (() => {
-      if (toolSelection.tools === context.tools) {
-        return context;
-      }
-
-      if (toolSelection.tools !== undefined) {
-        return { ...context, tools: toolSelection.tools };
-      }
-
-      const { tools: _tools, ...contextWithoutTools } = context;
-      return contextWithoutTools;
-    })();
+    const toolSelection = selectToolBundle(replayedContext);
 
     const normalizedModel = applyDevProxy(
-      normalizeGoogleOAuthModel(modelsRuntime, model),
+      normalizeOpenRouterModel(normalizeGoogleOAuthModel(modelsRuntime, model)),
     );
 
     const optionsWithGatewayHeaders = await applyGatewayHeaders(
@@ -723,7 +733,7 @@ export function createOfficeStreamFn(
 
     const callRecord = recordCall(
       normalizedModel,
-      effectiveContext,
+      replayedContext,
       optionsWithGatewayHeaders,
       continuation,
       toolSelection.bundleId,
@@ -737,7 +747,16 @@ export function createOfficeStreamFn(
 
     const proxyUrl = await getProxyUrl();
     const needsCodexBridge = requiresCodexWebSocketBridge(normalizedModel);
+    const needsOpenRouterProxy =
+      normalizedModel.provider === "openrouter" &&
+      normalizedModel.api === "anthropic-messages";
     if (!proxyUrl) {
+      if (needsOpenRouterProxy) {
+        throw new Error(
+          "OpenRouter's native Anthropic transport requires the Pi for Excel proxy in this browser. " +
+            "Enable Proxy in Settings and run the latest pi-for-excel-proxy helper.",
+        );
+      }
       if (needsCodexBridge) {
         throw new Error(
           "GPT-5.6 Luna currently requires the latest Pi for Excel proxy for ChatGPT WebSocket transport. " +
@@ -746,12 +765,13 @@ export function createOfficeStreamFn(
       }
       return modelsRuntime.streamSimple(
         normalizedModel,
-        effectiveContext,
+        context,
         effectiveOptions,
       );
     }
 
     if (
+      !needsOpenRouterProxy &&
       !shouldProxyProvider(
         normalizedModel.provider,
         options?.apiKey,
@@ -760,7 +780,7 @@ export function createOfficeStreamFn(
     ) {
       return modelsRuntime.streamSimple(
         normalizedModel,
-        effectiveContext,
+        context,
         effectiveOptions,
       );
     }
@@ -793,7 +813,7 @@ export function createOfficeStreamFn(
       : effectiveOptions;
     return modelsRuntime.streamSimple(
       applyProxy(normalizedModel, validated, proxyTransport),
-      effectiveContext,
+      context,
       proxiedOptions,
     );
   };

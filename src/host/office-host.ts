@@ -1,9 +1,8 @@
-function isHostOfficeHostPayloadShape(value: DynamicValue): value is DynamicObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Office.js-backed host implementation. */
 
+import type { DocumentInstanceIdentity } from "./document-instance.js";
+import { createOfficeDocumentInstanceIdentity } from "./office-document-instance.js";
+import { createOfficeDocumentUrlReader } from "./office-document-url.js";
 import { settingsBackedSessionStorage } from "./session-storage.js";
 import { resolveOfficeThemeDark } from "./office-theme.js";
 import {
@@ -17,25 +16,7 @@ import type {
   SpreadsheetHostSessionStorage,
 } from "./types.js";
 
-function getOfficeDocumentUrl(): string | null {
-  try {
-    const office = Reflect.get(globalThis, "Office");
-    if (!isHostOfficeHostPayloadShape(office)) return null;
-
-    const ctx = office.context;
-    if (!isHostOfficeHostPayloadShape(ctx)) return null;
-
-    const doc = ctx.document;
-    if (!isHostOfficeHostPayloadShape(doc)) return null;
-
-    const url = doc.url;
-    return typeof url === "string" && url.trim().length > 0 ? url : null;
-  } catch {
-    return null;
-  }
-}
-
-function nativeValueToString(value: DynamicValue): string | null {
+function nativeValueToString(value: unknown): string | null {
   if (typeof value === "string" && value.trim().length > 0) {
     return value;
   }
@@ -43,13 +24,13 @@ function nativeValueToString(value: DynamicValue): string | null {
   return null;
 }
 
-function toError(error: DynamicValue): Error {
+function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error("Office.onReady failed.");
 }
 
 interface OfficeReadyInfoLike {
-  host?: DynamicValue;
-  platform?: DynamicValue;
+  host?: unknown;
+  platform?: unknown;
 }
 
 function fromOfficeReadyInfo(info: OfficeReadyInfoLike): SpreadsheetHostReadyInfo {
@@ -65,6 +46,8 @@ export class OfficeHost implements SpreadsheetHost {
   readonly kind = "office";
   readonly displayName = "Microsoft Excel";
   readonly sessionStorage: SpreadsheetHostSessionStorage = settingsBackedSessionStorage;
+  readonly documentInstance: DocumentInstanceIdentity = createOfficeDocumentInstanceIdentity();
+  private readonly documentUrl = createOfficeDocumentUrlReader();
 
   whenReady(): Promise<SpreadsheetHostReadyInfo> {
     if (typeof Office === "undefined") {
@@ -77,7 +60,7 @@ export class OfficeHost implements SpreadsheetHost {
           resolve(fromOfficeReadyInfo(info));
         });
 
-        void readyPromise.catch((error: DynamicValue) => {
+        void readyPromise.catch((error: unknown) => {
           reject(error instanceof Error ? error : new Error("Office.onReady failed."));
         });
       } catch (error) {
@@ -98,7 +81,7 @@ export class OfficeHost implements SpreadsheetHost {
         callback(fromOfficeReadyInfo(info));
       });
 
-      void readyPromise.catch((error: DynamicValue) => {
+      void readyPromise.catch((error: unknown) => {
         if (!disposed) {
           console.warn("[pi] Office.onReady hook failed:", error);
         }
@@ -112,8 +95,8 @@ export class OfficeHost implements SpreadsheetHost {
     };
   }
 
-  getWorkbookContext(): Promise<WorkbookContext> {
-    return getWorkbookContextFromDocumentUrl(getOfficeDocumentUrl());
+  async getWorkbookContext(): Promise<WorkbookContext> {
+    return getWorkbookContextFromDocumentUrl(await this.documentUrl.read());
   }
 
   resolveThemeDark(): boolean | null {

@@ -4,13 +4,12 @@
  * This avoids constructing large 2D formula arrays. References adjust automatically.
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { FillFormulaDetails } from "./tool-details.js";
 import { excelRun, getRange, qualifiedAddress } from "../excel/helpers.js";
 import { buildWorkbookCellChangeSummary } from "../audit/cell-diff.js";
 import { getWorkbookChangeAuditLog } from "../audit/workbook-change-audit.js";
-import { dispatchWorkbookSnapshotCreated } from "../workbook/recovery-events.js";
 import { getWorkbookRecoveryLog } from "../workbook/recovery-log.js";
 import { countOccupiedCells, validateFormula } from "./write-cells.js";
 import { findErrors } from "../utils/format.js";
@@ -47,7 +46,7 @@ type FillFormulaResult =
     sheetName: string;
     address: string;
     existingCount: number;
-    existingValues: DynamicValue[][];
+    existingValues: unknown[][];
   }
   | {
     blocked: false;
@@ -55,10 +54,10 @@ type FillFormulaResult =
     address: string;
     rowCount: number;
     columnCount: number;
-    beforeValues: DynamicValue[][];
-    beforeFormulas: DynamicValue[][];
-    readBackValues: DynamicValue[][];
-    readBackFormulas: DynamicValue[][];
+    beforeValues: unknown[][];
+    beforeFormulas: unknown[][];
+    readBackValues: unknown[][];
+    readBackFormulas: unknown[][];
   };
 
 const mutationFinalizeDependencies: MutationFinalizeDependencies = {
@@ -177,8 +176,8 @@ export function createFillFormulaTool(): AgentTool<typeof schema, FillFormulaDet
         lines.push(`Filled formula across **${fullAddr}** (${result.rowCount}×${result.columnCount})`);
         lines.push(`**Formula pattern:** \`${params.formula}\``);
 
-        const topLeftRaw: DynamicValue = result.readBackFormulas?.[0]?.[0] ?? "";
-        const bottomRightRaw: DynamicValue = result.readBackFormulas?.[result.rowCount - 1]?.[result.columnCount - 1] ?? "";
+        const topLeftRaw: unknown = result.readBackFormulas?.[0]?.[0] ?? "";
+        const bottomRightRaw: unknown = result.readBackFormulas?.[result.rowCount - 1]?.[result.columnCount - 1] ?? "";
         const topLeft = typeof topLeftRaw === "string" ? topLeftRaw : JSON.stringify(topLeftRaw);
         const bottomRight = typeof bottomRightRaw === "string" ? bottomRightRaw : JSON.stringify(bottomRightRaw);
         if (topLeft && bottomRight && (result.rowCount > 1 || result.columnCount > 1)) {
@@ -247,14 +246,6 @@ export function createFillFormulaTool(): AgentTool<typeof schema, FillFormulaDet
             appendResultNote: appendMutationResultNote,
             unavailableReason: CHECKPOINT_SKIPPED_REASON,
             unavailableNote: CHECKPOINT_SKIPPED_NOTE,
-            dispatchSnapshotCreated: (checkpoint) => {
-              dispatchWorkbookSnapshotCreated({
-                snapshotId: checkpoint.id,
-                toolName: checkpoint.toolName,
-                address: checkpoint.address,
-                changedCount: checkpoint.changedCount,
-              });
-            },
           },
         });
 

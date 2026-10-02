@@ -1,4 +1,6 @@
-function isToolsMcpPayloadShape(value: DynamicValue): value is DynamicObject {
+function isToolsMcpPayloadShape(
+  value: unknown,
+): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -7,24 +9,23 @@ function isToolsMcpPayloadShape(value: DynamicValue): value is DynamicObject {
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "typebox";
 
 import { APP_NAME, APP_VERSION } from "../app/metadata.js";
 import { integrationsCommandHint } from "../integrations/naming.js";
 import { getErrorMessage } from "../utils/errors.js";
 import { getHttpErrorReason, runWithTimeoutAbort } from "../utils/network.js";
-import type { ProxyAwareSettingsStore } from "./external-fetch.js";
 import {
   buildProxyDownErrorMessage,
   getEnabledProxyBaseUrl,
   isLikelyProxyConnectionError,
   resolveOutboundRequestUrl,
 } from "./external-fetch.js";
-import {
-  loadMcpServers,
-  type McpServerConfig,
-  type McpConfigStore,
-} from "./mcp-config.js";
+import type {
+  SettingsReader,
+  SettingsWriter,
+} from "../storage/local/settings-store.js";
+import { loadMcpServers, type McpServerConfig } from "./mcp-config.js";
 import {
   MCP_HTTP_ACCEPT,
   MCP_SESSION_HEADER,
@@ -77,7 +78,7 @@ interface McpToolDescriptor {
   serverUrl: string;
   name: string;
   description?: string;
-  inputSchema?: DynamicValue;
+  inputSchema?: unknown;
 }
 
 interface ServerToolList {
@@ -88,7 +89,7 @@ interface ServerToolList {
 }
 
 interface RpcCallResult {
-  result: DynamicValue;
+  result: unknown;
   proxied: boolean;
   proxyBaseUrl?: string;
   sessionId?: string | undefined;
@@ -118,7 +119,7 @@ export interface McpToolDependencies {
   callJsonRpc?: (args: {
     server: McpServerConfig;
     method: string;
-    params?: DynamicValue;
+    params?: unknown;
     signal: AbortSignal | undefined;
     proxyBaseUrl?: string;
     expectResponse?: boolean;
@@ -126,7 +127,7 @@ export interface McpToolDependencies {
   }) => Promise<RpcCallResult | null>;
 }
 
-function normalizeOptionalString(value: DynamicValue): string | undefined {
+function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
@@ -165,7 +166,7 @@ function createMcpGatewayDetails(args: {
   return details;
 }
 
-function parseParams(raw: DynamicValue): Params {
+function parseParams(raw: unknown): Params {
   if (!isToolsMcpPayloadShape(raw)) {
     return {};
   }
@@ -221,7 +222,7 @@ function matchesServerToken(tool: McpToolDescriptor, token: string): boolean {
 
 function parseToolListResult(
   server: McpServerConfig,
-  value: DynamicValue,
+  value: unknown,
 ): McpToolDescriptor[] {
   if (!isToolsMcpPayloadShape(value)) return [];
   if (!isToolsMcpPayloadShape(value.result)) return [];
@@ -257,7 +258,7 @@ function parseToolListResult(
   return out;
 }
 
-function parseJsonRpcError(value: DynamicValue): string | null {
+function parseJsonRpcError(value: unknown): string | null {
   if (!isToolsMcpPayloadShape(value)) return null;
 
   if (isToolsMcpPayloadShape(value.error)) {
@@ -269,7 +270,7 @@ function parseJsonRpcError(value: DynamicValue): string | null {
   return text ?? null;
 }
 
-function extractTextContentBlocks(value: DynamicValue): string[] {
+function extractTextContentBlocks(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
 
   const lines: string[] = [];
@@ -284,7 +285,7 @@ function extractTextContentBlocks(value: DynamicValue): string[] {
   return lines;
 }
 
-function formatJson(value: DynamicValue): string {
+function formatJson(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -292,7 +293,7 @@ function formatJson(value: DynamicValue): string {
   }
 }
 
-function parseCallArgs(rawArgs: string | undefined): DynamicValue {
+function parseCallArgs(rawArgs: string | undefined): unknown {
   if (!rawArgs) return {};
 
   try {
@@ -364,8 +365,8 @@ function matchesSearch(tool: McpToolDescriptor, query: string): boolean {
 async function defaultGetRuntimeConfig(): Promise<McpRuntimeConfig> {
   const storageModule = await import("../storage/local/app-storage.js");
   const settingsStore = storageModule.getAppStorage().settings;
-  const configStore: McpConfigStore = settingsStore;
-  const proxyStore: ProxyAwareSettingsStore = settingsStore;
+  const configStore: SettingsWriter = settingsStore;
+  const proxyStore: SettingsReader = settingsStore;
 
   const [servers, proxyBaseUrl] = await Promise.all([
     loadMcpServers(configStore),
@@ -381,7 +382,7 @@ async function defaultGetRuntimeConfig(): Promise<McpRuntimeConfig> {
 async function defaultCallJsonRpc(args: {
   server: McpServerConfig;
   method: string;
-  params?: DynamicValue;
+  params?: unknown;
   signal: AbortSignal | undefined;
   proxyBaseUrl?: string;
   expectResponse?: boolean;
@@ -415,7 +416,7 @@ async function defaultCallJsonRpc(args: {
     headers[MCP_SESSION_HEADER] = sessionId;
   }
 
-  const requestBody: DynamicObject = {
+  const requestBody: Record<string, unknown> = {
     jsonrpc: "2.0",
     method,
   };
@@ -455,11 +456,11 @@ async function defaultCallJsonRpc(args: {
       }
 
       const body = await response.text();
-      const payload: DynamicValue = parseMcpHttpResponseBody({
+      const payload: unknown = parseMcpHttpResponseBody({
         text: body,
         contentType: response.headers.get("Content-Type"),
         requestId: requestId ?? "",
-      }) as DynamicValue;
+      });
 
       const rpcError = parseJsonRpcError(payload);
       if (rpcError) {
@@ -590,7 +591,7 @@ export function createMcpTool(
     parameters: schema,
     execute: async (
       _toolCallId: string,
-      rawParams: DynamicValue,
+      rawParams: unknown,
       signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<McpGatewayDetails>> => {
       const params = parseParams(rawParams);

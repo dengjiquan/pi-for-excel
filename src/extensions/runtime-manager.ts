@@ -9,6 +9,7 @@
  */
 
 import type { Agent, AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import { t } from "../language/index.js";
 
 import type { ConnectionManager } from "../connections/manager.js";
@@ -46,7 +47,6 @@ import {
 import {
   loadStoredExtensions,
   saveStoredExtensions,
-  type ExtensionSettingsStore,
   type StoredExtensionEntry,
   type StoredExtensionSource,
 } from "./store.js";
@@ -72,13 +72,25 @@ import {
   resolveModelForCompletion,
 } from "./runtime-manager-helpers.js";
 import { buildRuntimeManagerActivationBridge } from "./runtime-manager-activation.js";
-import { getToolRequiredConnectionIds } from "../tools/connection-requirements.js";
+import {
+  qualifyExtensionConnectionId,
+  qualifyExtensionProviderId,
+} from "./owner-identifiers.js";
+import {
+  getToolRequiredConnectionIds,
+  type ConnectionAwareAgentTool,
+} from "../tools/connection-requirements.js";
 import type {
   BrowserModelRuntime,
   BrowserProviderRegistration,
 } from "../models/browser-model-runtime.js";
+import type { SettingsWriter } from "../storage/local/settings-store.js";
 
 type AnyAgentTool = AgentTool;
+
+interface ExtensionToolExecutionBoundary {
+  execute?: unknown;
+}
 
 type ManagerListener = () => void;
 
@@ -102,33 +114,15 @@ function withExtensionToolDescription(tool: AnyAgentTool, entry: StoredExtension
 }
 
 function assertToolExecuteFunction(tool: AnyAgentTool, entry: StoredExtensionEntry): void {
-  if (typeof Reflect.get(tool, "execute") === "function") {
+  // Extension JavaScript can bypass AgentTool's compile-time contract; validate at registration.
+  const boundary = tool as AnyAgentTool & ExtensionToolExecutionBoundary;
+  if (typeof boundary.execute === "function") {
     return;
   }
 
   throw new Error(
     `Tool "${tool.name}" from extension "${entry.name}" is invalid: execute must be a function.`,
   );
-}
-
-function qualifyExtensionProviderId(entryId: string, providerId: string): string {
-  const normalized = providerId.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9._-]*$/u.test(normalized)) {
-    throw new Error("Provider id may contain only letters, numbers, dots, underscores and hyphens.");
-  }
-
-  const ownerPrefix = `${entryId.toLowerCase()}.`;
-  return normalized.startsWith(ownerPrefix) ? normalized : `${ownerPrefix}${normalized}`;
-}
-
-function qualifyExtensionConnectionId(entryId: string, connectionId: string): string {
-  const normalized = connectionId.trim().toLowerCase();
-  if (normalized.length === 0) {
-    throw new Error("Connection id cannot be empty.");
-  }
-
-  const ownerPrefix = `${entryId.toLowerCase()}.`;
-  return normalized.startsWith(ownerPrefix) ? normalized : `${ownerPrefix}${normalized}`;
 }
 
 function endpointHostname(value: string, label: string): string {
@@ -178,7 +172,7 @@ export interface ExtensionRuntimeStatus {
 }
 
 export interface ExtensionRuntimeManagerOptions {
-  settings: ExtensionSettingsStore;
+  settings: SettingsWriter;
   connectionManager: ConnectionManager;
   modelRuntime: BrowserModelRuntime;
   getActiveAgent: () => Agent | null;
@@ -192,7 +186,7 @@ export interface ExtensionRuntimeManagerOptions {
 }
 
 export class ExtensionRuntimeManager {
-  private readonly settings: ExtensionSettingsStore;
+  private readonly settings: SettingsWriter;
   private readonly connectionManager: ConnectionManager;
   private readonly modelRuntime: BrowserModelRuntime;
   private readonly getActiveAgent: () => Agent | null;
@@ -474,10 +468,10 @@ export class ExtensionRuntimeManager {
 
     const stream = await agent.streamFunction(
       model,
-      {
+      normalizeContext({
         ...(request.systemPrompt !== undefined ? { systemPrompt: request.systemPrompt } : {}),
         messages: parseLlmMessages(request.messages, model),
-      },
+      }),
       {
         apiKey,
         sessionId: createExtensionLlmCompletionSessionId({
@@ -722,7 +716,7 @@ export class ExtensionRuntimeManager {
     };
 
     const refreshToolsForDynamicChange = (): void => {
-      void this.refreshRuntimeTools().catch((error: DynamicValue) => {
+      void this.refreshRuntimeTools().catch((error: unknown) => {
         console.warn(`[pi] Failed to refresh tools after extension tool update: ${getRuntimeManagerErrorMessage(error)}`);
       });
     };
@@ -768,7 +762,7 @@ export class ExtensionRuntimeManager {
         assertToolConnectionOwnership(tool.name, requiredConnectionIds);
       }
 
-      const wrappedTool: AnyAgentTool = {
+      const wrappedTool: ConnectionAwareAgentTool = {
         ...tool,
         description: withExtensionToolDescription(tool, entry),
         execute: async (toolCallId, params, signal, onUpdate) => {
@@ -781,11 +775,10 @@ export class ExtensionRuntimeManager {
             );
           }
         },
+        ...(requiredConnectionIds.length > 0
+          ? { requiresConnection: requiredConnectionIds }
+          : {}),
       };
-
-      if (requiredConnectionIds.length > 0) {
-        Reflect.set(wrappedTool, "requiresConnection", requiredConnectionIds);
-      }
 
       this.toolOwners.set(wrappedTool.name, entry.id);
       this.extensionTools.set(wrappedTool.name, wrappedTool);
@@ -828,7 +821,7 @@ export class ExtensionRuntimeManager {
     };
 
     const refreshModelsForDynamicChange = (): void => {
-      void this.refreshRuntimeModels().catch((error: DynamicValue) => {
+      void this.refreshRuntimeModels().catch((error: unknown) => {
         console.warn(`[pi] Failed to refresh models after extension provider update: ${getRuntimeManagerErrorMessage(error)}`);
       });
     };
@@ -894,7 +887,7 @@ export class ExtensionRuntimeManager {
         .then(() => {
           if (!activationPhase) refreshModelsForDynamicChange();
         })
-        .catch((error: DynamicValue) => {
+        .catch((error: unknown) => {
           console.warn(`[pi] Failed to unregister extension model provider: ${getRuntimeManagerErrorMessage(error)}`);
         });
     };

@@ -1,7 +1,7 @@
 import type { WorkbookTabLayout } from "./tab-layout.js";
 
 export interface TabLayoutPersistenceController {
-  enable(): void;
+  enable(initialLayoutToSkip?: WorkbookTabLayout): void;
   persist(layout: WorkbookTabLayout): void;
   flush(): Promise<void>;
 }
@@ -9,7 +9,7 @@ export interface TabLayoutPersistenceController {
 export interface CreateTabLayoutPersistenceOptions {
   resolveWorkbookId: () => Promise<string | null>;
   saveLayout: (workbookId: string | null, layout: WorkbookTabLayout) => Promise<void>;
-  warn?: (message: string, error: DynamicValue) => void;
+  warn?: (message: string, error: unknown) => void;
 }
 
 function tabLayoutSignature(layout: WorkbookTabLayout): string {
@@ -20,22 +20,28 @@ export function createTabLayoutPersistence(
   options: CreateTabLayoutPersistenceOptions,
 ): TabLayoutPersistenceController {
   let enabled = false;
+  let initialLayoutSignatureToSkip: string | null = null;
   let lastPersistedSignature: string | null = null;
   let persistChain: Promise<void> = Promise.resolve();
 
-  const warn = options.warn ?? ((message: string, error: DynamicValue) => {
+  const warn = options.warn ?? ((message: string, error: unknown) => {
     console.warn(message, error);
   });
 
   return {
-    enable(): void {
+    enable(initialLayoutToSkip?: WorkbookTabLayout): void {
       enabled = true;
+      initialLayoutSignatureToSkip = initialLayoutToSkip
+        ? tabLayoutSignature(initialLayoutToSkip)
+        : null;
     },
 
     persist(layout: WorkbookTabLayout): void {
       if (!enabled) return;
 
       const layoutSignature = tabLayoutSignature(layout);
+      if (layoutSignature === initialLayoutSignatureToSkip) return;
+      initialLayoutSignatureToSkip = null;
 
       persistChain = persistChain
         .then(
@@ -51,7 +57,7 @@ export function createTabLayoutPersistence(
           },
           () => undefined,
         )
-        .catch((error: DynamicValue) => {
+        .catch((error: unknown) => {
           warn("[pi] Failed to persist tab layout:", error);
         });
     },

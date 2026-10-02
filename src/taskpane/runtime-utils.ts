@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 
-function isTaskpaneRuntimeUtilsPayloadShape(value: DynamicValue): value is DynamicObject {
+function isTaskpaneRuntimeUtilsPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -19,7 +19,7 @@ function hashString(value: string): string {
   return hash.toString(16).padStart(8, "0");
 }
 
-function serializeToolParameters(parameters: DynamicValue): string {
+function serializeToolParameters(parameters: unknown): string {
   try {
     const serialized = JSON.stringify(parameters);
     return serialized ?? "null";
@@ -69,7 +69,7 @@ export function shouldApplyRuntimeToolUpdate(args: {
   return args.previousExtensionToolRevision !== args.nextExtensionToolRevision;
 }
 
-export function isRuntimeAgentTool(value: DynamicValue): value is AgentTool {
+export function isRuntimeAgentTool(value: unknown): value is AgentTool {
   if (!isTaskpaneRuntimeUtilsPayloadShape(value)) return false;
 
   return typeof value.name === "string"
@@ -79,7 +79,7 @@ export function isRuntimeAgentTool(value: DynamicValue): value is AgentTool {
     && typeof value.execute === "function";
 }
 
-export function normalizeRuntimeTools(candidates: readonly DynamicValue[]): AgentTool[] {
+export function normalizeRuntimeTools(candidates: readonly unknown[]): AgentTool[] {
   const seen = new Set<string>();
   const out: AgentTool[] = [];
 
@@ -139,6 +139,33 @@ export function createAsyncCoalescer(task: () => Promise<void>): () => Promise<v
       inFlight = null;
     }
   };
+}
+
+export async function awaitCredentialRestoreForStartup(
+  task: Promise<void>,
+  timeoutMs: number,
+  onLateResolve: () => void | Promise<void>,
+): Promise<void> {
+  let settled = false;
+  void task.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+
+  try {
+    await awaitWithTimeout("Credential restore", timeoutMs, task);
+  } catch (error) {
+    if (!settled) {
+      void task.then(onLateResolve).catch((lateError: unknown) => {
+        console.warn("[auth] Credential restore failed after timeout:", lateError);
+      });
+    }
+    throw error;
+  }
 }
 
 export async function awaitWithTimeout<T>(

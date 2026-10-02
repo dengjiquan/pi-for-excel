@@ -1,6 +1,10 @@
 /** Shared helpers and types for structure-state capture/apply. */
 
+import { Value } from "typebox/value";
+
+import { addressMatchesRangeShape } from "./address.js";
 import { gridStats } from "./grid.js";
+import { RecoverySheetVisibilitySchema } from "./schemas.js";
 import type {
   RecoveryModifyStructureState,
   RecoverySheetVisibility,
@@ -8,7 +12,7 @@ import type {
 } from "./types.js";
 
 export interface SyncContext {
-  sync(): Promise<DynamicValue>;
+  sync(): Promise<unknown>;
 }
 
 export interface LoadableNullObject {
@@ -20,8 +24,8 @@ export interface UsedRangeSnapshot extends LoadableNullObject {
   address: string;
   rowCount: number;
   columnCount: number;
-  values: DynamicValue[][];
-  formulas: DynamicValue[][];
+  values: unknown[][];
+  formulas: unknown[][];
 }
 
 export interface UsedRangeSource {
@@ -53,8 +57,8 @@ export type StructureValueDataCaptureResult =
     cellCount: number;
   };
 
-export function isRecoverySheetVisibility(value: DynamicValue): value is RecoverySheetVisibility {
-  return value === "Visible" || value === "Hidden" || value === "VeryHidden";
+export function isRecoverySheetVisibility(value: unknown): value is RecoverySheetVisibility {
+  return Value.Check(RecoverySheetVisibilitySchema, value);
 }
 
 export function normalizePositiveInteger(value: number): number | null {
@@ -96,7 +100,9 @@ export function isStructureValueRangeStateShapeValid(dataRange: RecoveryStructur
   }
 
   const stats = gridStats(dataRange.values, dataRange.formulas);
-  return stats.rows === dataRange.rowCount && stats.cols === dataRange.columnCount;
+  return stats.rows === dataRange.rowCount &&
+    stats.cols === dataRange.columnCount &&
+    addressMatchesRangeShape(dataRange.address, dataRange.rowCount, dataRange.columnCount);
 }
 
 export function estimateModifyStructureCellCount(state: RecoveryModifyStructureState): number {

@@ -1,5 +1,4 @@
 import { APP_NAME, APP_VERSION } from "../../app/metadata.js";
-import { type IntegrationSettingsStore } from "../../integrations/store.js";
 import {
   getEnabledProxyBaseUrl,
   resolveOutboundRequestUrl,
@@ -14,16 +13,18 @@ import {
   getHttpErrorReason,
   runWithTimeoutAbort,
 } from "../../utils/network.js";
+import type { SettingsWriter } from "../../storage/local/settings-store.js";
+
 function isExtensionsHubMcpProbePayloadShape(
-  value: DynamicValue,
-): value is DynamicObject {
+  value: unknown,
+): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const MCP_PROBE_TIMEOUT_MS = 8_000;
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 
-function parseToolCountFromListResponse(value: DynamicValue): number {
+function parseToolCountFromListResponse(value: unknown): number {
   if (!isExtensionsHubMcpProbePayloadShape(value)) return 0;
   if (!isExtensionsHubMcpProbePayloadShape(value.result)) return 0;
   const tools = value.result.tools;
@@ -33,12 +34,12 @@ function parseToolCountFromListResponse(value: DynamicValue): number {
 async function postJsonRpc(args: {
   server: McpServerConfig;
   method: string;
-  params?: DynamicValue;
-  settings: IntegrationSettingsStore;
+  params?: unknown;
+  settings: SettingsWriter;
   expectResponse?: boolean;
   sessionId?: string | undefined;
 }): Promise<{
-  response: DynamicValue;
+  response: unknown;
   proxied: boolean;
   proxyBaseUrl?: string;
   sessionId?: string | undefined;
@@ -58,7 +59,7 @@ async function postJsonRpc(args: {
     ...(proxyBaseUrl !== undefined ? { proxyBaseUrl } : {}),
   });
 
-  const body: DynamicObject = {
+  const body: Record<string, unknown> = {
     jsonrpc: "2.0",
     method,
   };
@@ -113,11 +114,11 @@ async function postJsonRpc(args: {
       }
 
       const text = await response.text();
-      const payload: DynamicValue = parseMcpHttpResponseBody({
+      const payload: unknown = parseMcpHttpResponseBody({
         text,
         contentType: response.headers.get("Content-Type"),
         requestId: requestId ?? "",
-      }) as DynamicValue;
+      });
 
       return {
         response: payload,
@@ -133,7 +134,7 @@ async function postJsonRpc(args: {
 
 export async function probeMcpServer(
   server: McpServerConfig,
-  settings: IntegrationSettingsStore,
+  settings: SettingsWriter,
 ): Promise<{ toolCount: number; proxied: boolean; proxyBaseUrl?: string }> {
   const initializeResult = await postJsonRpc({
     server,

@@ -1,4 +1,4 @@
-function isTaskpaneTabLayoutPayloadShape(value: DynamicValue): value is DynamicObject {
+function isTaskpaneTabLayoutPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -20,13 +20,13 @@ export interface WorkbookTabLayout {
   activeSessionId: string | null;
 }
 
-function normalizeSessionId(value: DynamicValue): string | null {
+function normalizeSessionId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function isSessionIdList(value: DynamicValue): value is DynamicValue[] {
+function isSessionIdList(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
@@ -58,7 +58,7 @@ export function normalizeWorkbookTabLayout(layout: WorkbookTabLayout): WorkbookT
   };
 }
 
-export function parseWorkbookTabLayout(value: DynamicValue): WorkbookTabLayout | null {
+export function parseWorkbookTabLayout(value: unknown): WorkbookTabLayout | null {
   if (!isTaskpaneTabLayoutPayloadShape(value)) return null;
 
   const rawSessionIds = value.sessionIds;
@@ -81,12 +81,8 @@ export async function loadWorkbookTabLayout(
   settings: SettingsStore,
   workbookId: string | null,
 ): Promise<WorkbookTabLayout | null> {
-  try {
-    const stored = await settings.get(workbookTabLayoutKey(workbookId));
-    return parseWorkbookTabLayout(stored);
-  } catch {
-    return null;
-  }
+  const stored = await settings.get(workbookTabLayoutKey(workbookId));
+  return parseWorkbookTabLayout(stored);
 }
 
 export async function saveWorkbookTabLayout(

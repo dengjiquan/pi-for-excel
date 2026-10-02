@@ -2,32 +2,38 @@
  * Workbook cell change diff helpers.
  */
 
+import { Type, type Static } from "typebox";
+
 import { cellAddress, parseCell, qualifiedAddress } from "../excel/helpers.js";
 
 const DEFAULT_SAMPLE_LIMIT = 12;
 const DEFAULT_PREVIEW_CHARS = 80;
 
-export interface WorkbookCellChange {
-  address: string;
-  beforeValue: string;
-  afterValue: string;
-  beforeFormula?: string;
-  afterFormula?: string;
-}
+export const workbookCellChangeSchema = Type.Object({
+  address: Type.String(),
+  beforeValue: Type.String(),
+  afterValue: Type.String(),
+  beforeFormula: Type.Optional(Type.String()),
+  afterFormula: Type.Optional(Type.String()),
+});
 
-export interface WorkbookCellChangeSummary {
-  changedCount: number;
-  truncated: boolean;
-  sample: WorkbookCellChange[];
-}
+export type WorkbookCellChange = Static<typeof workbookCellChangeSchema>;
+
+export const workbookCellChangeSummarySchema = Type.Object({
+  changedCount: Type.Number(),
+  truncated: Type.Boolean(),
+  sample: Type.Array(workbookCellChangeSchema),
+});
+
+export type WorkbookCellChangeSummary = Static<typeof workbookCellChangeSummarySchema>;
 
 export interface BuildWorkbookCellChangeSummaryArgs {
   sheetName: string;
   startCell: string;
-  beforeValues: DynamicValue[][];
-  beforeFormulas: DynamicValue[][];
-  afterValues: DynamicValue[][];
-  afterFormulas: DynamicValue[][];
+  beforeValues: unknown[][];
+  beforeFormulas: unknown[][];
+  afterValues: unknown[][];
+  afterFormulas: unknown[][];
   sampleLimit?: number;
   previewChars?: number;
 }
@@ -38,7 +44,7 @@ function clampPositiveInteger(value: number | undefined, fallback: number): numb
   return rounded > 0 ? rounded : fallback;
 }
 
-function normalizeFormula(raw: DynamicValue): string | undefined {
+function normalizeFormula(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
 
   const trimmed = raw.trim();
@@ -46,7 +52,7 @@ function normalizeFormula(raw: DynamicValue): string | undefined {
   return trimmed;
 }
 
-function serializeComparable(raw: DynamicValue): string {
+function serializeComparable(raw: unknown): string {
   if (raw === null || raw === undefined || raw === "") return "";
 
   if (typeof raw === "string") return raw;
@@ -63,7 +69,7 @@ function serializeComparable(raw: DynamicValue): string {
   }
 }
 
-function toPreview(raw: DynamicValue, maxChars: number): string {
+function toPreview(raw: unknown, maxChars: number): string {
   const text = serializeComparable(raw);
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars - 1)}…`;
@@ -74,13 +80,13 @@ function cellAtOffset(startCell: string, rowOffset: number, colOffset: number): 
   return cellAddress(start.col + colOffset, start.row + rowOffset);
 }
 
-function valueAt(grid: DynamicValue[][], row: number, col: number): DynamicValue {
+function valueAt(grid: unknown[][], row: number, col: number): unknown {
   const rowValues = grid[row];
   if (!Array.isArray(rowValues)) return undefined;
   return rowValues[col];
 }
 
-function rowWidth(grid: DynamicValue[][], row: number): number {
+function rowWidth(grid: unknown[][], row: number): number {
   const rowValues = grid[row];
   return Array.isArray(rowValues) ? rowValues.length : 0;
 }

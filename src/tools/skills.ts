@@ -2,7 +2,7 @@
  * skills — list/read bundled Agent Skills (SKILL.md), with optional external discovery.
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
 import { filterAgentSkillsByEnabledState } from "../skills/activation-store.js";
@@ -75,17 +75,12 @@ async function defaultLoadDisabledSkillNames(): Promise<Set<string>> {
     return new Set();
   }
 
-  try {
-    const [{ getAppStorage }, { loadDisabledSkillNamesFromSettings }] = await Promise.all([
-      import("../storage/local/app-storage.js"),
-      import("../skills/activation-store.js"),
-    ]);
+  const [{ getAppStorage }, { loadDisabledSkillNamesFromSettings }] = await Promise.all([
+    import("../storage/local/app-storage.js"),
+    import("../skills/activation-store.js"),
+  ]);
 
-    return loadDisabledSkillNamesFromSettings(getAppStorage().settings);
-  } catch (error) {
-    console.warn("[skills] Failed to load skill activation state for tool:", error);
-    return new Set();
-  }
+  return loadDisabledSkillNamesFromSettings(getAppStorage().settings);
 }
 
 async function defaultInstallExternalSkill(args: {

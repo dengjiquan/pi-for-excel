@@ -1,4 +1,4 @@
-function isAuditWorkbookChangeAuditPayloadShape(value: DynamicValue): value is DynamicObject {
+function isAuditWorkbookChangeAuditPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -13,6 +13,7 @@ import {
   type ExecutionMode,
 } from "../execution/mode.js";
 import type { WorkbookCellChange } from "./cell-diff.js";
+import type { SettingsAccess } from "../storage/local/settings-store.js";
 
 const AUDIT_SETTING_KEY = "workbook.change-audit.v1";
 const MAX_AUDIT_ENTRIES = 500;
@@ -58,14 +59,9 @@ export interface AppendWorkbookChangeAuditEntryArgs {
   executionMode?: ExecutionMode;
 }
 
-interface SettingsStoreLike {
-  get<T>(key: string): Promise<T | null>;
-  set(key: string, value: DynamicValue): Promise<void>;
-  delete(key: string): Promise<void>;
-}
-
 interface WorkbookChangeAuditLogDependencies {
-  getSettingsStore: () => Promise<SettingsStoreLike | null>;
+  settings: SettingsAccess | null;
+  getSettingsStore: () => Promise<SettingsAccess | null>;
   getWorkbookContext: () => Promise<WorkbookContext>;
   now: () => number;
   createId: () => string;
@@ -93,28 +89,16 @@ function defaultCreateId(): string {
   return `change_${Date.now().toString(36)}_${randomChunk}`;
 }
 
-function isSettingsStoreLike(value: DynamicValue): value is SettingsStoreLike {
-  if (!isAuditWorkbookChangeAuditPayloadShape(value)) return false;
-
-  return (
-    typeof value.get === "function" &&
-    typeof value.set === "function" &&
-    typeof value.delete === "function"
-  );
-}
-
-async function defaultGetSettingsStore(): Promise<SettingsStoreLike | null> {
+async function defaultGetSettingsStore(): Promise<SettingsAccess | null> {
   try {
     const storageModule = await import("../storage/local/app-storage.js");
-    const appStorage = storageModule.getAppStorage();
-    const settings = isAuditWorkbookChangeAuditPayloadShape(appStorage) ? appStorage.settings : null;
-    return isSettingsStoreLike(settings) ? settings : null;
+    return storageModule.getAppStorage().settings;
   } catch {
     return null;
   }
 }
 
-function isWorkbookAuditToolName(value: DynamicValue): value is WorkbookAuditToolName {
+function isWorkbookAuditToolName(value: unknown): value is WorkbookAuditToolName {
   return (
     value === "write_cells" ||
     value === "fill_formula" ||
@@ -130,7 +114,7 @@ function isWorkbookAuditToolName(value: DynamicValue): value is WorkbookAuditToo
   );
 }
 
-function isWorkbookCellChange(value: DynamicValue): value is WorkbookCellChange {
+function isWorkbookCellChange(value: unknown): value is WorkbookCellChange {
   if (!isAuditWorkbookChangeAuditPayloadShape(value)) return false;
 
   const beforeFormula = value.beforeFormula;
@@ -145,7 +129,7 @@ function isWorkbookCellChange(value: DynamicValue): value is WorkbookCellChange 
   );
 }
 
-function parseAuditEntry(value: DynamicValue): WorkbookChangeAuditEntry | null {
+function parseAuditEntry(value: unknown): WorkbookChangeAuditEntry | null {
   if (!isAuditWorkbookChangeAuditPayloadShape(value)) return null;
 
   if (!isWorkbookAuditToolName(value.toolName)) return null;
@@ -179,7 +163,7 @@ function parseAuditEntry(value: DynamicValue): WorkbookChangeAuditEntry | null {
   return entry;
 }
 
-function parsePersistedEntries(payload: DynamicValue): WorkbookChangeAuditEntry[] {
+function parsePersistedEntries(payload: unknown): WorkbookChangeAuditEntry[] {
   if (!isAuditWorkbookChangeAuditPayloadShape(payload)) return [];
 
   const entriesRaw = payload.entries;
@@ -210,10 +194,16 @@ export class WorkbookChangeAuditLog {
   private readonly dependencies: WorkbookChangeAuditLogDependencies;
   private loaded = false;
   private entries: WorkbookChangeAuditEntry[] = [];
+  private bufferedEntries: WorkbookChangeAuditEntry[] = [];
 
   constructor(dependencies: Partial<WorkbookChangeAuditLogDependencies> = {}) {
+    const getSettingsStore = dependencies.settings !== undefined
+      ? () => Promise.resolve(dependencies.settings ?? null)
+      : dependencies.getSettingsStore ?? defaultGetSettingsStore;
+
     this.dependencies = {
-      getSettingsStore: dependencies.getSettingsStore ?? defaultGetSettingsStore,
+      settings: dependencies.settings ?? null,
+      getSettingsStore,
       getWorkbookContext: dependencies.getWorkbookContext ?? getWorkbookContext,
       now: dependencies.now ?? defaultNow,
       createId: dependencies.createId ?? defaultCreateId,
@@ -222,17 +212,21 @@ export class WorkbookChangeAuditLog {
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
 
     const settings = await this.dependencies.getSettingsStore();
-    if (!settings) return;
-
-    try {
-      const payload = await settings.get<DynamicValue>(AUDIT_SETTING_KEY);
-      this.entries = parsePersistedEntries(payload);
-    } catch {
-      this.entries = [];
+    if (!settings) {
+      this.entries = this.bufferedEntries;
+      this.bufferedEntries = [];
+      this.loaded = true;
+      return;
     }
+
+    const payload = await settings.get(AUDIT_SETTING_KEY);
+    this.entries = [...this.bufferedEntries, ...parsePersistedEntries(payload)]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, MAX_AUDIT_ENTRIES);
+    this.bufferedEntries = [];
+    this.loaded = true;
   }
 
   private async persist(): Promise<void> {
@@ -252,8 +246,6 @@ export class WorkbookChangeAuditLog {
   }
 
   async append(args: AppendWorkbookChangeAuditEntryArgs): Promise<void> {
-    await this.ensureLoaded();
-
     let workbookId: string | undefined;
     let workbookLabel: string | undefined;
 
@@ -272,7 +264,7 @@ export class WorkbookChangeAuditLog {
       try {
         const settings = await this.dependencies.getSettingsStore();
         if (settings) {
-          const stored = await settings.get<DynamicValue>(EXECUTION_MODE_SETTING_KEY);
+          const stored = await settings.get(EXECUTION_MODE_SETTING_KEY);
           executionMode = normalizeExecutionMode(stored);
         }
       } catch {
@@ -296,6 +288,15 @@ export class WorkbookChangeAuditLog {
     if (args.summary !== undefined) entry.summary = args.summary;
     if (workbookId !== undefined) entry.workbookId = workbookId;
     if (workbookLabel !== undefined) entry.workbookLabel = workbookLabel;
+
+    if (!this.loaded) {
+      try {
+        await this.ensureLoaded();
+      } catch {
+        this.bufferedEntries = [entry, ...this.bufferedEntries].slice(0, MAX_AUDIT_ENTRIES);
+        return;
+      }
+    }
 
     this.entries = [entry, ...this.entries].slice(0, MAX_AUDIT_ENTRIES);
     await this.persist();
@@ -323,9 +324,11 @@ export class WorkbookChangeAuditLog {
 
 let singleton: WorkbookChangeAuditLog | null = null;
 
-export function getWorkbookChangeAuditLog(): WorkbookChangeAuditLog {
+export function getWorkbookChangeAuditLog(
+  defaultLog?: WorkbookChangeAuditLog,
+): WorkbookChangeAuditLog {
   if (!singleton) {
-    singleton = new WorkbookChangeAuditLog();
+    singleton = defaultLog ?? new WorkbookChangeAuditLog();
   }
 
   return singleton;

@@ -19,22 +19,24 @@ Deterministic checks enforce the sharpest rules:
 
 - No explicit `any` or `as any`.
 - No non-null assertions.
-- No direct `unknown` syntax except the sanctioned boundary marker in `src/types/dynamic-values.d.ts`.
-- No generic object/record guards (`isRecord`, `isObjectValue`, `isPlainObject`, etc.). These hide untyped values flowing too far inward.
+- `unknown` is the honest type for a raw external value and is allowed only at the seam: the line that decodes JSON, reads a host object, receives a bridge or sandbox message, or catches a thrown value. The next line parses it into a concrete domain type; `unknown` does not travel inward. (The former `DynamicValue`/`DynamicObject` aliases were `unknown` under another name and are gone.)
+- Do not add generic object/record guards (`isRecord`, `isPlainObject`, `is…PayloadShape`); an object check alone does not establish a domain contract. Parse the domain shape, ideally with a TypeBox schema and `Static<>` so the type and the check cannot drift.
+- Burn-down: `npm run check:unknown-burndown` runs the anti-slop `no-unknown-*` rules and fails if the count of `unknown` parameters/returns/aliases in `src` rises above the baseline in `scripts/check-unknown-burndown.mjs` (461 when the aliases were deleted on 2026-09-10; `rg -c '\\bunknown\\b' src` gave 1,071 mentions and 233 hand-written guards). Lower the baseline as you go. The per-area plan is in `docs/clean-base-followups.md`.
 - `@ts-ignore` and `@ts-nocheck` are banned. `@ts-expect-error` requires a real explanation.
-- ESLint disable comments must name specific rules and explain the local safety/interop invariant.
+- ESLint disable comments must name specific rules and explain the local safety/interop invariant. Do not add blanket safety comments.
 - Top-level exported APIs and public methods should expose clear contracts. Add return types when inference obscures the contract for future agents.
 
 Prefer:
 
 ```ts
-function parseToolPayload(raw: DynamicValue): ToolPayload {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error("tool payload must be an object");
+const toolPayloadSchema = Type.Object({ action: Type.String() });
+type ToolPayload = Static<typeof toolPayloadSchema>;
+
+function parseToolPayload(raw: unknown): ToolPayload {
+  if (!Value.Check(toolPayloadSchema, raw)) {
+    throw new Error("tool payload must be an object with a string action");
   }
-  const payload = raw as DynamicObject;
-  // refine concrete fields here
-  return { action: String(payload.action) };
+  return raw;
 }
 ```
 
@@ -42,7 +44,7 @@ Avoid:
 
 ```ts
 const payload = JSON.parse(text) as ToolPayload;
-if (isRecord(payload)) return payload;
+if (isObject(payload)) return payload; // object-ness is not a ToolPayload contract
 ```
 
 ## Boundaries and parsing
@@ -51,13 +53,13 @@ Boundary input includes JSON, `Response.json()`, Office.js/WPS host objects, bri
 
 Rules:
 
-- Decoded JSON/fetch payloads first land as `DynamicValue`, then a concrete parser/refiner returns the app type.
-- Do not cast `JSON.parse(...)` or `response.json()` directly to app/domain/test types.
+- Decoded JSON/fetch payloads first land as `unknown` (or `JsonValue` when the protocol is JSON), then a concrete parser returns the app type.
+- Do not cast `JSON.parse(...)` or `response.json()` directly to app/domain/test types. The `check:boundary-casts` script enforces this.
 - A successful parse returns the refined value; do not validate and then keep passing the unrefined object.
 - Keep protocol DTOs, persistence records, and domain/service values distinct even when their shapes look similar.
 - Mutating command/request parsers should reject misspelled or obsolete fields unless the sub-object is explicitly extensible.
 
-The `check:boundary-casts` script enforces the direct-cast rule.
+Production host detection uses an optional, read-only probe shape; application code does not use `Reflect.get` or `Reflect.apply`. Test harnesses may still use reflection to install host globals or exercise malformed JavaScript calls.
 
 ## UI and HTML safety
 
@@ -76,10 +78,15 @@ The `check:innerhtml` script keeps raw `.innerHTML` out of application code.
 - Use bounded concurrency for unbounded/user-sized collections.
 - Keep retryable mutations idempotent or tied to stable logical identity.
 - Do not add hidden globals for time, randomness, IDs, workbook state, providers, or settings when a seam can pass the dependency explicitly.
+- Take settings as `SettingsReader` / `SettingsWriter` / `SettingsAccess` from `src/storage/local/settings-store.ts`; do not redeclare the `get`/`set`/`delete` shape locally. A read is `unknown` by contract, and the feature that owns the key parses it.
 
 ## Tests and verification
 
-- Prove behavior through public interfaces or real seams; avoid tests that only prove a mock implementation.
+Use [Behavior tests and acceptance gates](./testing.md) for contract selection, test discovery, fixture placement and mutation evidence. `npm test` is the canonical complete deterministic suite; targeted scripts do not replace it.
+
+- Accept behavior changes and dependency upgrades through a real taskpane prompt → model → tools → workbook test, with independent read-back and scratch cleanup. Keep the host in the background.
+- Unit tests, CI, builds and direct host probes support this acceptance test. If it is blocked, report the missing coverage and obtain an explicit waiver before accepting the change. Documentation-only changes need no runtime test.
+- Blocked means the skill's "Before you call it blocked" table is exhausted. A missing ribbon button, an unopenable Add-ins flyout, or an accessibility tree that needs a moment are documented non-blockers with background workarounds.
 - For prompt/context/tool-disclosure/session wiring, run `npm run test:context`.
 - For proxy/bridge/auth/HTML safety paths, run `npm run test:security`.
 - For model/provider registry changes, run `npm run test:models` and consult `docs/model-updates.md`.
@@ -107,7 +114,7 @@ The repo enables both `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes
 - Indexed access must be proven with bounds/key checks, iteration patterns (`entries`, `for...of`), or domain-specific fallbacks. Do not silence it with non-null assertions.
 - Optional fields should be omitted when absent. Only model `prop: T | undefined` when the runtime contract intentionally distinguishes “present with undefined” from “not present”.
 
-`ts-reset` is not currently used: this repo instead forces decoded JSON/fetch payloads through the explicit `DynamicValue` boundary and deterministic boundary-cast checks.
+`ts-reset` is not currently used: this repo instead forces decoded JSON/fetch payloads through an explicit `unknown` boundary and deterministic boundary-cast checks.
 
 ## PR checklist
 
@@ -116,5 +123,5 @@ Before opening a PR, report:
 - Which standards surfaces were touched.
 - Which deterministic checks/tests were run.
 - Any lint/type/test warnings left intentionally.
-- Any boundary values still represented as `DynamicValue` and why they cannot be parsed closer to the seam.
+- Any `unknown` that travels past the seam and why it cannot be parsed closer to it.
 - Any safety helper usage (`setSafeInnerHTML`, lint disable, type assertion) and the local invariant that makes it safe.

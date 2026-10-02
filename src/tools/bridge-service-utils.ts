@@ -29,14 +29,14 @@ export async function probeBridgeHealth(bridgeUrl: string): Promise<boolean> {
   return response?.ok === true;
 }
 
-export async function fetchBridgeHealthJson(bridgeUrl: string): Promise<DynamicValue> {
+export async function fetchBridgeHealthJson(bridgeUrl: string): Promise<unknown> {
   const response = await fetchBridgeHealthResponse(bridgeUrl);
   if (!response?.ok) {
     return null;
   }
 
   try {
-    return await response.json() as DynamicValue;
+    return await response.json() as unknown;
   } catch {
     return null;
   }
@@ -46,7 +46,7 @@ export async function getBridgeSetting(settingKey: string): Promise<string | und
   try {
     const storageModule = await import("../storage/local/app-storage.js");
     const storage = storageModule.getAppStorage();
-    const value = await storage.settings.get<string>(settingKey);
+    const value = await storage.settings.get(settingKey);
     if (typeof value !== "string") {
       return undefined;
     }

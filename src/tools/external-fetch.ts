@@ -7,10 +7,7 @@ import {
   DEFAULT_PROXY_URL,
   validateOfficeProxyUrl,
 } from "../auth/proxy-validation.js";
-
-export interface ProxyAwareSettingsStore {
-  get(key: string): Promise<DynamicValue>;
-}
+import type { SettingsReader } from "../storage/local/settings-store.js";
 
 export interface ResolvedOutboundRequest {
   requestUrl: string;
@@ -18,7 +15,7 @@ export interface ResolvedOutboundRequest {
   proxyBaseUrl?: string;
 }
 
-function parseEnabledFlag(value: DynamicValue): boolean {
+function parseEnabledFlag(value: unknown): boolean {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
@@ -29,16 +26,15 @@ function parseEnabledFlag(value: DynamicValue): boolean {
 }
 
 export async function getEnabledProxyBaseUrl(
-  settings: ProxyAwareSettingsStore,
+  settings: SettingsReader,
 ): Promise<string | undefined> {
-  const enabledRaw = await settings.get("proxy.enabled");
-  if (!parseEnabledFlag(enabledRaw)) return undefined;
-
-  const proxyUrlRaw = await settings.get("proxy.url");
-  const trimmed = typeof proxyUrlRaw === "string" ? proxyUrlRaw.trim() : "";
-  const candidateUrl = trimmed.length > 0 ? trimmed : DEFAULT_PROXY_URL;
-
   try {
+    const enabledRaw = await settings.get("proxy.enabled");
+    if (!parseEnabledFlag(enabledRaw)) return undefined;
+
+    const proxyUrlRaw = await settings.get("proxy.url");
+    const trimmed = typeof proxyUrlRaw === "string" ? proxyUrlRaw.trim() : "";
+    const candidateUrl = trimmed.length > 0 ? trimmed : DEFAULT_PROXY_URL;
     return validateOfficeProxyUrl(candidateUrl);
   } catch {
     return undefined;

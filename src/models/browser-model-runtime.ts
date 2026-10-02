@@ -16,6 +16,7 @@ import {
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 
 import { originalFetch } from "../auth/cors-proxy.js";
+import { isOpenAiGatewayProvider } from "../auth/custom-gateways.js";
 import { normalizeProxyUrl } from "../auth/proxy-validation.js";
 import type { CustomProvider } from "../storage/local/custom-providers-store.js";
 import {
@@ -48,7 +49,10 @@ export interface BrowserProviderModelDefinition {
   id: string;
   name?: string;
   reasoning?: boolean;
+  thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
+  cost?: Model<Api>["cost"];
   input?: readonly ("text" | "image")[];
+  inputLimits?: Model<Api>["inputLimits"];
   contextWindow?: number;
   maxTokens?: number;
   /** Static per-model headers merged into every API request (pi-ai Model.headers). */
@@ -61,8 +65,8 @@ export interface BrowserProviderRegistration {
   api: BrowserProviderApi;
   baseUrl: string;
   models: readonly BrowserProviderModelDefinition[];
-  /** Defaults to `${baseUrl}/models` for OpenAI-compatible providers. */
-  modelsUrl?: string;
+  /** Omit to derive the discovery URL; null keeps only the supplied models. */
+  modelsUrl?: string | null;
   resolveApiKey: () => Promise<string | undefined>;
   /** Keyless local providers can opt in while still satisfying Pi AI auth semantics. */
   allowKeyless?: boolean;
@@ -192,8 +196,14 @@ function createModel(args: {
     provider: args.providerId,
     baseUrl: args.baseUrl,
     reasoning: args.definition.reasoning ?? false,
+    ...(args.definition.thinkingLevelMap !== undefined
+      ? { thinkingLevelMap: args.definition.thinkingLevelMap }
+      : {}),
     input: args.definition.input ? [...args.definition.input] : ["text"],
-    cost: {
+    ...(args.definition.inputLimits !== undefined
+      ? { inputLimits: args.definition.inputLimits }
+      : {}),
+    cost: args.definition.cost ?? {
       input: 0,
       output: 0,
       cacheRead: 0,
@@ -235,6 +245,7 @@ function sanitizeCatalogEntry(
             name: model.name,
             reasoning: model.reasoning,
             input: model.input,
+            inputLimits: model.inputLimits,
             contextWindow: model.contextWindow,
             maxTokens: model.maxTokens,
           },
@@ -289,11 +300,11 @@ class BrowserModelCatalogsStore implements ModelsStore {
   }
 }
 
-function isModelsResponse(value: DynamicValue): value is DynamicObject {
+function isModelsResponse(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseModelIds(value: DynamicValue): string[] {
+function parseModelIds(value: unknown): string[] {
   if (!isModelsResponse(value) || !Array.isArray(value.data)) {
     throw new Error("Model discovery response must contain a data array.");
   }
@@ -321,9 +332,7 @@ function parseModelIds(value: DynamicValue): string[] {
   );
 }
 
-async function readLimitedDiscoveryJson(
-  response: Response,
-): Promise<DynamicValue> {
+async function readLimitedDiscoveryJson(response: Response): Promise<unknown> {
   const declaredLengthRaw = response.headers.get("content-length");
   const declaredLength =
     declaredLengthRaw === null ? null : Number.parseInt(declaredLengthRaw, 10);
@@ -347,7 +356,7 @@ async function readLimitedDiscoveryJson(
         `Model discovery response exceeds ${MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes.`,
       );
     }
-    const parsed: DynamicValue = JSON.parse(text);
+    const parsed: unknown = JSON.parse(text);
     return parsed;
   }
 
@@ -377,7 +386,7 @@ async function readLimitedDiscoveryJson(
     offset += chunk.byteLength;
   }
 
-  const parsed: DynamicValue = JSON.parse(new TextDecoder().decode(body));
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
   return parsed;
 }
 
@@ -443,10 +452,13 @@ function createRegisteredProvider(
     }),
   );
   const modelsUrlRaw =
-    registration.modelsUrl ?? deriveModelsUrl(baseUrl, registration.api);
-  const modelsUrl = modelsUrlRaw
-    ? normalizeHttpUrl(modelsUrlRaw, "Provider modelsUrl")
-    : undefined;
+    registration.modelsUrl === undefined
+      ? deriveModelsUrl(baseUrl, registration.api)
+      : registration.modelsUrl;
+  const modelsUrl =
+    modelsUrlRaw != null
+      ? normalizeHttpUrl(modelsUrlRaw, "Provider modelsUrl")
+      : undefined;
 
   return createProvider({
     id,
@@ -505,6 +517,9 @@ function createRegisteredProvider(
                   ...(template?.input !== undefined
                     ? { input: template.input }
                     : {}),
+                  ...(template?.inputLimits !== undefined
+                    ? { inputLimits: template.inputLimits }
+                    : {}),
                   ...(template?.contextWindow !== undefined
                     ? { contextWindow: template.contextWindow }
                     : {}),
@@ -536,7 +551,14 @@ function customProviderRegistrations(
       id: model.id,
       name: model.name,
       reasoning: model.reasoning,
+      ...(model.thinkingLevelMap !== undefined
+        ? { thinkingLevelMap: model.thinkingLevelMap }
+        : {}),
+      cost: model.cost,
       input: model.input,
+      ...(model.inputLimits !== undefined
+        ? { inputLimits: model.inputLimits }
+        : {}),
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
       ...(headers !== undefined ? { headers } : {}),
@@ -560,6 +582,7 @@ function customProviderRegistrations(
     api: providerApi,
     baseUrl: provider.baseUrl,
     models,
+    ...(isOpenAiGatewayProvider(provider) ? { modelsUrl: null } : {}),
     resolveApiKey: () => Promise.resolve(provider.apiKey),
     allowKeyless: !provider.apiKey,
     ...(provider.headers !== undefined ? { headers: provider.headers } : {}),

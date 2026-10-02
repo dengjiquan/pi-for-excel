@@ -2,7 +2,7 @@
  * Restore strategy helpers for workbook recovery snapshots.
  */
 
-import type { WorkbookContext } from "../context.js";
+import type { RecoveryWorkbookScope } from "../recovery-scope.js";
 import type {
   AppendChartRecoverySnapshotArgs,
   AppendCommentThreadRecoverySnapshotArgs,
@@ -25,19 +25,19 @@ import type {
 } from "../recovery-states.js";
 
 interface WorkbookRangeState {
-  values: DynamicValue[][];
-  formulas: DynamicValue[][];
+  values: unknown[][];
+  formulas: unknown[][];
 }
 
 interface CountChangedCellsArgs {
-  beforeValues: DynamicValue[][];
-  beforeFormulas: DynamicValue[][];
-  afterValues: DynamicValue[][];
-  afterFormulas: DynamicValue[][];
+  beforeValues: unknown[][];
+  beforeFormulas: unknown[][];
+  afterValues: unknown[][];
+  afterFormulas: unknown[][];
 }
 
 export interface RestoreWorkbookRecoverySnapshotDependencies {
-  applySnapshot: (address: string, values: DynamicValue[][]) => Promise<WorkbookRangeState>;
+  applySnapshot: (address: string, values: unknown[][]) => Promise<WorkbookRangeState>;
   applyFormatCellsSnapshot: (
     address: string,
     state: RecoveryFormatRangeState,
@@ -60,35 +60,36 @@ export interface RestoreWorkbookRecoverySnapshotDependencies {
   ) => Promise<RecoveryChartApplyResult>;
   appendRangeSnapshot: (
     args: AppendWorkbookRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
   appendFormatCellsSnapshot: (
     args: AppendFormatCellsRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
   appendModifyStructureSnapshot: (
     args: AppendModifyStructureRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
   appendConditionalFormatSnapshot: (
     args: AppendConditionalFormatRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
   appendCommentThreadSnapshot: (
     args: AppendCommentThreadRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
   appendChartSnapshot: (
     args: AppendChartRecoverySnapshotArgs,
-    workbookContext: WorkbookContext,
+    scope: RecoveryWorkbookScope,
   ) => Promise<WorkbookRecoverySnapshot | null>;
-  toRestoreValues: (values: DynamicValue[][], formulas: DynamicValue[][]) => DynamicValue[][];
+  toRestoreValues: (values: unknown[][], formulas: unknown[][]) => unknown[][];
   countChangedCells: (args: CountChangedCellsArgs) => number;
 }
 
 export interface RestoreWorkbookRecoverySnapshotArgs {
   snapshot: WorkbookRecoverySnapshot;
-  workbookContext: WorkbookContext;
+  /** Resolved once by the caller; the inverse checkpoint is appended under the same scope. */
+  scope: RecoveryWorkbookScope;
   dependencies: RestoreWorkbookRecoverySnapshotDependencies;
 }
 
@@ -96,16 +97,12 @@ function resolveSnapshotKind(snapshot: WorkbookRecoverySnapshot): WorkbookRecove
   return snapshot.snapshotKind ?? "range_values";
 }
 
-function assertSnapshotWorkbookIdentity(snapshot: WorkbookRecoverySnapshot, workbookContext: WorkbookContext): void {
+function assertSnapshotWorkbookIdentity(snapshot: WorkbookRecoverySnapshot, scope: RecoveryWorkbookScope): void {
   if (!snapshot.workbookId) {
     throw new Error("Snapshot is missing workbook identity and cannot be restored safely.");
   }
 
-  if (!workbookContext.workbookId) {
-    throw new Error("Current workbook identity is unavailable; cannot safely restore this snapshot.");
-  }
-
-  if (snapshot.workbookId !== workbookContext.workbookId) {
+  if (snapshot.workbookId !== scope.workbookId) {
     throw new Error("Snapshot belongs to a different workbook.");
   }
 }
@@ -113,9 +110,9 @@ function assertSnapshotWorkbookIdentity(snapshot: WorkbookRecoverySnapshot, work
 export async function restoreWorkbookRecoverySnapshot(
   args: RestoreWorkbookRecoverySnapshotArgs,
 ): Promise<RestoreWorkbookRecoverySnapshotResult> {
-  const { snapshot, workbookContext, dependencies } = args;
+  const { snapshot, scope, dependencies } = args;
 
-  assertSnapshotWorkbookIdentity(snapshot, workbookContext);
+  assertSnapshotWorkbookIdentity(snapshot, scope);
 
   const snapshotKind = resolveSnapshotKind(snapshot);
 
@@ -135,7 +132,7 @@ export async function restoreWorkbookRecoverySnapshot(
         formatRangeState: currentState,
         restoredFromSnapshotId: snapshot.id,
       },
-      workbookContext,
+      scope,
     );
 
     return {
@@ -162,7 +159,7 @@ export async function restoreWorkbookRecoverySnapshot(
         modifyStructureState: currentState,
         restoredFromSnapshotId: snapshot.id,
       },
-      workbookContext,
+      scope,
     );
 
     return {
@@ -191,7 +188,7 @@ export async function restoreWorkbookRecoverySnapshot(
         conditionalFormatRules: currentState.rules,
         restoredFromSnapshotId: snapshot.id,
       },
-      workbookContext,
+      scope,
     );
 
     return {
@@ -218,7 +215,7 @@ export async function restoreWorkbookRecoverySnapshot(
         commentThreadState: currentState,
         restoredFromSnapshotId: snapshot.id,
       },
-      workbookContext,
+      scope,
     );
 
     return {
@@ -248,7 +245,7 @@ export async function restoreWorkbookRecoverySnapshot(
           chartState: applied.state,
           restoredFromSnapshotId: snapshot.id,
         },
-        workbookContext,
+        scope,
       )
       : null;
 
@@ -280,7 +277,7 @@ export async function restoreWorkbookRecoverySnapshot(
       beforeFormulas: currentState.formulas,
       restoredFromSnapshotId: snapshot.id,
     },
-    workbookContext,
+    scope,
   );
 
   return {

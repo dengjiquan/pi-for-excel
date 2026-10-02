@@ -23,7 +23,7 @@
  * ```
  */
 
-import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
 
 import {
   ALLOW_REMOTE_EXTENSION_URLS_STORAGE_KEY,
@@ -57,6 +57,11 @@ import type {
 } from "./extension-api-types.js";
 import { commandRegistry } from "./types.js";
 import { isExperimentalFeatureEnabled } from "../experiments/flags.js";
+import {
+  qualifyExtensionConnectionId,
+  qualifyExtensionProviderId,
+} from "../extensions/owner-identifiers.js";
+import type { ConnectionAwareAgentTool } from "../tools/connection-requirements.js";
 
 export type { LoadedExtensionHandle } from "./extension-loader.js";
 export type {
@@ -106,45 +111,6 @@ function normalizeIdentifier(kind: "command" | "tool", value: string): string {
   return trimmed;
 }
 
-function normalizeConnectionIdentifier(value: string): string {
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.length === 0) {
-    throw new Error("Connection id cannot be empty");
-  }
-
-  return trimmed;
-}
-
-function normalizeProviderIdentifier(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized.length === 0) {
-    throw new Error("Provider id cannot be empty");
-  }
-  if (!/^[a-z0-9][a-z0-9._-]*$/u.test(normalized)) {
-    throw new Error("Provider id may contain only letters, numbers, dots, underscores and hyphens.");
-  }
-  return normalized;
-}
-
-function qualifyOwnedConnectionId(ownerId: string, connectionId: string): string {
-  const normalizedConnectionId = normalizeConnectionIdentifier(connectionId);
-  const ownerPrefix = `${ownerId.toLowerCase()}.`;
-
-  if (normalizedConnectionId.startsWith(ownerPrefix)) {
-    return normalizedConnectionId;
-  }
-
-  return `${ownerPrefix}${normalizedConnectionId}`;
-}
-
-function qualifyOwnedProviderId(ownerId: string, providerId: string): string {
-  const normalizedProviderId = normalizeProviderIdentifier(providerId);
-  const ownerPrefix = `${ownerId.toLowerCase()}.`;
-  return normalizedProviderId.startsWith(ownerPrefix)
-    ? normalizedProviderId
-    : `${ownerPrefix}${normalizedProviderId}`;
-}
-
 function normalizeModelProviderDefinitionForOwner(
   ownerId: string,
   definition: ExtensionModelProviderDefinition,
@@ -152,28 +118,28 @@ function normalizeModelProviderDefinitionForOwner(
   const connection = definition.connection?.trim();
   return {
     ...definition,
-    id: qualifyOwnedProviderId(ownerId, definition.id),
+    id: qualifyExtensionProviderId(ownerId, definition.id),
     ...(connection
-      ? { connection: qualifyOwnedConnectionId(ownerId, connection) }
+      ? { connection: qualifyExtensionConnectionId(ownerId, connection) }
       : {}),
   };
 }
 
 function normalizeToolConnectionRequirements(
-  rawValue: DynamicValue,
+  rawValue: unknown,
   ownerId: string,
 ): string[] | undefined {
   const normalizedIds: string[] = [];
 
   if (typeof rawValue === "string") {
-    normalizedIds.push(qualifyOwnedConnectionId(ownerId, rawValue));
+    normalizedIds.push(qualifyExtensionConnectionId(ownerId, rawValue));
   } else if (Array.isArray(rawValue)) {
     for (const item of rawValue) {
       if (typeof item !== "string") {
         throw new Error("requiresConnection entries must be strings.");
       }
 
-      normalizedIds.push(qualifyOwnedConnectionId(ownerId, item));
+      normalizedIds.push(qualifyExtensionConnectionId(ownerId, item));
     }
   } else if (rawValue !== undefined) {
     throw new Error("requiresConnection must be a string or array of strings.");
@@ -192,18 +158,23 @@ function normalizeConnectionDefinitionForOwner(
 ): ExtensionConnectionDefinition {
   return {
     ...definition,
-    id: qualifyOwnedConnectionId(ownerId, definition.id),
+    id: qualifyExtensionConnectionId(ownerId, definition.id),
   };
 }
 
+interface ExtensionToolDefinitionBoundary {
+  execute?: unknown;
+  handler?: unknown;
+}
+
 function assertValidToolDefinition(name: string, tool: ExtensionToolDefinition): void {
-  const execute: DynamicValue = Reflect.get(tool, "execute");
-  if (typeof execute === "function") {
+  // Runtime extension JavaScript is untyped even though the public authoring API is typed.
+  const boundary = tool as ExtensionToolDefinition & ExtensionToolDefinitionBoundary;
+  if (typeof boundary.execute === "function") {
     return;
   }
 
-  const handler: DynamicValue = Reflect.get(tool, "handler");
-  if (typeof handler === "function") {
+  if (typeof boundary.handler === "function") {
     throw new Error(
       `Extension tool "${name}" is invalid: use execute(params, signal?, onUpdate?) instead of handler.`,
     );
@@ -344,7 +315,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
   const isCapabilityEnabled = options.isCapabilityEnabled;
   const formatCapabilityError = options.formatCapabilityError ?? getDefaultCapabilityErrorMessage;
   const widgetOwnerId = getWidgetOwnerId(options);
-  const connectionOwnerId = widgetOwnerId;
+  const extensionOwnerId = widgetOwnerId;
   const widgetApiV2Enabled = resolveWidgetApiV2Enabled(options);
 
   const assertCapability = (capability: ExtensionCapability): void => {
@@ -379,7 +350,11 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
       const normalizedName = normalizeIdentifier("tool", name);
       assertValidToolDefinition(normalizedName, tool);
 
-      const wrappedTool: AgentTool = {
+      const requiresConnection = normalizeToolConnectionRequirements(
+        tool.requiresConnection,
+        extensionOwnerId,
+      );
+      const wrappedTool: ConnectionAwareAgentTool = {
         name: normalizedName,
         label: tool.label ?? normalizedName,
         description: tool.description,
@@ -387,16 +362,8 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
         execute: async (_toolCallId, params, signal, onUpdate) => {
           return tool.execute(params, signal, onUpdate);
         },
+        ...(requiresConnection ? { requiresConnection } : {}),
       };
-
-      const requiresConnection = normalizeToolConnectionRequirements(
-        Reflect.get(tool, "requiresConnection"),
-        connectionOwnerId,
-      );
-
-      if (requiresConnection && requiresConnection.length > 0) {
-        Reflect.set(wrappedTool, "requiresConnection", requiresConnection);
-      }
 
       registerTool(wrappedTool);
     },
@@ -419,7 +386,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.register()");
         }
 
-        const normalizedDefinition = normalizeConnectionDefinitionForOwner(connectionOwnerId, definition);
+        const normalizedDefinition = normalizeConnectionDefinitionForOwner(extensionOwnerId, definition);
         return registerConnection(normalizedDefinition);
       },
 
@@ -430,7 +397,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.unregister()");
         }
 
-        unregisterConnection(qualifyOwnedConnectionId(connectionOwnerId, connectionId));
+        unregisterConnection(qualifyExtensionConnectionId(extensionOwnerId, connectionId));
       },
 
       async list() {
@@ -450,7 +417,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.get()");
         }
 
-        return getConnection(qualifyOwnedConnectionId(connectionOwnerId, connectionId));
+        return getConnection(qualifyExtensionConnectionId(extensionOwnerId, connectionId));
       },
 
       async getSecrets(connectionId: string): Promise<Record<string, string> | null> {
@@ -460,7 +427,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.getSecrets()");
         }
 
-        return getConnectionSecrets(qualifyOwnedConnectionId(connectionOwnerId, connectionId));
+        return getConnectionSecrets(qualifyExtensionConnectionId(extensionOwnerId, connectionId));
       },
 
       async setSecrets(connectionId: string, secrets: Record<string, string>): Promise<void> {
@@ -471,7 +438,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
         }
 
         await setConnectionSecrets(
-          qualifyOwnedConnectionId(connectionOwnerId, connectionId),
+          qualifyExtensionConnectionId(extensionOwnerId, connectionId),
           secrets,
         );
       },
@@ -483,7 +450,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.clearSecrets()");
         }
 
-        await clearConnectionSecrets(qualifyOwnedConnectionId(connectionOwnerId, connectionId));
+        await clearConnectionSecrets(qualifyExtensionConnectionId(extensionOwnerId, connectionId));
       },
 
       async markValidated(connectionId: string): Promise<void> {
@@ -493,7 +460,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support connections.markValidated()");
         }
 
-        await markConnectionValidated(qualifyOwnedConnectionId(connectionOwnerId, connectionId));
+        await markConnectionValidated(qualifyExtensionConnectionId(extensionOwnerId, connectionId));
       },
 
       async markInvalid(connectionId: string, reason: string): Promise<void> {
@@ -504,7 +471,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
         }
 
         await markConnectionInvalid(
-          qualifyOwnedConnectionId(connectionOwnerId, connectionId),
+          qualifyExtensionConnectionId(extensionOwnerId, connectionId),
           reason,
         );
       },
@@ -512,7 +479,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
       async markStatus(connectionId: string, status: "connected" | "missing" | "invalid" | "error", reason?: string): Promise<void> {
         assertCapability("connections.readwrite");
 
-        const normalizedConnectionId = qualifyOwnedConnectionId(connectionOwnerId, connectionId);
+        const normalizedConnectionId = qualifyExtensionConnectionId(extensionOwnerId, connectionId);
 
         if (markConnectionStatus) {
           await markConnectionStatus(normalizedConnectionId, status, reason);
@@ -554,7 +521,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support models.registerProvider()");
         }
 
-        const normalized = normalizeModelProviderDefinitionForOwner(connectionOwnerId, definition);
+        const normalized = normalizeModelProviderDefinitionForOwner(extensionOwnerId, definition);
         return registerModelProvider(normalized);
       },
 
@@ -564,7 +531,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
           throw new Error("Extension host does not support models.unregisterProvider()");
         }
 
-        unregisterModelProvider(qualifyOwnedProviderId(connectionOwnerId, providerId));
+        unregisterModelProvider(qualifyExtensionProviderId(extensionOwnerId, providerId));
       },
 
       async refresh(): Promise<void> {
@@ -639,7 +606,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
     },
 
     storage: {
-      async get(key: string): Promise<DynamicValue> {
+      async get(key: string): Promise<unknown> {
         assertCapability("storage.readwrite");
         if (!storageGet) {
           throw new Error("Extension host does not support storage.get()");
@@ -648,7 +615,7 @@ export function createExtensionAPI(options: CreateExtensionAPIOptions): ExcelExt
         return storageGet(key);
       },
 
-      async set(key: string, value: DynamicValue): Promise<void> {
+      async set(key: string, value: unknown): Promise<void> {
         assertCapability("storage.readwrite");
         if (!storageSet) {
           throw new Error("Extension host does not support storage.set()");

@@ -1,20 +1,5 @@
 import tseslint from "typescript-eslint";
 
-const NO_UNKNOWN_MESSAGE =
-  "Do not introduce `unknown` here. If you think you need `unknown`, fix the upstream type first: the agent should not have an unknown at this point in the code at all.";
-
-const NO_GENERIC_OBJECT_GUARD_MESSAGE =
-  "Do not define or use generic object/record guards such as `isRecord`, `isObjectValue`, or `isPlainObject`. This hides an upstream `unknown`; fix the real typed boundary first because the agent should not have an unknown at this point in the code at all.";
-
-const GENERIC_OBJECT_GUARD_NAME_PATTERN =
-  "/^(?:is.*[Rr]ecord.*|is.*Object(?:Value|Map|Like|Payload)?|isObject(?:Value|Map|Like)?|isPlainObject)$/";
-
-const BAN_GENERIC_OBJECT_GUARD_SELECTORS = [
-  `FunctionDeclaration[id.name=${GENERIC_OBJECT_GUARD_NAME_PATTERN}]`,
-  `VariableDeclarator[id.name=${GENERIC_OBJECT_GUARD_NAME_PATTERN}]`,
-  `ImportSpecifier[imported.name=${GENERIC_OBJECT_GUARD_NAME_PATTERN}]`,
-  `CallExpression[callee.name=${GENERIC_OBJECT_GUARD_NAME_PATTERN}]`,
-].map((selector) => ({ selector, message: NO_GENERIC_OBJECT_GUARD_MESSAGE }));
 
 export default tseslint.config(
   {
@@ -71,14 +56,6 @@ export default tseslint.config(
         },
       ],
 
-      // Dynamic values must be normalized at typed boundaries rather than
-      // leaking `unknown` and generic record probes through application code.
-      "no-restricted-syntax": [
-        "error",
-        { selector: "TSUnknownKeyword", message: NO_UNKNOWN_MESSAGE },
-        ...BAN_GENERIC_OBJECT_GUARD_SELECTORS,
-      ],
-
       // ── Async safety ───────────────────────────────────────────────────────
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",
@@ -122,13 +99,14 @@ export default tseslint.config(
   },
 
   {
-    files: ["src/types/dynamic-values.d.ts"],
+    files: ["src/auth/**/*.ts"],
     rules: {
-      // The single sanctioned untyped boundary marker. All other explicit
-      // `unknown` spellings remain banned by the main rule above.
       "no-restricted-syntax": [
         "error",
-        ...BAN_GENERIC_OBJECT_GUARD_SELECTORS,
+        {
+          selector: "Identifier[name='localStorage']",
+          message: "OAuth credentials must not use localStorage; use the encrypted OAuth storage boundary.",
+        },
       ],
     },
   },

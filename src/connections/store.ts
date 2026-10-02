@@ -1,17 +1,12 @@
 import type { ConnectionSecrets, ConnectionStatus } from "./types.js";
+import type { SettingsReader, SettingsWriter } from "../storage/local/settings-store.js";
 
-function isConnectionsStorePayloadShape(value: DynamicValue): value is DynamicObject {
+function isConnectionsStorePayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export const CONNECTION_STORE_KEY = "connections.store.v1";
 const CONNECTION_STORE_VERSION = 1;
-
-export interface ConnectionSettingsStore {
-  get(key: string): Promise<DynamicValue>;
-  set(key: string, value: DynamicValue): Promise<void>;
-  delete?(key: string): Promise<void>;
-}
 
 export interface StoredConnectionRecord {
   status?: ConnectionStatus;
@@ -25,19 +20,19 @@ interface ConnectionStoreDocument {
   items: Record<string, StoredConnectionRecord>;
 }
 
-function normalizeOptionalString(value: DynamicValue): string | undefined {
+function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function normalizeConnectionStatus(value: DynamicValue): ConnectionStatus | undefined {
+function normalizeConnectionStatus(value: unknown): ConnectionStatus | undefined {
   return value === "connected" || value === "missing" || value === "invalid" || value === "error"
     ? value
     : undefined;
 }
 
-function normalizeSecrets(value: DynamicValue): ConnectionSecrets | undefined {
+function normalizeSecrets(value: unknown): ConnectionSecrets | undefined {
   if (!isConnectionsStorePayloadShape(value)) return undefined;
 
   const next: ConnectionSecrets = {};
@@ -49,7 +44,7 @@ function normalizeSecrets(value: DynamicValue): ConnectionSecrets | undefined {
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
-function normalizeConnectionRecord(value: DynamicValue): StoredConnectionRecord | null {
+function normalizeConnectionRecord(value: unknown): StoredConnectionRecord | null {
   if (!isConnectionsStorePayloadShape(value)) return null;
 
   const record: StoredConnectionRecord = {};
@@ -66,7 +61,7 @@ function normalizeConnectionRecord(value: DynamicValue): StoredConnectionRecord 
   return record;
 }
 
-function normalizeDocument(value: DynamicValue): ConnectionStoreDocument {
+function normalizeDocument(value: unknown): ConnectionStoreDocument {
   if (!isConnectionsStorePayloadShape(value) || !isConnectionsStorePayloadShape(value.items)) {
     return {
       version: CONNECTION_STORE_VERSION,
@@ -88,15 +83,29 @@ function normalizeDocument(value: DynamicValue): ConnectionStoreDocument {
 }
 
 export async function loadConnectionStoreDocument(
-  settings: ConnectionSettingsStore,
+  settings: SettingsReader,
+): Promise<Record<string, StoredConnectionRecord>> {
+  try {
+    const raw = await settings.get(CONNECTION_STORE_KEY);
+    return normalizeDocument(raw).items;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Reads the connection document before a mutation. Unlike the display reader,
+ * storage failures propagate so a write cannot replace unread sibling records.
+ */
+export async function loadConnectionStoreDocumentForUpdate(
+  settings: SettingsWriter,
 ): Promise<Record<string, StoredConnectionRecord>> {
   const raw = await settings.get(CONNECTION_STORE_KEY);
-  const normalized = normalizeDocument(raw);
-  return normalized.items;
+  return normalizeDocument(raw).items;
 }
 
 export async function saveConnectionStoreDocument(
-  settings: ConnectionSettingsStore,
+  settings: SettingsWriter,
   items: Record<string, StoredConnectionRecord>,
 ): Promise<void> {
   await settings.set(CONNECTION_STORE_KEY, {

@@ -2,7 +2,7 @@
  * workbook_history — list / restore workbook backups.
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
 import {
@@ -163,6 +163,8 @@ export function createWorkbookHistoryTool(
                 address: snapshot.address,
                 changedCount: snapshot.changedCount,
                 cellCount: snapshot.cellCount,
+                ...(snapshot.workbookId !== undefined ? { workbookId: snapshot.workbookId } : {}),
+                ...(snapshot.workbookLabel !== undefined ? { workbookLabel: snapshot.workbookLabel } : {}),
               })),
             },
           };

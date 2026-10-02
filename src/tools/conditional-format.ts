@@ -6,11 +6,10 @@
  * - Cell value rules (greater/less/equal/between)
  */
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { excelRun, getRange, qualifiedAddress } from "../excel/helpers.js";
 import { getWorkbookChangeAuditLog } from "../audit/workbook-change-audit.js";
-import { dispatchWorkbookSnapshotCreated } from "../workbook/recovery-events.js";
 import { captureConditionalFormatState } from "../workbook/recovery-states.js";
 import { getWorkbookRecoveryLog } from "../workbook/recovery-log.js";
 import { getErrorMessage } from "../utils/errors.js";
@@ -234,14 +233,6 @@ async function clearFormats(
       appendResultNote: appendMutationResultNote,
       unavailableReason: recoveryUnavailableReason,
       unavailableNote: CHECKPOINT_SKIPPED_NOTE,
-      dispatchSnapshotCreated: (checkpoint) => {
-        dispatchWorkbookSnapshotCreated({
-          snapshotId: checkpoint.id,
-          toolName: checkpoint.toolName,
-          address: checkpoint.address,
-          changedCount: checkpoint.changedCount,
-        });
-      },
     },
   });
 
@@ -363,14 +354,6 @@ async function addFormat(
       appendResultNote: appendMutationResultNote,
       unavailableReason: recoveryUnavailableReason,
       unavailableNote: CHECKPOINT_SKIPPED_NOTE,
-      dispatchSnapshotCreated: (checkpoint) => {
-        dispatchWorkbookSnapshotCreated({
-          snapshotId: checkpoint.id,
-          toolName: checkpoint.toolName,
-          address: checkpoint.address,
-          changedCount: checkpoint.changedCount,
-        });
-      },
     },
   });
 

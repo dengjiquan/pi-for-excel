@@ -26,22 +26,8 @@ import {
   shouldShowBridgeSetupCard,
 } from "./bridge-setup-card.js";
 import {
-  isChartsDetails,
-  isCommentsDetails,
-  isConditionalFormatDetails,
-  isExplainFormulaDetails,
-  isFillFormulaDetails,
-  isFormatCellsDetails,
-  isModifyStructureDetails,
-  isPythonTransformRangeDetails,
-  isReadRangeCsvDetails,
-  isSkillsInstallDetails,
-  isSkillsReadDetails,
-  isSkillsUninstallDetails,
-  isTraceDependenciesDetails,
-  isViewSettingsDetails,
-  isWorkbookHistoryDetails,
-  isWriteCellsDetails,
+  decodeToolDetails,
+  type ExcelToolDetails,
   type RecoveryCheckpointDetails,
   type WriteCellsDetails,
 } from "../tools/tool-details.js";
@@ -53,16 +39,14 @@ import {
 import { renderCsvTable } from "./render-csv-table.js";
 import { renderDepTree } from "./render-dep-tree.js";
 
-// Ensure <markdown-block> custom element is registered before we render it.
-import "./messages/markdown-block.js";
-import "./messages/code-block.js";
+// The taskpane registers <markdown-block> and <code-block> through register-components.
 
 type ToolState = "inprogress" | "complete" | "error";
 type SupportedToolName = UiToolName;
 
 /* ── Helpers ────────────────────────────────────────────────── */
 
-function formatParamsJson(params: DynamicValue): string {
+function formatParamsJson(params: unknown): string {
   if (params === undefined) return "";
 
   try {
@@ -79,20 +63,20 @@ function formatParamsJson(params: DynamicValue): string {
   }
 }
 
-function safeParseParams(params: DynamicValue): DynamicObject {
+function safeParseParams(params: unknown): Record<string, unknown> {
   if (!params) return {};
-  if (typeof params === "object" && params !== null) return params as DynamicObject;
+  if (typeof params === "object" && params !== null) return params as Record<string, unknown>;
   if (typeof params === "string") {
     try {
-      const parsed: DynamicValue = JSON.parse(params);
-      if (typeof parsed === "object" && parsed !== null) return parsed as DynamicObject;
+      const parsed: unknown = JSON.parse(params);
+      if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
       return {};
     } catch { return {}; }
   }
   return {};
 }
 
-function splitToolResultContent(result: ToolResultMessage<DynamicValue>): {
+function splitToolResultContent(result: ToolResultMessage): {
   text: string;
   images: ImageContent[];
 } {
@@ -111,7 +95,7 @@ function tryFormatJsonOutput(text: string): { isJson: boolean; formatted: string
   if (!trimmed) return { isJson: false, formatted: text };
 
   try {
-    const parsed: DynamicValue = JSON.parse(trimmed);
+    const parsed: unknown = JSON.parse(trimmed);
     return { isJson: true, formatted: JSON.stringify(parsed, null, 2) };
   } catch {
     return { isJson: false, formatted: text };
@@ -234,27 +218,24 @@ function renderImages(images: ImageContent[]): TemplateResult {
   `;
 }
 
-function getWorkbookCellChanges(details: DynamicValue): WriteCellsDetails["changes"] | undefined {
-  if (isWriteCellsDetails(details)) {
-    return details.changes;
-  }
+type ToolDetails = ExcelToolDetails | undefined;
 
-  if (isFillFormulaDetails(details)) {
-    return details.changes;
+function getWorkbookCellChanges(details: ToolDetails): WriteCellsDetails["changes"] | undefined {
+  switch (details?.kind) {
+    case "write_cells":
+    case "fill_formula":
+    case "python_transform_range":
+      return details.changes;
+    default:
+      return undefined;
   }
-
-  if (isPythonTransformRangeDetails(details)) {
-    return details.changes;
-  }
-
-  return undefined;
 }
 
 function formatDiffValue(value: string): string {
   return value.length > 0 ? value : "∅";
 }
 
-function renderWorkbookCellDiff(details: DynamicValue): TemplateResult {
+function renderWorkbookCellDiff(details: ToolDetails): TemplateResult {
   const changes = getWorkbookCellChanges(details);
   if (!changes || changes.changedCount <= 0) return html``;
 
@@ -298,8 +279,8 @@ function renderWorkbookCellDiff(details: DynamicValue): TemplateResult {
   `;
 }
 
-function renderChartImageDetails(details: DynamicValue, hasImageContent: boolean): TemplateResult {
-  if (hasImageContent || !isChartsDetails(details) || !details.image) return html``;
+function renderChartImageDetails(details: ToolDetails, hasImageContent: boolean): TemplateResult {
+  if (hasImageContent || details?.kind !== "charts" || !details.image) return html``;
 
   const src = `data:${details.image.mimeType};base64,${details.image.base64}`;
   const alt = details.name ? `Chart ${details.name}` : "Chart image";
@@ -311,8 +292,8 @@ function renderChartImageDetails(details: DynamicValue, hasImageContent: boolean
   `;
 }
 
-function renderExplainFormulaDetails(details: DynamicValue): TemplateResult | null {
-  if (!isExplainFormulaDetails(details)) return null;
+function renderExplainFormulaDetails(details: ToolDetails): TemplateResult | null {
+  if (details?.kind !== "explain_formula") return null;
 
   if (!details.hasFormula) {
     return html`<div class="pi-tool-card__plain-text">${details.explanation}</div>`;
@@ -345,7 +326,7 @@ function renderExplainFormulaDetails(details: DynamicValue): TemplateResult | nu
   `;
 }
 
-function optionalString(value: DynamicValue): string | undefined {
+function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
@@ -387,9 +368,9 @@ function extractResultError(resultText: string | undefined): string | undefined 
 
 function buildChangeExplanationInputForTool(
   toolName: SupportedToolName,
-  params: DynamicValue,
+  params: unknown,
   resultText: string | undefined,
-  details: DynamicValue,
+  details: ToolDetails,
 ): ChangeExplanationInput | null {
   if (getToolExecutionMode(toolName, params) !== "mutate") return null;
 
@@ -403,7 +384,7 @@ function buildChangeExplanationInputForTool(
   const error = extractResultError(resultText);
   const blockedFromText = Boolean(resultText && isBlocked(resultText));
 
-  if (isWriteCellsDetails(details)) {
+  if (details?.kind === "write_cells") {
     return createChangeExplanationInput({
       toolName,
       blocked: details.blocked,
@@ -415,7 +396,7 @@ function buildChangeExplanationInputForTool(
     });
   }
 
-  if (isFillFormulaDetails(details)) {
+  if (details?.kind === "fill_formula") {
     return createChangeExplanationInput({
       toolName,
       blocked: details.blocked,
@@ -427,7 +408,7 @@ function buildChangeExplanationInputForTool(
     });
   }
 
-  if (isPythonTransformRangeDetails(details)) {
+  if (details?.kind === "python_transform_range") {
     return createChangeExplanationInput({
       toolName,
       blocked: details.blocked || blockedFromText,
@@ -440,7 +421,7 @@ function buildChangeExplanationInputForTool(
     });
   }
 
-  if (isWorkbookHistoryDetails(details) && details.action === "restore") {
+  if (details?.kind === "workbook_history" && details.action === "restore") {
     const historyError = optionalString(details.error);
     return createChangeExplanationInput({
       toolName,
@@ -453,7 +434,7 @@ function buildChangeExplanationInputForTool(
   }
 
   if (toolName === "format_cells") {
-    const detailsAddress = isFormatCellsDetails(details) ? details.address : undefined;
+    const detailsAddress = details?.kind === "format_cells" ? details.address : undefined;
     return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
@@ -507,8 +488,8 @@ function buildChangeExplanationInputForTool(
   }
 
   if (toolName === "charts") {
-    const detailsAddress = isChartsDetails(details) ? details.address : undefined;
-    const detailsSource = isChartsDetails(details) ? details.sourceRange : undefined;
+    const detailsAddress = details?.kind === "charts" ? details.address : undefined;
+    const detailsSource = details?.kind === "charts" ? details.sourceRange : undefined;
     return createChangeExplanationInput({
       toolName,
       blocked: blockedFromText,
@@ -541,9 +522,9 @@ function renderCitations(citations: readonly string[]): TemplateResult {
 
 function renderChangeExplanationSection(
   toolName: SupportedToolName,
-  params: DynamicValue,
+  params: unknown,
   resultText: string | undefined,
-  details: DynamicValue,
+  details: ToolDetails,
 ): TemplateResult {
   const input = buildChangeExplanationInputForTool(toolName, params, resultText, details);
   if (!input) return html``;
@@ -689,41 +670,27 @@ function withRecoveryBadge(base: string, recovery: RecoveryCheckpointDetails | u
   return base.length > 0 ? `${base}, no backup` : " — no backup";
 }
 
-function recoveryBadgeForDetails(details: DynamicValue): string {
-  if (isFormatCellsDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
+function recoveryBadgeForDetails(details: ToolDetails): string {
+  switch (details?.kind) {
+    case "format_cells":
+    case "conditional_format":
+    case "modify_structure":
+    case "comments":
+    case "view_settings":
+    case "charts":
+      return withRecoveryBadge("", details.recovery);
+    default:
+      return "";
   }
-
-  if (isConditionalFormatDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
-  }
-
-  if (isModifyStructureDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
-  }
-
-  if (isCommentsDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
-  }
-
-  if (isViewSettingsDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
-  }
-
-  if (isChartsDetails(details)) {
-    return withRecoveryBadge("", details.recovery);
-  }
-
-  return "";
 }
 
 /** Append error / blocked badge to the detail string. */
 function badge(
   toolName: SupportedToolName,
   resultText: string | undefined,
-  details: DynamicValue,
+  details: ToolDetails,
 ): string {
-  if (toolName === "write_cells" && isWriteCellsDetails(details)) {
+  if (toolName === "write_cells" && details?.kind === "write_cells") {
     if (details.blocked) return " — blocked";
     return withRecoveryBadge(
       mutationBadge(details.changes?.changedCount, details.formulaErrorCount),
@@ -731,7 +698,7 @@ function badge(
     );
   }
 
-  if (toolName === "fill_formula" && isFillFormulaDetails(details)) {
+  if (toolName === "fill_formula" && details?.kind === "fill_formula") {
     if (details.blocked) return " — blocked";
     return withRecoveryBadge(
       mutationBadge(details.changes?.changedCount, details.formulaErrorCount),
@@ -739,7 +706,7 @@ function badge(
     );
   }
 
-  if (toolName === "python_transform_range" && isPythonTransformRangeDetails(details)) {
+  if (toolName === "python_transform_range" && details?.kind === "python_transform_range") {
     if (details.blocked) return " — blocked";
     if (typeof details.error === "string" && details.error.length > 0) return " — error";
     return withRecoveryBadge(
@@ -776,358 +743,331 @@ function splitFirstWord(text: string): ToolDesc {
     : { action: text, detail: "" };
 }
 
+interface ToolDescriptionContext {
+  params: Record<string, unknown>;
+  range: string | undefined;
+  startCell: string | undefined;
+  resultText: string | undefined;
+  details: ToolDetails;
+}
+
+type ToolDescriptionHandler = (context: ToolDescriptionContext) => ToolDesc;
+
+function describeWriteCells(context: ToolDescriptionContext): ToolDesc {
+  const { details, resultText, startCell } = context;
+  const receipt = badge("write_cells", resultText, details);
+  if (details?.kind === "write_cells" && details.address) {
+    return toolDescWithAddress(
+      details.blocked ? "Write" : "Edit",
+      details.address + receipt,
+      details.address,
+    );
+  }
+
+  const address = resultText ? extractWrittenAddress(resultText) : null;
+  return address
+    ? toolDescWithAddress("Edit", address + receipt, address)
+    : toolDescWithAddress("Write", (startCell ?? "cells") + receipt, startCell);
+}
+
+function describeFillFormula(context: ToolDescriptionContext): ToolDesc {
+  const { details, range, resultText } = context;
+  const receipt = badge("fill_formula", resultText, details);
+  if (details?.kind === "fill_formula" && details.address) {
+    return toolDescWithAddress(
+      details.blocked ? "Fill" : "Filled",
+      details.address + receipt,
+      details.address,
+    );
+  }
+
+  const address = resultText ? extractWrittenAddress(resultText) : null;
+  return address
+    ? toolDescWithAddress("Filled", address + receipt, address)
+    : toolDescWithAddress("Fill", (range ? compactRange(range) : "formula") + receipt, range);
+}
+
+function describePythonTransform(context: ToolDescriptionContext): ToolDesc {
+  const { details, params, range, resultText } = context;
+  const receipt = badge("python_transform_range", resultText, details);
+  if (details?.kind === "python_transform_range") {
+    const address = details.outputAddress ?? details.inputAddress;
+    if (address) {
+      const hasError = typeof details.error === "string" && details.error.length > 0;
+      return toolDescWithAddress(
+        details.blocked || hasError ? "Transform" : "Transformed",
+        address + receipt,
+        address,
+      );
+    }
+  }
+
+  const outputStart = params.output_start_cell as string | undefined;
+  const fallbackAddress = outputStart ?? range;
+  return toolDescWithAddress("Transform", (fallbackAddress ?? "range") + receipt, fallbackAddress);
+}
+
+function describeModifyStructure(context: ToolDescriptionContext): ToolDesc {
+  const { details, params, resultText } = context;
+  const recovery = recoveryBadgeForDetails(details);
+  const summary = resultText ? resultSummary(resultText) : null;
+  if (summary) {
+    const parts = splitFirstWord(summary);
+    return { ...parts, detail: `${parts.detail}${recovery}` };
+  }
+
+  const action = params.action as string | undefined;
+  const name = (params.name ?? params.new_name) as string | undefined;
+  if (action === "add_sheet") return { action: "Add", detail: `${name ? `sheet "${name}"` : "sheet"}${recovery}` };
+  if (action === "rename_sheet") return { action: "Rename", detail: `${name ? `to "${name}"` : "sheet"}${recovery}` };
+  if (action === "delete_sheet") return { action: "Delete", detail: `sheet${recovery}` };
+  return { action: "Modify", detail: `structure${recovery}` };
+}
+
+function describeCharts(context: ToolDescriptionContext): ToolDesc {
+  const { details, params } = context;
+  const operation = params.action as string | undefined;
+  const recovery = recoveryBadgeForDetails(details);
+  const chartDetails = details?.kind === "charts" ? details : undefined;
+  const chartName = chartDetails?.name ??
+    (params.name as string | undefined) ??
+    (params.new_name as string | undefined);
+  const source = chartDetails?.sourceRange ?? (params.source_range as string | undefined);
+
+  if (operation === "list") {
+    const count = chartDetails?.count !== undefined ? ` (${chartDetails.count})` : "";
+    return { action: "Charts", detail: `${(params.sheet as string | undefined) ?? "workbook"}${count}` };
+  }
+  if (operation === "create" || operation === "update") {
+    const status = operation === "create" ? "created" : "updated";
+    const fallback = operation === "create" ? "new" : "chart";
+    return toolDescWithAddress(
+      "Chart",
+      `'${chartName ?? fallback}' ${status}${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
+      source,
+    );
+  }
+  if (operation === "delete") {
+    return { action: "Chart", detail: `'${chartName ?? "chart"}' deleted${recovery}` };
+  }
+  if (operation === "get_image") {
+    const size = chartDetails?.image
+      ? ` (${chartDetails.image.width}×${chartDetails.image.height}px)`
+      : "";
+    return { action: "Chart image", detail: `'${chartName ?? "chart"}'${size}` };
+  }
+  return { action: "Charts", detail: chartName ?? "chart" };
+}
+
+function describeComments(context: ToolDescriptionContext): ToolDesc {
+  const { details, params, range } = context;
+  const operation = params.action as string | undefined;
+  const address = range ? compactRange(range) : "range";
+  const recovery = recoveryBadgeForDetails(details);
+  switch (operation) {
+    case "read": return toolDescWithAddress("Comments", address, range);
+    case "add": return toolDescWithAddress("Add", `comment ${address}${recovery}`, range);
+    case "update": return toolDescWithAddress("Update", `comment ${address}${recovery}`, range);
+    case "reply": return toolDescWithAddress("Reply", `${address}${recovery}`, range);
+    case "delete": return toolDescWithAddress("Delete", `comment ${address}${recovery}`, range);
+    case "resolve": return toolDescWithAddress("Resolve", `${address}${recovery}`, range);
+    case "reopen": return toolDescWithAddress("Reopen", `${address}${recovery}`, range);
+    default: return toolDescWithAddress("Comment", `${address}${recovery}`, range);
+  }
+}
+
+function describeViewSettings(context: ToolDescriptionContext): ToolDesc {
+  const { details, params } = context;
+  const operation = params.action as string | undefined;
+  const targetSheet = params.sheet as string | undefined;
+  const targetSheetLabel = targetSheet ?? "active sheet";
+  const targetRange = params.range as string | undefined;
+  const detailsAddress = details?.kind === "view_settings" ? details.address : undefined;
+  const qualifiedRange = detailsAddress ?? qualifyRangeAddress(targetRange, targetSheet);
+  const recovery = recoveryBadgeForDetails(details);
+
+  if (!operation || operation === "get") return { action: "View", detail: "settings" };
+  if (operation === "activate") return { action: "Activate", detail: `${targetSheetLabel}${recovery}` };
+  if (operation === "freeze_at") {
+    const freezeTarget = qualifiedRange ?? targetSheetLabel;
+    return toolDescWithAddress("Freeze", `${compactRange(freezeTarget)}${recovery}`, qualifiedRange);
+  }
+  if (operation.startsWith("hide_") || operation.startsWith("show_")) {
+    return {
+      action: operation.startsWith("hide_") ? "Hide" : "Show",
+      detail: `${operation.replace(/^(hide_|show_)/u, "").replace(/_/gu, " ")} (${targetSheetLabel})${recovery}`,
+    };
+  }
+  return { action: "Set", detail: `${operation.replace(/_/gu, " ")} (${targetSheetLabel})${recovery}` };
+}
+
+function describeInstructions(context: ToolDescriptionContext): ToolDesc {
+  const level = context.params.level as string | undefined;
+  const action = context.params.action as string | undefined;
+  const scope = level ? `${level} rules` : "rules";
+  if (action === "replace") return { action: "Set", detail: scope };
+  if (action === "append") return { action: "Remember", detail: scope };
+  return { action: "Update", detail: scope };
+}
+
+function describeWorkbookHistory(context: ToolDescriptionContext): ToolDesc {
+  const action = context.params.action as string | undefined;
+  const snapshotId = context.params.snapshot_id as string | undefined;
+  if (action === "restore" || action === "delete") {
+    return {
+      action: action === "restore" ? "Restore" : "Delete",
+      detail: snapshotId ? `backup ${snapshotId}` : "latest backup",
+    };
+  }
+  if (action === "clear") return { action: "Clear", detail: "backups" };
+  return { action: "List", detail: "backups" };
+}
+
+function describeSkills(context: ToolDescriptionContext): ToolDesc {
+  const { details, params } = context;
+  const action = params.action as string | undefined;
+  const name = params.name as string | undefined;
+  if (action === "read") {
+    const readDetails = details?.kind === "skills_read" ? details : undefined;
+    const detailName = readDetails?.skillName ?? name ?? "name";
+    const sourceSuffix = readDetails
+      ? (readDetails.sourceKind === "external" ? " (external)" : " (bundled)")
+      : "";
+    if (readDetails?.cacheHit) return { action: "Read skill", detail: `${detailName}${sourceSuffix} (cached)` };
+    if (params.refresh === true) return { action: "Refresh skill", detail: `${detailName}${sourceSuffix}` };
+    return { action: "Read skill", detail: `${detailName}${sourceSuffix}` };
+  }
+  if (action === "install") {
+    const installedName = details?.kind === "skills_install" ? details.skillName : name ?? "skill";
+    return { action: "Install skill", detail: installedName };
+  }
+  if (action === "uninstall") {
+    const uninstallDetails = details?.kind === "skills_uninstall" ? details : undefined;
+    const removedName = uninstallDetails?.skillName ?? name ?? "skill";
+    const removedSuffix = uninstallDetails ? (uninstallDetails.removed ? "" : " (not found)") : "";
+    return { action: "Uninstall skill", detail: `${removedName}${removedSuffix}` };
+  }
+  return { action: "List skills", detail: "" };
+}
+
+function describeMcp(context: ToolDescriptionContext): ToolDesc {
+  const { params } = context;
+  if (typeof params.tool === "string") return { action: "MCP call", detail: params.tool };
+  if (typeof params.connect === "string") return { action: "MCP connect", detail: params.connect };
+  if (typeof params.describe === "string") return { action: "MCP describe", detail: params.describe };
+  if (typeof params.search === "string") return { action: "MCP search", detail: `"${params.search}"` };
+  if (typeof params.server === "string") return { action: "MCP list", detail: params.server };
+  return { action: "MCP", detail: "status" };
+}
+
+const TOOL_DESCRIPTION_HANDLERS = {
+  read_range: ({ params, range }) => {
+    const mode = params.mode as string | undefined;
+    const label = mode === "csv" ? "Export" : "Read";
+    return toolDescWithAddress(label, range ? compactRange(range) + (mode === "csv" ? " (CSV)" : "") : "range", range);
+  },
+  get_workbook_overview: ({ params }) => ({
+    action: t("tools.action.overview"),
+    detail: (params.sheet as string | undefined) ?? "",
+  }),
+  write_cells: describeWriteCells,
+  fill_formula: describeFillFormula,
+  python_transform_range: describePythonTransform,
+  format_cells: ({ details, range }) => {
+    const address = details?.kind === "format_cells" ? details.address : undefined;
+    const resolved = address ?? range;
+    return toolDescWithAddress(
+      "Format",
+      (resolved ? compactRange(resolved) : "cells") + recoveryBadgeForDetails(details),
+      resolved,
+    );
+  },
+  conditional_format: ({ details, range }) => toolDescWithAddress(
+    "Cond. format",
+    (range ? compactRange(range) : "cells") + recoveryBadgeForDetails(details),
+    range,
+  ),
+  modify_structure: describeModifyStructure,
+  search_workbook: ({ params, resultText }) => {
+    const summary = resultText ? resultSummary(resultText) : null;
+    if (summary) return splitFirstWord(summary);
+    const query = params.query as string | undefined;
+    return { action: "Search", detail: query ? `"${query}"` : "workbook" };
+  },
+  trace_dependencies: ({ params }) => {
+    const cell = (params.cell ?? params.range) as string | undefined;
+    const mode = params.mode === "dependents" ? "dependents" : "precedents";
+    return toolDescWithAddress(
+      mode === "dependents" ? "Trace dependents" : "Trace precedents",
+      cell ?? mode,
+      cell,
+    );
+  },
+  explain_formula: ({ params }) => {
+    const cell = params.cell as string | undefined;
+    return toolDescWithAddress("Explain formula", cell ?? "cell", cell);
+  },
+  charts: describeCharts,
+  comments: describeComments,
+  view_settings: describeViewSettings,
+  instructions: describeInstructions,
+  conventions: ({ params }) => {
+    const action = params.action as string | undefined;
+    if (action === "get") return { action: "View", detail: "conventions" };
+    if (action === "reset") return { action: "Reset", detail: "conventions" };
+    return { action: "Update", detail: "conventions" };
+  },
+  workbook_history: describeWorkbookHistory,
+  skills: describeSkills,
+  web_search: ({ params }) => {
+    const query = params.query as string | undefined;
+    return { action: "Web search", detail: query ? `"${query}"` : "query" };
+  },
+  fetch_page: ({ params }) => ({ action: "Fetch page", detail: (params.url as string | undefined) ?? "url" }),
+  mcp: describeMcp,
+  files: ({ params }) => {
+    const action = params.action as string | undefined;
+    const path = params.path as string | undefined;
+    if (action === "list") return { action: "Files", detail: "list" };
+    if (action === "read") return { action: "Read file", detail: path ?? "path" };
+    if (action === "write") return { action: "Write file", detail: path ?? "path" };
+    if (action === "delete") return { action: "Delete file", detail: path ?? "path" };
+    return { action: "Files", detail: action ?? "action" };
+  },
+  execute_office_js: ({ params }) => ({
+    action: t("tools.action.runOfficeJs"),
+    detail: (params.explanation as string | undefined) ?? "code",
+  }),
+  execute_wps_js: ({ params }) => ({
+    action: t("tools.action.runWpsJs"),
+    detail: (params.explanation as string | undefined) ?? "code",
+  }),
+} satisfies Record<SupportedToolName, ToolDescriptionHandler>;
+
 /** Structured description: bold action + normal-weight detail. */
 function describeToolCall(
   toolName: SupportedToolName,
-  params: DynamicValue,
+  params: unknown,
   resultText: string | undefined,
-  details: DynamicValue,
+  details: ToolDetails,
 ): ToolDesc {
-  const p = safeParseParams(params);
-  const range = p.range as string | undefined;
-  const startCell = p.start_cell as string | undefined;
-
-  switch (toolName) {
-    // ── Read tools ──
-    case "read_range": {
-      const mode = p.mode as string | undefined;
-      const label = mode === "csv" ? "Export" : "Read";
-      return toolDescWithAddress(label, range ? compactRange(range) + (mode === "csv" ? " (CSV)" : "") : "range", range);
-    }
-    case "get_workbook_overview": {
-      const sheet = p.sheet as string | undefined;
-      return { action: t("tools.action.overview"), detail: sheet ?? "" };
-    }
-
-    // ── Write tools ──
-    case "write_cells": {
-      const b = badge(toolName, resultText, details);
-
-      if (isWriteCellsDetails(details) && details.address) {
-        const action = details.blocked ? "Write" : "Edit";
-        return toolDescWithAddress(action, details.address + b, details.address);
-      }
-
-      const addr = resultText ? extractWrittenAddress(resultText) : null;
-      return addr
-        ? toolDescWithAddress("Edit", addr + b, addr)
-        : toolDescWithAddress("Write", (startCell ?? "cells") + b, startCell);
-    }
-    case "fill_formula": {
-      const b = badge(toolName, resultText, details);
-
-      if (isFillFormulaDetails(details) && details.address) {
-        const action = details.blocked ? "Fill" : "Filled";
-        return toolDescWithAddress(action, details.address + b, details.address);
-      }
-
-      const addr = resultText ? extractWrittenAddress(resultText) : null;
-      return addr
-        ? toolDescWithAddress("Filled", addr + b, addr)
-        : toolDescWithAddress("Fill", (range ? compactRange(range) : "formula") + b, range);
-    }
-    case "python_transform_range": {
-      const b = badge(toolName, resultText, details);
-
-      if (isPythonTransformRangeDetails(details)) {
-        const address = details.outputAddress ?? details.inputAddress;
-        if (address) {
-          const hasError = typeof details.error === "string" && details.error.length > 0;
-          const action = details.blocked || hasError ? "Transform" : "Transformed";
-          return toolDescWithAddress(action, address + b, address);
-        }
-      }
-
-      const outputStart = p.output_start_cell as string | undefined;
-      const fallbackAddress = outputStart ?? range;
-      return toolDescWithAddress("Transform", (fallbackAddress ?? "range") + b, fallbackAddress);
-    }
-
-    // ── Format tools ──
-    case "format_cells": {
-      const addr = isFormatCellsDetails(details) ? details.address : undefined;
-      const resolved = addr ?? range;
-      const recovery = recoveryBadgeForDetails(details);
-      return toolDescWithAddress("Format", (resolved ? compactRange(resolved) : "cells") + recovery, resolved);
-    }
-    case "conditional_format": {
-      const recovery = recoveryBadgeForDetails(details);
-      return toolDescWithAddress("Cond. format", (range ? compactRange(range) : "cells") + recovery, range);
-    }
-
-    // ── Result-text tools (split first word as action) ──
-    case "modify_structure": {
-      const recovery = recoveryBadgeForDetails(details);
-
-      if (resultText) {
-        const s = resultSummary(resultText);
-        if (s) {
-          const parts = splitFirstWord(s);
-          return { ...parts, detail: `${parts.detail}${recovery}` };
-        }
-      }
-
-      const act = p.action as string | undefined;
-      const name = (p.name ?? p.new_name) as string | undefined;
-      if (act === "add_sheet") return { action: "Add", detail: `${name ? `sheet "${name}"` : "sheet"}${recovery}` };
-      if (act === "rename_sheet") return { action: "Rename", detail: `${name ? `to "${name}"` : "sheet"}${recovery}` };
-      if (act === "delete_sheet") return { action: "Delete", detail: `sheet${recovery}` };
-      return { action: "Modify", detail: `structure${recovery}` };
-    }
-    case "search_workbook": {
-      if (resultText) { const s = resultSummary(resultText); if (s) return splitFirstWord(s); }
-      const q = p.query as string | undefined;
-      return { action: "Search", detail: q ? `"${q}"` : "workbook" };
-    }
-
-    // ── Other tools ──
-    case "trace_dependencies": {
-      const cell = (p.cell ?? p.range) as string | undefined;
-      const mode = p.mode === "dependents" ? "dependents" : "precedents";
-      return toolDescWithAddress(
-        mode === "dependents" ? "Trace dependents" : "Trace precedents",
-        cell ?? mode,
-        cell,
-      );
-    }
-    case "explain_formula": {
-      const cell = p.cell as string | undefined;
-      return toolDescWithAddress("Explain formula", cell ?? "cell", cell);
-    }
-    case "charts": {
-      const op = p.action as string | undefined;
-      const recovery = recoveryBadgeForDetails(details);
-      const detailsName = isChartsDetails(details) ? details.name : undefined;
-      const detailsSource = isChartsDetails(details) ? details.sourceRange : undefined;
-      const chartName = detailsName ?? (p.name as string | undefined) ?? (p.new_name as string | undefined);
-      const source = detailsSource ?? (p.source_range as string | undefined);
-
-      if (op === "list") {
-        const count = isChartsDetails(details) && typeof details.count === "number" ? ` (${details.count})` : "";
-        return { action: "Charts", detail: `${(p.sheet as string | undefined) ?? "workbook"}${count}` };
-      }
-
-      if (op === "create") {
-        return toolDescWithAddress(
-          "Chart",
-          `'${chartName ?? "new"}' created${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
-          source,
-        );
-      }
-
-      if (op === "update") {
-        return toolDescWithAddress(
-          "Chart",
-          `'${chartName ?? "chart"}' updated${source ? ` — ${compactRange(source)}` : ""}${recovery}`,
-          source,
-        );
-      }
-
-      if (op === "delete") {
-        return {
-          action: "Chart",
-          detail: `'${chartName ?? "chart"}' deleted${recovery}`,
-        };
-      }
-
-      if (op === "get_image") {
-        const size = isChartsDetails(details) && details.image
-          ? ` (${details.image.width}×${details.image.height}px)`
-          : "";
-        return {
-          action: "Chart image",
-          detail: `'${chartName ?? "chart"}'${size}`,
-        };
-      }
-
-      return { action: "Charts", detail: chartName ?? "chart" };
-    }
-    case "comments": {
-      const op = p.action as string | undefined;
-      const addr = range ? compactRange(range) : "range";
-      const recovery = recoveryBadgeForDetails(details);
-
-      switch (op) {
-        case "read":
-          return toolDescWithAddress("Comments", addr, range);
-        case "add":
-          return toolDescWithAddress("Add", `comment ${addr}${recovery}`, range);
-        case "update":
-          return toolDescWithAddress("Update", `comment ${addr}${recovery}`, range);
-        case "reply":
-          return toolDescWithAddress("Reply", `${addr}${recovery}`, range);
-        case "delete":
-          return toolDescWithAddress("Delete", `comment ${addr}${recovery}`, range);
-        case "resolve":
-          return toolDescWithAddress("Resolve", `${addr}${recovery}`, range);
-        case "reopen":
-          return toolDescWithAddress("Reopen", `${addr}${recovery}`, range);
-        default:
-          return toolDescWithAddress("Comment", `${addr}${recovery}`, range);
-      }
-    }
-    case "view_settings": {
-      const op = p.action as string | undefined;
-      const targetSheet = p.sheet as string | undefined;
-      const targetSheetLabel = targetSheet ?? "active sheet";
-      const targetRange = p.range as string | undefined;
-      const detailsAddress = isViewSettingsDetails(details) ? details.address : undefined;
-      const qualifiedRange = detailsAddress ?? qualifyRangeAddress(targetRange, targetSheet);
-      const recovery = recoveryBadgeForDetails(details);
-
-      if (!op || op === "get") {
-        return { action: "View", detail: "settings" };
-      }
-
-      if (op === "activate") {
-        return { action: "Activate", detail: `${targetSheetLabel}${recovery}` };
-      }
-
-      if (op === "freeze_at") {
-        const freezeTarget = qualifiedRange ?? targetSheetLabel;
-        return toolDescWithAddress("Freeze", `${compactRange(freezeTarget)}${recovery}`, qualifiedRange);
-      }
-
-      if (op.startsWith("hide_") || op.startsWith("show_")) {
-        return {
-          action: op.startsWith("hide_") ? "Hide" : "Show",
-          detail: `${op.replace(/^(hide_|show_)/u, "").replace(/_/gu, " ")} (${targetSheetLabel})${recovery}`,
-        };
-      }
-
-      return { action: "Set", detail: `${op.replace(/_/gu, " ")} (${targetSheetLabel})${recovery}` };
-    }
-    case "instructions": {
-      const level = p.level as string | undefined;
-      const action = p.action as string | undefined;
-      const scope = level ? `${level} rules` : "rules";
-      if (action === "replace") {
-        return { action: "Set", detail: scope };
-      }
-      if (action === "append") {
-        return { action: "Remember", detail: scope };
-      }
-      return { action: "Update", detail: scope };
-    }
-    case "conventions": {
-      const action = p.action as string | undefined;
-      if (action === "get") return { action: "View", detail: "conventions" };
-      if (action === "reset") return { action: "Reset", detail: "conventions" };
-      return { action: "Update", detail: "conventions" };
-    }
-    case "workbook_history": {
-      const action = p.action as string | undefined;
-      const snapshotId = p.snapshot_id as string | undefined;
-      if (action === "restore") {
-        return {
-          action: "Restore",
-          detail: snapshotId ? `backup ${snapshotId}` : "latest backup",
-        };
-      }
-      if (action === "delete") {
-        return {
-          action: "Delete",
-          detail: snapshotId ? `backup ${snapshotId}` : "latest backup",
-        };
-      }
-      if (action === "clear") {
-        return { action: "Clear", detail: "backups" };
-      }
-      return { action: "List", detail: "backups" };
-    }
-    case "skills": {
-      const action = p.action as string | undefined;
-      const name = p.name as string | undefined;
-      const refresh = p.refresh === true;
-
-      if (action === "read") {
-        const detailName = isSkillsReadDetails(details)
-          ? details.skillName
-          : name ?? "name";
-        const sourceSuffix = isSkillsReadDetails(details)
-          ? (details.sourceKind === "external" ? " (external)" : " (bundled)")
-          : "";
-
-        if (isSkillsReadDetails(details) && details.cacheHit) {
-          return { action: "Read skill", detail: `${detailName}${sourceSuffix} (cached)` };
-        }
-
-        if (refresh) {
-          return { action: "Refresh skill", detail: `${detailName}${sourceSuffix}` };
-        }
-
-        return { action: "Read skill", detail: `${detailName}${sourceSuffix}` };
-      }
-
-      if (action === "install") {
-        const installedName = isSkillsInstallDetails(details)
-          ? details.skillName
-          : name ?? "skill";
-        return { action: "Install skill", detail: installedName };
-      }
-
-      if (action === "uninstall") {
-        const removedName = isSkillsUninstallDetails(details)
-          ? details.skillName
-          : name ?? "skill";
-        const removedSuffix = isSkillsUninstallDetails(details)
-          ? (details.removed ? "" : " (not found)")
-          : "";
-        return { action: "Uninstall skill", detail: `${removedName}${removedSuffix}` };
-      }
-
-      return { action: "List skills", detail: "" };
-    }
-    case "web_search": {
-      const query = p.query as string | undefined;
-      return { action: "Web search", detail: query ? `\"${query}\"` : "query" };
-    }
-    case "fetch_page": {
-      const url = p.url as string | undefined;
-      return { action: "Fetch page", detail: url ?? "url" };
-    }
-    case "mcp": {
-      if (typeof p.tool === "string") {
-        return { action: "MCP call", detail: p.tool };
-      }
-      if (typeof p.connect === "string") {
-        return { action: "MCP connect", detail: p.connect };
-      }
-      if (typeof p.describe === "string") {
-        return { action: "MCP describe", detail: p.describe };
-      }
-      if (typeof p.search === "string") {
-        return { action: "MCP search", detail: `\"${p.search}\"` };
-      }
-      if (typeof p.server === "string") {
-        return { action: "MCP list", detail: p.server };
-      }
-      return { action: "MCP", detail: "status" };
-    }
-    case "files": {
-      const action = p.action as string | undefined;
-      const path = p.path as string | undefined;
-
-      if (action === "list") return { action: "Files", detail: "list" };
-      if (action === "read") return { action: "Read file", detail: path ?? "path" };
-      if (action === "write") return { action: "Write file", detail: path ?? "path" };
-      if (action === "delete") return { action: "Delete file", detail: path ?? "path" };
-      return { action: "Files", detail: action ?? "action" };
-    }
-    default: {
-      if (resultText) { const s = resultSummary(resultText); if (s) return splitFirstWord(s); }
-      return { action: "Tool", detail: "" };
-    }
-  }
+  const parsedParams = safeParseParams(params);
+  return TOOL_DESCRIPTION_HANDLERS[toolName]({
+    params: parsedParams,
+    range: parsedParams.range as string | undefined,
+    startCell: parsedParams.start_cell as string | undefined,
+    resultText,
+    details,
+  });
 }
 
 /* ── Renderer ───────────────────────────────────────────────── */
 
-function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<DynamicValue, DynamicValue> {
+function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer {
   return {
     render(
-      params: DynamicValue,
-      result: ToolResultMessage<DynamicValue> | undefined,
+      params: unknown,
+      result: ToolResultMessage | undefined,
       isStreaming?: boolean,
     ): ToolRenderResult {
       const state: ToolState = result
@@ -1144,7 +1084,9 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
       const defaultExpanded = false;
 
       const resultText = result ? splitToolResultContent(result).text : undefined;
-      const desc = describeToolCall(toolName, params, resultText, result?.details);
+      // `details` is unknown at this seam: older persisted sessions may carry any shape.
+      const details = decodeToolDetails(result?.details);
+      const desc = describeToolCall(toolName, params, resultText, details);
       const detailContent = desc.address
         ? (desc.detail && desc.detail !== desc.address
           ? cellRefDisplay(desc.detail, desc.address)
@@ -1160,11 +1102,11 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
         const cleanedText = stripYamlFrontmatter(text);
         const humanizedText = compactRangesInMarkdown(humanizeColorsInText(cleanedText));
         const useMarkdown = !json.isJson && looksLikeMarkdown(cleanedText);
-        const csvTable = isReadRangeCsvDetails(result.details)
-          ? renderCsvTable(result.details)
+        const csvTable = details?.kind === "read_range_csv"
+          ? renderCsvTable(details)
           : null;
-        const traceDetails = isTraceDependenciesDetails(result.details)
-          ? result.details
+        const traceDetails = details?.kind === "trace_dependencies"
+          ? details
           : null;
         const depTree = traceDetails
           ? renderDepTree(traceDetails.root, traceDetails.mode ?? "precedents")
@@ -1174,11 +1116,10 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
             ? "Dependents"
             : "Precedents"
           : "Dependencies";
-        const formulaExplanation = renderExplainFormulaDetails(result.details);
+        const formulaExplanation = renderExplainFormulaDetails(details);
 
         // Search setup card: show inline guided setup when web_search fails
-        const resultDetails: DynamicValue = result.details;
-        const searchSetupDetails = shouldShowSearchSetupCard(resultDetails) ? resultDetails : null;
+        const searchSetupDetails = details !== undefined && shouldShowSearchSetupCard(details) ? details : null;
         const initSearchSetup = (el: Element | undefined): void => {
           if (el instanceof HTMLElement && searchSetupDetails) {
             mountSearchSetupCard(el, searchSetupDetails);
@@ -1186,7 +1127,7 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
         };
 
         // Bridge setup card: show inline setup for bridge-related failures.
-        const bridgeSetupDetails = shouldShowBridgeSetupCard(resultDetails) ? resultDetails : null;
+        const bridgeSetupDetails = details !== undefined && shouldShowBridgeSetupCard(details) ? details : null;
         const initBridgeSetup = (el: Element | undefined): void => {
           if (el instanceof HTMLElement && bridgeSetupDetails) {
             mountBridgeSetupCard(el, bridgeSetupDetails);
@@ -1242,10 +1183,10 @@ function createExcelMarkdownRenderer(toolName: SupportedToolName): ToolRenderer<
                           ? html`<div class="pi-tool-card__markdown"><markdown-block .content=${humanizedText || "(no output)"}></markdown-block></div>`
                           : html`<div class="pi-tool-card__plain-text">${humanizedText || "(no output)"}</div>`}
                     ${renderImages(images)}
-                    ${renderChartImageDetails(result.details, images.length > 0)}
+                    ${renderChartImageDetails(details, images.length > 0)}
                   </div>
-                  ${renderWorkbookCellDiff(result.details)}
-                  ${renderChangeExplanationSection(toolName, params, text, result.details)}
+                  ${renderWorkbookCellDiff(details)}
+                  ${renderChangeExplanationSection(toolName, params, text, details)}
                 </div>
               </div>
             </div>

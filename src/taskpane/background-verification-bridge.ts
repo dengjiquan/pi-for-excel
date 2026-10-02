@@ -11,6 +11,7 @@
  */
 
 import { getAppStorage } from "../storage/local/app-storage.js";
+import { getErrorMessage } from "../utils/errors.js";
 import { closeOverlayById } from "../ui/overlay-dialog.js";
 import { MODEL_SELECTOR_OVERLAY_ID } from "../ui/overlay-ids.js";
 import type { PiSidebar } from "../ui/pi-sidebar.js";
@@ -27,6 +28,7 @@ type CoreBridgeCommandType =
   | "noop"
   | "status"
   | "officeProbe"
+  | "documentIdentityProbe"
   | "readRange"
   | "readUsedRange"
   | "writeRange"
@@ -35,6 +37,7 @@ type CoreBridgeCommandType =
   | "configureProxy"
   | "selectModel"
   | "submitPrompt"
+  | "submitInput"
   | "listCharts";
 
 type BridgeCommandType = CoreBridgeCommandType | ExtensionVerificationCommandType;
@@ -42,7 +45,7 @@ type BridgeCommandType = CoreBridgeCommandType | ExtensionVerificationCommandTyp
 interface BridgeCommand {
   id?: string;
   type: BridgeCommandType;
-  payload?: DynamicValue;
+  payload?: unknown;
 }
 
 interface PollResponse extends BridgeCommand {
@@ -59,7 +62,7 @@ interface BridgeOptions extends ExtensionVerificationOptions {
 }
 
 interface JsonRecord {
-  [key: string]: DynamicValue;
+  [key: string]: unknown;
 }
 
 interface BridgeStopHandle {
@@ -69,41 +72,41 @@ interface BridgeStopHandle {
 const DEFAULT_POLL_DELAY_MS = 750;
 
 function envValue(name: keyof ImportMetaEnv): string {
-  const value: DynamicValue = import.meta.env[name];
+  const value: unknown = import.meta.env[name];
   return typeof value === "string" ? value.trim() : "";
 }
 
-function isTaskpaneBackgroundVerificationBridgePayloadShape(value: DynamicValue): value is JsonRecord {
+function isTaskpaneBackgroundVerificationBridgePayloadShape(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(value: DynamicValue, key: string): string | undefined {
+function stringField(value: unknown, key: string): string | undefined {
   if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "string" && field.trim().length > 0 ? field.trim() : undefined;
 }
 
-function booleanField(value: DynamicValue, key: string): boolean | undefined {
+function booleanField(value: unknown, key: string): boolean | undefined {
   if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "boolean" ? field : undefined;
 }
 
-function numberField(value: DynamicValue, key: string): number | undefined {
+function numberField(value: unknown, key: string): number | undefined {
   if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "number" && Number.isFinite(field) ? field : undefined;
 }
 
-function isUnknownArray(value: DynamicValue): value is readonly DynamicValue[] {
+function isUnknownArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);
 }
 
-function matrixField(value: DynamicValue, key: string): DynamicValue[][] | undefined {
+function matrixField(value: unknown, key: string): unknown[][] | undefined {
   if (!isTaskpaneBackgroundVerificationBridgePayloadShape(value)) return undefined;
   const field = value[key];
   if (!isUnknownArray(field) || field.length === 0) return undefined;
-  const rows: DynamicValue[][] = [];
+  const rows: unknown[][] = [];
   let width: number | null = null;
   for (const row of field) {
     if (!isUnknownArray(row) || row.length === 0) return undefined;
@@ -140,7 +143,7 @@ async function postJson<T>(url: string, body: JsonRecord, signal: AbortSignal): 
     body: JSON.stringify(body),
     signal,
   });
-  const parsed = await response.json() as DynamicValue;
+  const parsed = await response.json() as unknown;
   if (!response.ok) {
     const message = stringField(parsed, "error") ?? `HTTP ${response.status}`;
     throw new Error(message);
@@ -152,7 +155,7 @@ function assertNever(value: never): never {
   throw new Error(`Unknown background verification command: ${String(value)}`);
 }
 
-function serializeError(error: DynamicValue): JsonRecord {
+function serializeError(error: unknown): JsonRecord {
   if (error instanceof Error) {
     return {
       name: error.name,
@@ -251,7 +254,7 @@ function selectorRowIdentity(row: HTMLButtonElement): { provider: string; id: st
   return { provider, id };
 }
 
-async function configureProxy(payload: DynamicValue): Promise<JsonRecord> {
+async function configureProxy(payload: unknown): Promise<JsonRecord> {
   const enabled = booleanField(payload, "enabled");
   if (enabled === undefined) {
     throw new Error("configureProxy requires boolean payload.enabled");
@@ -271,7 +274,7 @@ async function configureProxy(payload: DynamicValue): Promise<JsonRecord> {
   };
 }
 
-async function selectModel(payload: DynamicValue, options: BridgeOptions): Promise<JsonRecord> {
+async function selectModel(payload: unknown, options: BridgeOptions): Promise<JsonRecord> {
   const provider = stringField(payload, "provider");
   const modelId = stringField(payload, "modelId");
   if (!provider || !modelId) {
@@ -341,7 +344,7 @@ async function selectModel(payload: DynamicValue, options: BridgeOptions): Promi
   };
 }
 
-async function submitPrompt(payload: DynamicValue, options: BridgeOptions): Promise<JsonRecord> {
+async function submitPrompt(payload: unknown, options: BridgeOptions): Promise<JsonRecord> {
   const text = stringField(payload, "text");
   if (!text) throw new Error("submitPrompt requires payload.text");
 
@@ -363,6 +366,119 @@ async function submitPrompt(payload: DynamicValue, options: BridgeOptions): Prom
     before,
     wait: waitForIdle ? await waitForRuntimeIdle(options.getActiveRuntime, initialMessageCount, timeoutMs) : null,
     after: activeRuntimeSummary(options.getActiveRuntime()),
+  };
+}
+
+async function waitForSubmittedInputIdle(
+  getActiveRuntime: () => SessionRuntime | null,
+  timeoutMs: number,
+): Promise<JsonRecord> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const runtime = getActiveRuntime();
+    if (!isRuntimeBusy(runtime)) {
+      return {
+        idle: true,
+        elapsedMs: Date.now() - started,
+        activeRuntime: activeRuntimeSummary(runtime),
+      };
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+
+  return {
+    idle: false,
+    elapsedMs: Date.now() - started,
+    activeRuntime: activeRuntimeSummary(getActiveRuntime()),
+  };
+}
+
+async function submitInput(payload: unknown, options: BridgeOptions): Promise<JsonRecord> {
+  const text = stringField(payload, "text");
+  if (!text) throw new Error("submitInput requires payload.text");
+
+  const runtime = options.getActiveRuntime();
+  if (isRuntimeBusy(runtime)) {
+    throw new Error("Cannot submit input while the active runtime is busy");
+  }
+
+  const input = options.sidebar.getInput();
+  const textarea = options.sidebar.getTextarea();
+  if (!input || !textarea) throw new Error("Cannot submit input because the composer is unavailable");
+
+  const waitForIdle = booleanField(payload, "waitForIdle") ?? true;
+  const timeoutMs = Math.max(1_000, Math.min(120_000, numberField(payload, "timeoutMs") ?? 60_000));
+  const before = activeRuntimeSummary(runtime);
+
+  input.value = text;
+  textarea.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+  textarea.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter",
+    code: "Enter",
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+  }));
+
+  return {
+    submitted: true,
+    textLength: text.length,
+    before,
+    wait: waitForIdle ? await waitForSubmittedInputIdle(options.getActiveRuntime, timeoutMs) : null,
+    after: activeRuntimeSummary(options.getActiveRuntime()),
+  };
+}
+
+/**
+ * Raw host identity sources side by side, so a Save As / reopen can be checked
+ * against what the host reports. Dev-only: the values are local paths.
+ */
+async function runDocumentIdentityProbe(options: BridgeOptions): Promise<JsonRecord> {
+  if (typeof Office === "undefined") {
+    throw new Error("Office global is unavailable; the taskpane is not running inside an Office host.");
+  }
+
+  const stepTimeoutMs = 5000;
+  const withTimeout = async <T>(label: string, run: () => Promise<T>): Promise<{ value: T | null; error: string | null; ms: number }> => {
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${stepTimeoutMs}ms`)), stepTimeoutMs);
+    });
+    try {
+      const value = await Promise.race([run(), timeout]);
+      return { value, error: null, ms: Date.now() - startedAt };
+    } catch (error) {
+      return { value: null, error: getErrorMessage(error), ms: Date.now() - startedAt };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const document = Office.context.document;
+  const staticUrl = document.url;
+
+  const fileProperties = await withTimeout("getFilePropertiesAsync", () => new Promise<string>((resolve, reject) => {
+    document.getFilePropertiesAsync((result) => {
+      if (result.status === Office.AsyncResultStatus.Succeeded) resolve(result.value.url);
+      else reject(new Error(result.error?.message ?? "getFilePropertiesAsync failed"));
+    });
+  }));
+
+  const workbookName = await withTimeout("workbook.name", () => Excel.run(async (context) => {
+    const workbook = context.workbook;
+    workbook.load("name");
+    await context.sync();
+    return workbook.name;
+  }));
+
+  const workbookContext = await withTimeout("getWorkbookContext", () => options.getWorkbookContext());
+
+  return {
+    staticDocumentUrl: typeof staticUrl === "string" ? staticUrl : null,
+    fileProperties,
+    workbookName,
+    workbookContext,
   };
 }
 
@@ -438,7 +554,7 @@ async function readRange(address: string): Promise<JsonRecord> {
   });
 }
 
-async function writeRange(address: string, values: DynamicValue[][], formulas?: DynamicValue[][], numberFormat?: DynamicValue[][]): Promise<JsonRecord> {
+async function writeRange(address: string, values: unknown[][], formulas?: unknown[][], numberFormat?: unknown[][]): Promise<JsonRecord> {
   if (typeof Excel === "undefined") {
     throw new Error("Excel global is unavailable; the taskpane is not running inside the Excel host.");
   }
@@ -470,7 +586,7 @@ async function writeRange(address: string, values: DynamicValue[][], formulas?: 
   });
 }
 
-function clearApplyToFromPayload(payload: DynamicValue): Excel.ClearApplyTo {
+function clearApplyToFromPayload(payload: unknown): Excel.ClearApplyTo {
   const applyTo = stringField(payload, "applyTo") ?? "contents";
   switch (applyTo) {
     case "all":
@@ -512,7 +628,7 @@ async function clearRange(address: string, applyTo: Excel.ClearApplyTo): Promise
   });
 }
 
-async function workbookWriteProbe(payload: DynamicValue): Promise<JsonRecord> {
+async function workbookWriteProbe(payload: unknown): Promise<JsonRecord> {
   if (typeof Excel === "undefined") {
     throw new Error("Excel global is unavailable; the taskpane is not running inside the Excel host.");
   }
@@ -556,8 +672,8 @@ async function workbookWriteProbe(payload: DynamicValue): Promise<JsonRecord> {
       await context.sync();
       cleanup = { action: "delete-created-sheet", restored: true };
     } else if (!createdSheet && !keepSheet) {
-      target.formulas = before.formulas as DynamicValue[][];
-      target.numberFormat = before.numberFormat as DynamicValue[][];
+      target.formulas = before.formulas as unknown[][];
+      target.numberFormat = before.numberFormat as unknown[][];
       await context.sync();
       cleanup = { action: "restore-existing-range", restored: true };
     } else {
@@ -636,7 +752,7 @@ async function listCharts(): Promise<JsonRecord> {
   });
 }
 
-async function executeCommand(command: BridgeCommand, options: BridgeOptions): Promise<DynamicValue> {
+async function executeCommand(command: BridgeCommand, options: BridgeOptions): Promise<unknown> {
   if (isExtensionVerificationCommand(command.type)) {
     return await executeExtensionVerificationCommand(
       command.type,
@@ -669,6 +785,8 @@ async function executeCommand(command: BridgeCommand, options: BridgeOptions): P
     }
     case "officeProbe":
       return await runOfficeProbe();
+    case "documentIdentityProbe":
+      return await runDocumentIdentityProbe(options);
     case "readRange": {
       const address = stringField(command.payload, "address");
       if (!address) throw new Error("readRange requires payload.address");
@@ -698,6 +816,8 @@ async function executeCommand(command: BridgeCommand, options: BridgeOptions): P
       return await selectModel(command.payload, options);
     case "submitPrompt":
       return await submitPrompt(command.payload, options);
+    case "submitInput":
+      return await submitInput(command.payload, options);
     case "listCharts":
       return await listCharts();
     default:

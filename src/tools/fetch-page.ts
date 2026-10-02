@@ -3,16 +3,16 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "typebox";
 
 import { getErrorMessage } from "../utils/errors.js";
 import { runWithTimeoutAbort } from "../utils/network.js";
+import type { SettingsReader } from "../storage/local/settings-store.js";
 import {
   buildProxyDownErrorMessage,
   getEnabledProxyBaseUrl,
   isLikelyProxyConnectionError,
   resolveOutboundRequestUrl,
-  type ProxyAwareSettingsStore,
 } from "./external-fetch.js";
 
 const FETCH_PAGE_TIMEOUT_MS = 15_000;
@@ -71,9 +71,10 @@ export interface FetchPageToolDependencies {
     signal: AbortSignal | undefined,
   ) => Promise<FetchPageResponse>;
   now?: () => number;
+  timeoutMs?: number;
 }
 
-function normalizeOptionalString(value: DynamicValue): string | undefined {
+function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
@@ -134,12 +135,12 @@ function createFetchPageDetails(args: {
   return details;
 }
 
-function parseParams(raw: DynamicValue): Params {
+function parseParams(raw: unknown): Params {
   if (!raw || typeof raw !== "object") {
     throw new Error("Invalid fetch_page params: expected an object.");
   }
 
-  const params = raw as DynamicObject;
+  const params = raw as Record<string, unknown>;
   const url = normalizeOptionalString(params.url);
   if (!url) {
     throw new Error("fetch_page requires a non-empty url.");
@@ -320,7 +321,7 @@ function enforceDomainRateLimit(hostname: string, now: number): void {
 
 async function defaultGetConfig(): Promise<FetchPageToolConfig> {
   const storageModule = await import("../storage/local/app-storage.js");
-  const settings: ProxyAwareSettingsStore = storageModule.getAppStorage().settings;
+  const settings: SettingsReader = storageModule.getAppStorage().settings;
   const proxyBaseUrl = await getEnabledProxyBaseUrl(settings);
   return {
     ...proxyBaseUrlArg(proxyBaseUrl),
@@ -383,6 +384,7 @@ export function createFetchPageTool(
   const getConfig = dependencies.getConfig ?? defaultGetConfig;
   const executeFetch = dependencies.executeFetch ?? defaultExecuteFetch;
   const now = dependencies.now ?? (() => Date.now());
+  const timeoutMs = dependencies.timeoutMs ?? FETCH_PAGE_TIMEOUT_MS;
 
   return {
     name: "fetch_page",
@@ -391,7 +393,7 @@ export function createFetchPageTool(
     parameters: schema,
     execute: async (
       _toolCallId: string,
-      rawParams: DynamicValue,
+      rawParams: unknown,
       signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<FetchPageToolDetails>> => {
       let targetUrl = "";
@@ -413,8 +415,8 @@ export function createFetchPageTool(
 
         const response = await runWithTimeoutAbort({
           signal,
-          timeoutMs: FETCH_PAGE_TIMEOUT_MS,
-          timeoutErrorMessage: `fetch_page timed out after ${FETCH_PAGE_TIMEOUT_MS}ms.`,
+          timeoutMs,
+          timeoutErrorMessage: `fetch_page timed out after ${timeoutMs}ms.`,
           run: (requestSignal) => executeFetch(resolved.requestUrl, requestSignal),
         });
 

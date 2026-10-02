@@ -28,8 +28,13 @@ import {
   uninstallExternalExtensionSkill,
 } from "./skills-store.js";
 import { createExtensionAgentMessage } from "./runtime-manager-helpers.js";
+import {
+  isExtensionOwnedId,
+  qualifyExtensionConnectionId,
+} from "./owner-identifiers.js";
 import type { SandboxActivationOptions } from "./sandbox-runtime.js";
-import type { ExtensionSettingsStore, StoredExtensionEntry } from "./store.js";
+import type { StoredExtensionEntry } from "./store.js";
+import type { SettingsWriter } from "../storage/local/settings-store.js";
 
 type HostActivationBridge = Pick<
   CreateExtensionAPIOptions,
@@ -105,20 +110,10 @@ type SandboxActivationBridge = Pick<
   | "widgetApiV2Enabled"
 >;
 
-function qualifyConnectionIdForEntry(entryId: string, connectionId: string): string {
-  const normalizedConnectionId = connectionId.trim().toLowerCase();
-  if (normalizedConnectionId.length === 0) {
-    throw new Error("Connection id cannot be empty.");
-  }
-
-  const ownerPrefix = `${entryId.toLowerCase()}.`;
-
-  if (normalizedConnectionId.startsWith(ownerPrefix)) {
-    return normalizedConnectionId;
-  }
-
-  return `${ownerPrefix}${normalizedConnectionId}`;
-}
+type SharedActivationBridge = Omit<
+  SandboxActivationBridge,
+  "toast" | "widgetOwnerId"
+>;
 
 function mapStatusToConnectionErrorCode(status: ConnectionStatus): ConnectionToolErrorDetails["errorCode"] {
   if (status === "missing") return "missing_connection";
@@ -141,11 +136,19 @@ function buildConnectionErrorMessage(details: ConnectionToolErrorDetails): strin
   return `Connection "${details.connectionTitle}" failed authentication${reasonSuffix}. ${details.setupHint}.`;
 }
 
+class ConnectionFetchError extends Error {
+  readonly details: ConnectionToolErrorDetails;
+  readonly connectionId: string;
+
+  constructor(details: ConnectionToolErrorDetails) {
+    super(buildConnectionErrorMessage(details));
+    this.details = details;
+    this.connectionId = details.connectionId;
+  }
+}
+
 function createConnectionFetchError(details: ConnectionToolErrorDetails): Error {
-  const error = new Error(buildConnectionErrorMessage(details));
-  Reflect.set(error, "details", details);
-  Reflect.set(error, "connectionId", details.connectionId);
-  return error;
+  return new ConnectionFetchError(details);
 }
 
 function buildConnectionErrorDetails(args: {
@@ -237,7 +240,7 @@ export interface RuntimeManagerActivationBridge {
 
 export interface BuildRuntimeManagerActivationBridgeOptions {
   entry: StoredExtensionEntry;
-  settings: ExtensionSettingsStore;
+  settings: SettingsWriter;
   connectionManager: ConnectionManager;
   getRequiredActiveAgent: () => Agent;
   afterInjectAgentContext?: () => Promise<void> | void;
@@ -281,14 +284,14 @@ export function buildRuntimeManagerActivationBridge(
   };
 
   const storageGet = (key: string) => getExtensionStorageValue(settings, entry.id, key);
-  const storageSet = (key: string, value: DynamicValue) => setExtensionStorageValue(settings, entry.id, key, value);
+  const storageSet = (key: string, value: unknown) => setExtensionStorageValue(settings, entry.id, key, value);
   const storageDelete = (key: string) => deleteExtensionStorageValue(settings, entry.id, key);
   const storageKeys = () => listExtensionStorageKeys(settings, entry.id);
 
   const injectAgentContext = (content: string): void => {
     const agent = getRequiredActiveAgent();
     agent.state.messages.push(buildExtensionMessage("agent.injectContext content", content));
-    void Promise.resolve(afterInjectAgentContext?.()).catch((error: DynamicValue) => {
+    void Promise.resolve(afterInjectAgentContext?.()).catch((error: unknown) => {
       console.warn("[pi] Failed to sync extension-injected context:", error);
     });
   };
@@ -315,23 +318,22 @@ export function buildRuntimeManagerActivationBridge(
   const registerConnection = (definition: Parameters<ConnectionManager["registerDefinition"]>[1]) => {
     const normalizedDefinition = {
       ...definition,
-      id: qualifyConnectionIdForEntry(entry.id, definition.id),
+      id: qualifyExtensionConnectionId(entry.id, definition.id),
     };
 
     return connectionManager.registerDefinition(entry.id, normalizedDefinition);
   };
 
   const unregisterConnection = (connectionId: string): void => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     connectionManager.unregisterDefinition(entry.id, normalizedConnectionId);
   };
 
   const listConnections = async () => {
-    const ownerPrefix = `${entry.id.toLowerCase()}.`;
     const snapshots = await connectionManager.listSnapshots();
 
     return snapshots
-      .filter((snapshot) => snapshot.connectionId.startsWith(ownerPrefix))
+      .filter((snapshot) => isExtensionOwnedId(entry.id, snapshot.connectionId))
       .map((snapshot) => ({
         connectionId: snapshot.connectionId,
         status: snapshot.status,
@@ -341,7 +343,7 @@ export function buildRuntimeManagerActivationBridge(
   };
 
   const getConnection = async (connectionId: string) => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     const snapshot = await connectionManager.getSnapshot(normalizedConnectionId);
     if (!snapshot) return null;
 
@@ -354,27 +356,27 @@ export function buildRuntimeManagerActivationBridge(
   };
 
   const getConnectionSecrets = async (connectionId: string): Promise<Record<string, string> | null> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     return connectionManager.getSecretsForOwner(entry.id, normalizedConnectionId);
   };
 
   const setConnectionSecrets = async (connectionId: string, secrets: Record<string, string>): Promise<void> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     await connectionManager.setSecrets(entry.id, normalizedConnectionId, secrets);
   };
 
   const clearConnectionSecrets = async (connectionId: string): Promise<void> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     await connectionManager.clearSecrets(entry.id, normalizedConnectionId);
   };
 
   const markConnectionValidated = async (connectionId: string): Promise<void> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     await connectionManager.markValidated(entry.id, normalizedConnectionId);
   };
 
   const markConnectionInvalid = async (connectionId: string, reason: string): Promise<void> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
     await connectionManager.markInvalid(entry.id, normalizedConnectionId, reason);
   };
 
@@ -383,7 +385,7 @@ export function buildRuntimeManagerActivationBridge(
     status: ConnectionStatus,
     reason?: string,
   ): Promise<void> => {
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionId);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionId);
 
     if (status === "connected") {
       await connectionManager.markValidated(entry.id, normalizedConnectionId);
@@ -412,7 +414,7 @@ export function buildRuntimeManagerActivationBridge(
       return runExtensionHttpFetch(url, options);
     }
 
-    const normalizedConnectionId = qualifyConnectionIdForEntry(entry.id, connectionName);
+    const normalizedConnectionId = qualifyExtensionConnectionId(entry.id, connectionName);
     const snapshot = await connectionManager.getSnapshot(normalizedConnectionId);
 
     if (!snapshot) {
@@ -533,8 +535,7 @@ export function buildRuntimeManagerActivationBridge(
     return response;
   };
 
-  const host: HostActivationBridge = {
-    getAgent: getRequiredActiveAgent,
+  const shared: SharedActivationBridge = {
     llmComplete: runExtensionLlmCompletion,
     httpFetch: runConnectionAwareHttpFetch,
     storageGet,
@@ -565,44 +566,19 @@ export function buildRuntimeManagerActivationBridge(
     refreshModelProviders,
     isCapabilityEnabled,
     formatCapabilityError,
-    extensionOwnerId: entry.id,
     widgetApiV2Enabled,
   };
 
+  const host: HostActivationBridge = {
+    ...shared,
+    getAgent: getRequiredActiveAgent,
+    extensionOwnerId: entry.id,
+  };
+
   const sandbox: SandboxActivationBridge = {
-    llmComplete: runExtensionLlmCompletion,
-    httpFetch: runConnectionAwareHttpFetch,
-    storageGet,
-    storageSet,
-    storageDelete,
-    storageKeys,
-    clipboardWriteText: writeExtensionClipboard,
-    injectAgentContext,
-    steerAgent,
-    followUpAgent,
-    listSkills,
-    readSkill,
-    installSkill,
-    uninstallSkill,
-    downloadFile,
-    registerConnection,
-    unregisterConnection,
-    listConnections,
-    getConnection,
-    getConnectionSecrets,
-    setConnectionSecrets,
-    clearConnectionSecrets,
-    markConnectionValidated,
-    markConnectionInvalid,
-    markConnectionStatus,
-    registerModelProvider,
-    unregisterModelProvider,
-    refreshModelProviders,
-    isCapabilityEnabled,
-    formatCapabilityError,
+    ...shared,
     toast: showToastMessage,
     widgetOwnerId: entry.id,
-    widgetApiV2Enabled,
   };
 
   return {

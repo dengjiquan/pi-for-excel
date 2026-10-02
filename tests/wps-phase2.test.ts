@@ -1,20 +1,28 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 import { colToLetter, parseCell } from "../src/excel/helpers.ts";
 import { WpsHost } from "../src/host/wps-host.ts";
-import type {
-  WpsCountedCollection,
-  WpsEtApplication,
-  WpsEtRange,
-  WpsEtWorkbook,
-  WpsEtWorksheet,
+import {
+  getWpsActiveWorkbook,
+  getWpsCollectionCount,
+  getWpsCollectionItem,
+  getWpsRangeAddress,
+  getWpsRangeValues,
+  getWpsUsedRange,
+  getWpsWorkbookSheetCollection,
+  writeWpsRangeValues,
+  type WpsCountedCollection,
+  type WpsEtApplication,
+  type WpsEtRange,
+  type WpsEtWorkbook,
+  type WpsEtWorksheet,
 } from "../src/host/wps/jsapi.ts";
 import { createExecuteWpsJsTool } from "../src/tools/execute-wps-js.ts";
+import { createAllTools } from "../src/tools/index.ts";
 import { selectCoreToolForHost, type AnyHostSelectableTool } from "../src/tools/host-selection.ts";
 import { UnsupportedHostToolError } from "../src/tools/unsupported-host-tool.ts";
 import type { ReadRangeCsvDetails, WriteCellsDetails } from "../src/tools/tool-details.ts";
@@ -44,11 +52,11 @@ function colCount(rect: Rect): number {
   return Math.abs(rect.end.col - rect.start.col) + 1;
 }
 
-function makeGrid(rows: number, cols: number, fill: DynamicValue): DynamicValue[][] {
+function makeGrid(rows: number, cols: number, fill: unknown): unknown[][] {
   return Array.from({ length: rows }, () => Array.from({ length: cols }, () => fill));
 }
 
-function isGrid(value: DynamicValue): value is DynamicValue[][] {
+function isGrid(value: unknown): value is unknown[][] {
   return Array.isArray(value) && value.every((row) => Array.isArray(row));
 }
 
@@ -67,27 +75,27 @@ class FakeRange implements WpsEtRange {
     this.Columns = { Count: colCount(rect) };
   }
 
-  get Value2(): DynamicValue[][] {
+  get Value2(): unknown[][] {
     return this.sheet.readGrid(this.rect, "values");
   }
 
-  set Value2(values: DynamicValue) {
+  set Value2(values: unknown) {
     this.sheet.writeValues(this.rect, values);
   }
 
-  get Formula(): DynamicValue[][] {
+  get Formula(): unknown[][] {
     return this.sheet.readGrid(this.rect, "formulas");
   }
 
-  set Formula(values: DynamicValue) {
+  set Formula(values: unknown) {
     this.sheet.writeFormulas(this.rect, values);
   }
 
-  get NumberFormat(): DynamicValue[][] {
+  get NumberFormat(): unknown[][] {
     return this.sheet.readGrid(this.rect, "formats");
   }
 
-  Value(_rangeValueDataType?: DynamicValue, value?: DynamicValue): DynamicValue {
+  Value(_rangeValueDataType?: unknown, value?: unknown): unknown {
     if (arguments.length >= 2) {
       this.Value2 = value;
       return undefined;
@@ -98,19 +106,19 @@ class FakeRange implements WpsEtRange {
 
 class FakeWorksheet implements WpsEtWorksheet {
   readonly Name: string;
-  readonly Visible: DynamicValue;
+  readonly Visible: unknown;
 
-  private readonly values: DynamicValue[][];
-  private readonly formulas: DynamicValue[][];
-  private readonly formats: DynamicValue[][];
+  private readonly values: unknown[][];
+  private readonly formulas: unknown[][];
+  private readonly formats: unknown[][];
   private usedAddress: string;
 
   constructor(args: {
     name: string;
-    values: DynamicValue[][];
-    formulas?: DynamicValue[][];
-    formats?: DynamicValue[][];
-    visible?: DynamicValue;
+    values: unknown[][];
+    formulas?: unknown[][];
+    formats?: unknown[][];
+    visible?: unknown;
     usedAddress?: string;
   }) {
     this.Name = args.name;
@@ -129,11 +137,11 @@ class FakeWorksheet implements WpsEtWorksheet {
     return new FakeRange(this, parseRangeAddress(address));
   }
 
-  readGrid(rect: Rect, kind: "values" | "formulas" | "formats"): DynamicValue[][] {
+  readGrid(rect: Rect, kind: "values" | "formulas" | "formats"): unknown[][] {
     const source = kind === "values" ? this.values : kind === "formulas" ? this.formulas : this.formats;
-    const rows: DynamicValue[][] = [];
+    const rows: unknown[][] = [];
     for (let row = rect.start.row; row <= rect.end.row; row += 1) {
-      const renderedRow: DynamicValue[] = [];
+      const renderedRow: unknown[] = [];
       for (let col = rect.start.col; col <= rect.end.col; col += 1) {
         renderedRow.push(source[row - 1]?.[col] ?? (kind === "formats" ? "General" : ""));
       }
@@ -142,17 +150,17 @@ class FakeWorksheet implements WpsEtWorksheet {
     return rows;
   }
 
-  writeValues(rect: Rect, rawValues: DynamicValue): void {
+  writeValues(rect: Rect, rawValues: unknown): void {
     const values = isGrid(rawValues) ? rawValues : [[rawValues]];
     this.writeGrid(rect, values, false);
   }
 
-  writeFormulas(rect: Rect, rawValues: DynamicValue): void {
+  writeFormulas(rect: Rect, rawValues: unknown): void {
     const values = isGrid(rawValues) ? rawValues : [[rawValues]];
     this.writeGrid(rect, values, true);
   }
 
-  private writeGrid(rect: Rect, values: DynamicValue[][], formulasMayBePresent: boolean): void {
+  private writeGrid(rect: Rect, values: unknown[][], formulasMayBePresent: boolean): void {
     for (let row = 0; row < rowCount(rect); row += 1) {
       for (let col = 0; col < colCount(rect); col += 1) {
         const sheetRow = rect.start.row - 1 + row;
@@ -255,9 +263,9 @@ function createFakeWpsApplication(): WpsEtApplication {
 
 function installFakeWps(app: WpsEtApplication): () => void {
   const hadApplication = Reflect.has(globalThis, "Application");
-  const previousApplication: DynamicValue = Reflect.get(globalThis, "Application");
+  const previousApplication: unknown = Reflect.get(globalThis, "Application");
   const hadWps = Reflect.has(globalThis, "wps");
-  const previousWps: DynamicValue = Reflect.get(globalThis, "wps");
+  const previousWps: unknown = Reflect.get(globalThis, "wps");
 
   Reflect.set(globalThis, "Application", app);
   Reflect.set(globalThis, "wps", { EtApplication: () => app });
@@ -291,6 +299,65 @@ function firstText<TDetails>(result: AgentToolResult<TDetails>): string {
   }
   return block.text;
 }
+
+void test("WPS adapter decodes callable properties and application-level collections with owner binding", () => {
+  let written: unknown = null;
+  const range: WpsEtRange = {
+    Address(): unknown {
+      assert.equal(this, range);
+      return "$A$1";
+    },
+    Value2(): unknown {
+      assert.equal(this, range);
+      return [["value"]];
+    },
+    Value(_kind?: unknown, value?: unknown): unknown {
+      assert.equal(this, range);
+      written = value;
+      return undefined;
+    },
+  };
+  const sheet: WpsEtWorksheet = {
+    UsedRange(): WpsEtRange {
+      assert.equal(this, sheet);
+      return range;
+    },
+  };
+  const collection: WpsCountedCollection = {
+    Count(): number {
+      assert.equal(this, collection);
+      return 1;
+    },
+    Item(key: string | number): unknown {
+      assert.equal(this, collection);
+      assert.equal(key, 1);
+      return sheet;
+    },
+  };
+  const workbook: WpsEtWorkbook = {};
+  const app: WpsEtApplication = {
+    ActiveWorkbook(): WpsEtWorkbook {
+      assert.equal(this, app);
+      return workbook;
+    },
+    Worksheets(): WpsCountedCollection {
+      assert.equal(this, app);
+      return collection;
+    },
+  };
+
+  assert.equal(getWpsActiveWorkbook(app), workbook);
+  const resolvedCollection = getWpsWorkbookSheetCollection(app, workbook);
+  assert.equal(resolvedCollection, collection);
+  assert.equal(getWpsCollectionCount(resolvedCollection), 1);
+  assert.equal(getWpsCollectionItem(collection, 1), sheet);
+  assert.equal(getWpsUsedRange(sheet), range);
+  assert.equal(getWpsRangeAddress(range), "$A$1");
+  assert.deepEqual(getWpsRangeValues(range), [["value"]]);
+
+  writeWpsRangeValues(range, [["written"]], false);
+  assert.deepEqual(written, [["written"]]);
+});
 
 void test("WpsHost hashes ActiveWorkbook.FullName without exposing the raw path", async () => {
   const app = createFakeWpsApplication();
@@ -429,13 +496,15 @@ void test("WPS host wiring keeps core metadata stable and registers execute_wps_
   const unsupported = selectCoreToolForHost("fill_formula", fillFormulaLikeTool, "wps");
   await assert.rejects(
     async () => unsupported.execute("tool-call-unsupported", {}),
-    (error: DynamicValue) => {
+    (error: unknown) => {
       assert.ok(error instanceof UnsupportedHostToolError);
       assert.equal(error.toolName, "fill_formula");
       return true;
     },
   );
 
-  const registrySource = await readFile(new URL("../src/tools/index.ts", import.meta.url), "utf8");
-  assert.match(registrySource, /hostKind === "wps" \? \[createExecuteWpsJsTool\(\)\] : \[\]/u);
+  const officeToolNames = createAllTools({ hostKind: "office" }).map((tool) => tool.name);
+  const wpsToolNames = createAllTools({ hostKind: "wps" }).map((tool) => tool.name);
+  assert.equal(officeToolNames.includes("execute_wps_js"), false);
+  assert.equal(wpsToolNames.filter((name) => name === "execute_wps_js").length, 1);
 });

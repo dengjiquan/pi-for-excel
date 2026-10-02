@@ -42,7 +42,7 @@ Notes for agents working in this repo.
 - Keep human-readable output in `result.content`.
 - Put stable machine metadata in `result.details`.
 - UI should prefer `details`, with fallback for older persisted sessions.
-- Reuse guards/types from `src/tools/tool-details.ts`.
+- Every details payload is a TypeBox schema in `src/tools/tool-details.ts` with its type as `Static<>`; add a new payload there and to `toolDetailsSchemasByKind`. The UI decodes `result.details` once with `decodeToolDetails()` and switches on `kind`; do not add per-kind `isXDetails` guards.
 
 ### Workbook identity + session restore
 - Never persist raw `Office.context.document.url`.
@@ -74,12 +74,18 @@ Notes for agents working in this repo.
 ## TypeScript policy
 - No `// @ts-ignore`.
 - If unavoidable: `// @ts-expect-error -- <reason>` with a real reason.
-- No explicit `any`, `as any`, non-null assertions, or direct `unknown` syntax.
-- Use `DynamicValue` only at true external/runtime boundaries, then parse/refine into concrete domain types before values flow inward.
-- Do not add generic object/record guards (`isRecord`, `isObjectValue`, `isPlainObject`, etc.); write concrete parsers or domain-specific predicates instead.
-- Type assertions and lint suppressions must stay local and explain the safety invariant.
+- No explicit `any`, `as any`, or non-null assertions.
+- `unknown` only at the seam (JSON decode, host object, bridge/sandbox message, caught error); parse it into a concrete domain type on the next line. Never add `unknown` further in: `npm run check:unknown-burndown` fails if the count rises (see `docs/coding-standards.md`).
+- Do not add generic object/record guards (`isRecord`, `isObjectValue`, `isPlainObject`, `is…PayloadShape`, etc.); an object check alone does not establish a domain contract. Parse the domain shape, preferably with a TypeBox schema and `Static<>`.
+- Schemas use `typebox` (pinned to pi-ai's version; one copy ships). Import `StringEnum` from `src/tools/string-enum.ts` (pi-ai's, with a `const` type parameter so inline arrays keep literal types).
+- Type assertions and lint suppressions must stay local and explain the safety invariant; do not add blanket safety comments.
 
 ## Verification
+
+Use the local acceptance policy in `docs/coding-standards.md` and the `.agents/skills/excel-background-verification/SKILL.md` workflow.
+
+The Excel lane runs entirely in the background, including opening the pane after a relaunch (the skill bootstraps it from the scratch workbook) and reading what the taskpane persisted (straight from WebKit's IndexedDB). Work through the skill's "Before you call it blocked" table before reporting the lane blocked; each row there has been hit and worked around.
+
 - `npm run check`
 - `npm run build`
 - `npm run test:models`
@@ -143,3 +149,5 @@ If local changes do not show up:
 4. If still stale, clear WKWebView cache and relaunch Excel:
    - `rm -rf ~/Library/Containers/com.microsoft.Excel/Data/Library/WebKit/`
    - `rm -rf ~/Library/Containers/com.microsoft.Excel/Data/Library/Caches/WebKit/`
+
+No `Open Pi` ribbon button after a relaunch is expected, not a stale manifest: Excel keeps sideloaded add-ins out of the ribbon cache until they have been activated once in the running process. Open the pane from a workbook that carries the auto-open part (`.agents/skills/excel-background-verification/scripts/scratch-workbook.py`); the button appears after that. Clearing the WebKit cache also deletes the taskpane's IndexedDB (sessions, recovery snapshots, files-workspace state), so do it last.

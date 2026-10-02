@@ -35,7 +35,7 @@ export async function excelRun<T>(fn: (context: Excel.RequestContext) => Promise
 /** Parse "Sheet1!A1:B5" → { sheet: "Sheet1", address: "A1:B5" } */
 export function parseRangeRef(ref: string): RangeRef {
   if (ref.includes("!")) {
-    const idx = ref.indexOf("!");
+    const idx = ref.lastIndexOf("!");
     const sheet = ref
       .substring(0, idx)
       .replace(/^'|'$/g, "")
@@ -57,9 +57,9 @@ export function getRange(context: Excel.RequestContext, ref: string): { sheet: E
 /** Build a fully-qualified address like "Sheet1!A1:B5" */
 export function qualifiedAddress(sheetName: string, address: string): string {
   // Strip sheet prefix if already in the address
-  const clean = address.includes("!") ? address.slice(address.indexOf("!") + 1) : address;
+  const clean = address.includes("!") ? address.slice(address.lastIndexOf("!") + 1) : address;
   const escaped = sheetName.replace(/'/g, "''");
-  const needsQuote = /[\s']/.test(sheetName);
+  const needsQuote = /[\s'!]/.test(sheetName);
   const quoted = needsQuote ? `'${escaped}'` : sheetName;
   return `${quoted}!${clean}`;
 }
@@ -108,6 +108,24 @@ export function cellAddress(col: number, row: number): string {
   return `${colToLetter(col)}${row}`;
 }
 
+/** Check if a cell address falls within a range address. */
+export function isCellInRange(cellAddress: string, rangeAddress: string): boolean {
+  const bangIndex = rangeAddress.indexOf("!");
+  const cleanRange = bangIndex >= 0 ? rangeAddress.slice(bangIndex + 1) : rangeAddress;
+  const colonIndex = cleanRange.indexOf(":");
+  const startAddress = colonIndex >= 0 ? cleanRange.slice(0, colonIndex) : cleanRange;
+  const endAddress = colonIndex >= 0 ? cleanRange.slice(colonIndex + 1) : cleanRange;
+  const start = parseCell(startAddress);
+  const end = parseCell(endAddress);
+  const cell = parseCell(cellAddress);
+  return (
+    cell.col >= start.col &&
+    cell.col <= end.col &&
+    cell.row >= start.row &&
+    cell.row <= end.row
+  );
+}
+
 /**
  * Compute the end address for a 2D array starting at a given cell.
  * E.g. startCell="B2", rows=3, cols=4 → "B2:E4"
@@ -130,7 +148,7 @@ export function cellAtOffset(rangeStart: string, rowOffset: number, colOffset: n
 // Guarded API calls
 // ============================================================================
 
-function isOfficeItemNotFound(error: DynamicValue): boolean {
+function isOfficeItemNotFound(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
 
   if ("code" in error && typeof error.code === "string") {
@@ -199,7 +217,7 @@ export async function getDirectDependentsSafe(
 }
 
 /** Pad a 2D array so all rows have the same length */
-export function padValues(values: DynamicValue[][]): { padded: DynamicValue[][]; rows: number; cols: number } {
+export function padValues(values: unknown[][]): { padded: unknown[][]; rows: number; cols: number } {
   const rows = values.length;
   const cols = Math.max(...values.map((r) => r.length));
   const padded = values.map((row) => {

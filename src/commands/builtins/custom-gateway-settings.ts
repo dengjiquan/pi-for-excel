@@ -2,6 +2,7 @@
  * Settings section for custom OpenAI-compatible gateways.
  */
 
+import type { Models } from "@earendil-works/pi-ai";
 import { getAppStorage } from "../../storage/local/app-storage.js";
 
 import {
@@ -25,6 +26,7 @@ import { showToast } from "../../ui/toast.js";
 import { t } from "../../language/index.js";
 
 interface BuildCustomGatewaySectionOptions {
+  models?: Pick<Models, "getModels">;
   onProvidersChanged: () => void;
   /**
    * Include the section's own title + hint. Defaults to true; the settings
@@ -355,6 +357,7 @@ export async function buildCustomGatewaySection(
             ...(hasHeaders ? { headers } : {}),
             api: apiSelect.value as GatewayApiChoice,
           },
+          options.models,
         );
 
         await reloadGateways();

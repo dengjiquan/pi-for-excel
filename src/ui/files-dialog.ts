@@ -1095,17 +1095,11 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
       return;
     }
 
-    void workspace
-      .connectNativeDirectory({
-        audit: DIALOG_AUDIT_CONTEXT,
-      })
-      .catch((error: DynamicValue) => {
-        showToast(
-          t("files-dialog.toast.connectFolderFailed", {
-            error: getErrorMessage(error),
-          }),
-        );
-      });
+    void workspace.connectNativeDirectory({
+      audit: DIALOG_AUDIT_CONTEXT,
+    }).catch((error: unknown) => {
+      showToast(t("files-dialog.toast.connectFolderFailed", { error: getErrorMessage(error) }));
+    });
   });
 
   hiddenInput.addEventListener("change", () => {
@@ -1129,12 +1123,8 @@ export async function showFilesWorkspaceDialog(): Promise<void> {
           }),
         );
       })
-      .catch((error: DynamicValue) => {
-        showToast(
-          t("files-dialog.toast.uploadFailed", {
-            error: getErrorMessage(error),
-          }),
-        );
+      .catch((error: unknown) => {
+        showToast(t("files-dialog.toast.uploadFailed", { error: getErrorMessage(error) }));
       });
   });
 

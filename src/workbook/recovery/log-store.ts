@@ -1,7 +1,3 @@
-function isWorkbookRecoveryLogStorePayloadShape(value: DynamicValue): value is DynamicObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
  * Persistence helpers for workbook recovery snapshots.
  */
@@ -11,51 +7,32 @@ import {
   MAX_RECOVERY_ENTRIES,
   RETENTION_LIMIT_SETTING_KEY,
 } from "./constants.js";
+import type { SettingsWriter } from "../../storage/local/settings-store.js";
 
 export const RECOVERY_SETTING_KEY = "workbook.recovery-snapshots.v1";
 
-export interface SettingsStoreLike {
-  get<T>(key: string): Promise<T | null>;
-  set(key: string, value: DynamicValue): Promise<void>;
-}
-
-function isSettingsStoreLike(value: DynamicValue): value is SettingsStoreLike {
-  if (!isWorkbookRecoveryLogStorePayloadShape(value)) return false;
-
-  return (
-    typeof value.get === "function" &&
-    typeof value.set === "function"
-  );
-}
-
-export async function defaultGetSettingsStore(): Promise<SettingsStoreLike | null> {
+export async function defaultGetSettingsStore(): Promise<SettingsWriter | null> {
   try {
     const storageModule = await import("../../storage/local/app-storage.js");
-    const appStorage = storageModule.getAppStorage();
-    const settings = isWorkbookRecoveryLogStorePayloadShape(appStorage) ? appStorage.settings : null;
-    return isSettingsStoreLike(settings) ? settings : null;
+    return storageModule.getAppStorage().settings;
   } catch {
     return null;
   }
 }
 
 export async function readPersistedWorkbookRecoveryPayload(
-  settings: SettingsStoreLike | null,
-): Promise<DynamicValue> {
+  settings: SettingsWriter | null,
+): Promise<unknown> {
   if (!settings) {
     return null;
   }
 
-  try {
-    return await settings.get<DynamicValue>(RECOVERY_SETTING_KEY);
-  } catch {
-    return null;
-  }
+  return settings.get(RECOVERY_SETTING_KEY);
 }
 
 export async function writePersistedWorkbookRecoveryPayload(
-  settings: SettingsStoreLike | null,
-  payload: DynamicValue,
+  settings: SettingsWriter | null,
+  payload: unknown,
 ): Promise<void> {
   if (!settings) {
     return;
@@ -77,7 +54,7 @@ export async function readRetentionLimit(): Promise<number> {
   if (!settings) return MAX_RECOVERY_ENTRIES;
 
   try {
-    const raw = await settings.get<DynamicValue>(RETENTION_LIMIT_SETTING_KEY);
+    const raw = await settings.get(RETENTION_LIMIT_SETTING_KEY);
     return clampRetentionLimit(raw);
   } catch {
     return MAX_RECOVERY_ENTRIES;

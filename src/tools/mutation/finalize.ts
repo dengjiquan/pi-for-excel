@@ -14,7 +14,11 @@ export async function finalizeMutationOperation<TDetails extends MutationResultD
   dependencies: MutationFinalizeDependencies,
   operation: MutationFinalizeOperation<TDetails>,
 ): Promise<MutationFinalizeRecoveryResult | null> {
-  await dependencies.appendAuditEntry(operation.auditEntry);
+  try {
+    await dependencies.appendAuditEntry(operation.auditEntry);
+  } catch {
+    console.warn("[pi] Failed to append workbook mutation audit entry.");
+  }
 
   const recovery = operation.recovery;
   if (!recovery) {
@@ -39,10 +43,6 @@ export async function finalizeMutationRecoveryStep<TDetails extends MutationResu
   }
 
   recovery.result.details.recovery = recoveryCheckpointCreated(checkpoint.id);
-
-  if (recovery.dispatchSnapshotCreated) {
-    recovery.dispatchSnapshotCreated(checkpoint);
-  }
 
   return {
     checkpointCreated: true,

@@ -5,6 +5,7 @@ import type {
   AgentToolResult,
   AgentToolUpdateCallback,
 } from "@earendil-works/pi-agent-core";
+import type { ModelInputLimits } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
 
 import type {
@@ -27,7 +28,7 @@ export interface ExtensionCommand {
 
 export type ExtensionCleanup = () => void | Promise<void>;
 
-export interface ExtensionToolDefinition<TParameters extends TSchema = TSchema, TDetails = DynamicValue> {
+export interface ExtensionToolDefinition<TParameters extends TSchema = TSchema, TDetails = unknown> {
   description: string;
   parameters: TParameters;
   label?: string;
@@ -90,6 +91,7 @@ export interface ExtensionModelDefinition {
   name?: string;
   reasoning?: boolean;
   input?: readonly ("text" | "image")[];
+  inputLimits?: ModelInputLimits;
   contextWindow?: number;
   maxTokens?: number;
 }
@@ -196,8 +198,8 @@ export interface HttpAPI {
 }
 
 export interface StorageAPI {
-  get(key: string): Promise<DynamicValue>;
-  set(key: string, value: DynamicValue): Promise<void>;
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<void>;
   keys(): Promise<string[]>;
 }
@@ -286,8 +288,8 @@ export interface CreateExtensionAPIOptions {
   subscribeAgentEvents?: (handler: (ev: AgentEvent) => void) => () => void;
   llmComplete?: (request: LlmCompletionRequest) => Promise<LlmCompletionResult>;
   httpFetch?: (url: string, options?: HttpRequestOptions) => Promise<HttpResponse>;
-  storageGet?: (key: string) => Promise<DynamicValue>;
-  storageSet?: (key: string, value: DynamicValue) => Promise<void>;
+  storageGet?: (key: string) => Promise<unknown>;
+  storageSet?: (key: string, value: unknown) => Promise<void>;
   storageDelete?: (key: string) => Promise<void>;
   storageKeys?: () => Promise<string[]>;
   clipboardWriteText?: (text: string) => Promise<void>;

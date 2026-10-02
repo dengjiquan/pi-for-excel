@@ -2,20 +2,62 @@
 
 import type { SpreadsheetHostKind } from "./types.js";
 
-function getGlobalMember(scope: object, key: string): DynamicValue {
-  return Reflect.get(scope, key);
+interface HostGlobalScope {
+  readonly wps?: unknown;
+  readonly Application?: unknown;
+  readonly Office?: unknown;
 }
 
-function hasObjectOrFunction(value: DynamicValue): boolean {
+function getGlobalMember(scope: object, key: keyof HostGlobalScope): unknown {
+  // Every object is safe to read through this optional, read-only host-probe shape.
+  const hostGlobals = scope as HostGlobalScope;
+  return hostGlobals[key];
+}
+
+function hasObjectOrFunction(value: unknown): value is object {
   return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
-export function hasWpsJsApiGlobal(scope: object = globalThis): boolean {
-  const wps = getGlobalMember(scope, "wps");
-  if (hasObjectOrFunction(wps)) return true;
+/** Members `src/host/wps/jsapi.ts` reads off the ET `Application` object. */
+const WPS_ET_APPLICATION_MEMBERS = [
+  "ActiveWorkbook",
+  "ActiveSheet",
+  "Worksheets",
+  "Sheets",
+  "Range",
+  "PluginStorage",
+  "CreateTaskpane",
+  "CreateTaskPane",
+] as const;
 
-  const application = getGlobalMember(scope, "Application");
-  return hasObjectOrFunction(application);
+function readMember(owner: object, key: string): unknown {
+  try {
+    return Reflect.get(owner, key);
+  } catch {
+    // Host objects may throw from accessors before the document is ready.
+    return undefined;
+  }
+}
+
+function looksLikeWpsEtApplication(value: unknown): boolean {
+  if (!hasObjectOrFunction(value)) return false;
+  return WPS_ET_APPLICATION_MEMBERS.some((key) => readMember(value, key) !== undefined);
+}
+
+function looksLikeWpsPluginGlobal(value: unknown): boolean {
+  if (!hasObjectOrFunction(value)) return false;
+  if (typeof readMember(value, "EtApplication") === "function") return true;
+  if (readMember(value, "PluginStorage") !== undefined) return true;
+  return looksLikeWpsEtApplication(readMember(value, "Application"));
+}
+
+/**
+ * True only when a global carries the WPS JSAPI surface this add-in uses,
+ * so an unrelated `Application` or `wps` global does not select the WPS host.
+ */
+export function hasWpsJsApiGlobal(scope: object = globalThis): boolean {
+  if (looksLikeWpsPluginGlobal(getGlobalMember(scope, "wps"))) return true;
+  return looksLikeWpsEtApplication(getGlobalMember(scope, "Application"));
 }
 
 export function hasOfficeJsGlobal(scope: object = globalThis): boolean {

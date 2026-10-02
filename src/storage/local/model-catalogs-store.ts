@@ -5,18 +5,19 @@ import type {
   ModelsStoreEntry,
 } from "@earendil-works/pi-ai";
 
+import { decodeModelInputLimits } from "../../models/input-limits.js";
 import { Store } from "./store.js";
 import type { StoreConfig } from "./types.js";
 
-function isModelCatalogPayload(value: DynamicValue): value is DynamicObject {
+function isModelCatalogPayload(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseFiniteNumber(value: DynamicValue): number | null {
+function parseFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function parseCost(value: DynamicValue): Model<Api>["cost"] | null {
+function parseCost(value: unknown): Model<Api>["cost"] | null {
   if (!isModelCatalogPayload(value)) return null;
 
   const input = parseFiniteNumber(value.input);
@@ -30,7 +31,7 @@ function parseCost(value: DynamicValue): Model<Api>["cost"] | null {
   return { input, output, cacheRead, cacheWrite };
 }
 
-function parseInputKinds(value: DynamicValue): Model<Api>["input"] | null {
+function parseInputKinds(value: unknown): Model<Api>["input"] | null {
   if (!Array.isArray(value)) return null;
 
   const parsed: Model<Api>["input"] = [];
@@ -41,7 +42,7 @@ function parseInputKinds(value: DynamicValue): Model<Api>["input"] | null {
   return parsed;
 }
 
-function parseHeaders(value: DynamicValue): Record<string, string> | undefined | null {
+function parseHeaders(value: unknown): Record<string, string> | undefined | null {
   if (value === undefined) return undefined;
   if (!isModelCatalogPayload(value)) return null;
 
@@ -53,7 +54,7 @@ function parseHeaders(value: DynamicValue): Record<string, string> | undefined |
   return parsed;
 }
 
-function parseModel(value: DynamicValue): Model<Api> | null {
+function parseModel(value: unknown): Model<Api> | null {
   if (!isModelCatalogPayload(value)) return null;
 
   const { id, name, api, provider, baseUrl, reasoning } = value;
@@ -62,6 +63,12 @@ function parseModel(value: DynamicValue): Model<Api> | null {
   const input = parseInputKinds(value.input);
   const cost = parseCost(value.cost);
   const headers = parseHeaders(value.headers);
+  const inputLimitsValue = value.inputLimits;
+  const inputLimits = inputLimitsValue === undefined
+    ? undefined
+    : typeof inputLimitsValue === "object" && inputLimitsValue !== null
+      ? decodeModelInputLimits(inputLimitsValue)
+      : null;
 
   if (
     typeof id !== "string"
@@ -75,6 +82,7 @@ function parseModel(value: DynamicValue): Model<Api> | null {
     || !input
     || !cost
     || headers === null
+    || inputLimits === null
   ) {
     return null;
   }
@@ -90,11 +98,12 @@ function parseModel(value: DynamicValue): Model<Api> | null {
     cost,
     contextWindow,
     maxTokens,
+    ...(inputLimits !== undefined ? { inputLimits } : {}),
     ...(headers !== undefined ? { headers } : {}),
   };
 }
 
-function parseEntry(value: DynamicValue): ModelsStoreEntry | undefined {
+function parseEntry(value: unknown): ModelsStoreEntry | undefined {
   if (!isModelCatalogPayload(value) || !Array.isArray(value.models)) {
     return undefined;
   }
@@ -119,7 +128,7 @@ export class ModelCatalogsStore extends Store implements ModelsStore {
   }
 
   async read(providerId: string): Promise<ModelsStoreEntry | undefined> {
-    const raw = await this.getBackend().get<DynamicValue>("model-catalogs", providerId);
+    const raw = await this.getBackend().get<unknown>("model-catalogs", providerId);
     return parseEntry(raw);
   }
 

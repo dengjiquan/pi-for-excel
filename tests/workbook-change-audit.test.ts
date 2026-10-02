@@ -19,12 +19,12 @@ import type { WorkbookRecoverySnapshot } from "../src/workbook/recovery-log.ts";
 
 interface InMemorySettingsStore {
   get<T>(key: string): Promise<T | null>;
-  set(key: string, value: DynamicValue): Promise<void>;
+  set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<void>;
 }
 
 function createInMemorySettingsStore(): InMemorySettingsStore {
-  const values = new Map<string, DynamicValue>();
+  const values = new Map<string, unknown>();
 
   return {
     get: <T>(key: string): Promise<T | null> => {
@@ -35,7 +35,7 @@ function createInMemorySettingsStore(): InMemorySettingsStore {
 
       return Promise.resolve(value as T);
     },
-    set: (key: string, value: DynamicValue): Promise<void> => {
+    set: (key: string, value: unknown): Promise<void> => {
       values.set(key, value);
       return Promise.resolve();
     },
@@ -46,15 +46,46 @@ function createInMemorySettingsStore(): InMemorySettingsStore {
   };
 }
 
-function isWorkbookChangeAuditTestPayloadShape(value: DynamicValue): value is DynamicObject {
+class TransientAuditReadSettings {
+  private readonly values = new Map<string, unknown>();
+  private failNextRead = false;
+
+  get(key: string): Promise<unknown> {
+    if (this.failNextRead) {
+      this.failNextRead = false;
+      return Promise.reject(new Error("transient audit read failure"));
+    }
+    return Promise.resolve(this.values.get(key) ?? null);
+  }
+
+  set(key: string, value: unknown): Promise<void> {
+    this.values.set(key, value);
+    return Promise.resolve();
+  }
+
+  delete(key: string): Promise<void> {
+    this.values.delete(key);
+    return Promise.resolve();
+  }
+
+  seed(key: string, value: unknown): void {
+    this.values.set(key, value);
+  }
+
+  armReadFailure(): void {
+    this.failNextRead = true;
+  }
+}
+
+function isWorkbookChangeAuditTestPayloadShape(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isUnknownArray(value: DynamicValue): value is DynamicValue[] {
+function isUnknownArray(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
-function firstText(result: DynamicValue): string {
+function firstText(result: unknown): string {
   if (!isWorkbookChangeAuditTestPayloadShape(result)) {
     throw new Error("Expected tool result object");
   }
@@ -72,7 +103,7 @@ function firstText(result: DynamicValue): string {
   return first.text;
 }
 
-function viewSettingsDetails(result: DynamicValue): DynamicObject {
+function viewSettingsDetails(result: unknown): Record<string, unknown> {
   if (!isWorkbookChangeAuditTestPayloadShape(result)) {
     throw new Error("Expected tool result object");
   }
@@ -157,6 +188,68 @@ void test("workbook change audit log appends and reloads entries", async () => {
   const entriesB = await logB.list();
   assert.equal(entriesB.length, 1);
   assert.equal(entriesB[0]?.toolCallId, "call-1");
+});
+
+void test("workbook change audit buffers entries across a transient initial read failure", async () => {
+  const settings = new TransientAuditReadSettings();
+  settings.seed("workbook.change-audit.v1", {
+    version: 1,
+    entries: [{
+      id: "existing-entry",
+      at: 1,
+      toolName: "write_cells",
+      toolCallId: "existing-call",
+      blocked: false,
+      changedCount: 1,
+      changes: [],
+    }],
+  });
+  let nextId = 0;
+  const log = new WorkbookChangeAuditLog({
+    settings,
+    getWorkbookContext: () => Promise.resolve({
+      workbookId: null,
+      workbookName: null,
+      source: "unknown",
+    }),
+    now: () => 2 + nextId,
+    createId: () => `new-entry-${nextId += 1}`,
+  });
+  const append = (toolCallId: string) => log.append({
+    toolName: "write_cells",
+    toolCallId,
+    blocked: false,
+    changedCount: 1,
+    changes: [],
+    executionMode: "safe",
+  });
+  settings.armReadFailure();
+
+  await append("buffered-call");
+  assert.deepEqual((await settings.get("workbook.change-audit.v1")), {
+    version: 1,
+    entries: [{
+      id: "existing-entry",
+      at: 1,
+      toolName: "write_cells",
+      toolCallId: "existing-call",
+      blocked: false,
+      changedCount: 1,
+      changes: [],
+    }],
+  });
+
+  await append("retry-call");
+  assert.deepEqual(
+    (await log.list()).map((entry) => entry.id),
+    ["new-entry-2", "new-entry-1", "existing-entry"],
+  );
+
+  const reloaded = new WorkbookChangeAuditLog({ settings });
+  assert.deepEqual(
+    (await reloaded.list()).map((entry) => entry.id),
+    ["new-entry-2", "new-entry-1", "existing-entry"],
+  );
 });
 
 void test("workbook change audit log records execution mode metadata", async () => {

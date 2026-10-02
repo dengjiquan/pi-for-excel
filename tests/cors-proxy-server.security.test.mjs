@@ -8,7 +8,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const ORIGIN = "https://localhost:3141";
-const PROXY_SCRIPT_PATH = fileURLToPath(new URL("../scripts/cors-proxy-server.mjs", import.meta.url));
+const PROXY_SCRIPT_PATH = fileURLToPath(
+  new URL("../scripts/cors-proxy-server.mjs", import.meta.url),
+);
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -50,9 +52,13 @@ async function stopChild(child) {
 async function startProxy(extraEnv = {}) {
   const port = await getFreePort();
 
+  const env = { ...process.env };
+  // Local dev machines may keep permissive overrides in the user environment;
+  // security tests must exercise the strict defaults.
+  delete env.ALLOW_ALL_TARGET_HOSTS;
   const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
     env: {
-      ...process.env,
+      ...env,
       HOST: "127.0.0.1",
       PORT: String(port),
       ALLOWED_ORIGINS: ORIGIN,
@@ -73,8 +79,8 @@ async function startProxy(extraEnv = {}) {
       stdout += chunk;
       const hasListeningLog = stdout.includes("CORS proxy listening on");
       const hasTargetPolicyLog =
-        stdout.includes("Allowed target hosts")
-        || stdout.includes("target host allowlisting disabled");
+        stdout.includes("Allowed target hosts") ||
+        stdout.includes("target host allowlisting disabled");
 
       if (hasListeningLog && hasTargetPolicyLog) {
         resolve(undefined);
@@ -86,7 +92,11 @@ async function startProxy(extraEnv = {}) {
     });
 
     child.once("exit", (code, signal) => {
-      reject(new Error(`proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
+      reject(
+        new Error(
+          `proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
+        ),
+      );
     });
   });
 
@@ -107,6 +117,9 @@ async function startProxy(extraEnv = {}) {
 async function startProxyOnDefaultPort(extraEnv = {}) {
   const env = { ...process.env };
   delete env.PORT;
+  // Local dev machines may keep permissive overrides in the user environment;
+  // security tests must exercise the strict defaults.
+  delete env.ALLOW_ALL_TARGET_HOSTS;
   Object.assign(env, {
     HOST: "127.0.0.1",
     ALLOWED_ORIGINS: ORIGIN,
@@ -130,8 +143,8 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
       stdout += chunk;
       const hasListeningLog = stdout.includes("CORS proxy listening on");
       const hasTargetPolicyLog =
-        stdout.includes("Allowed target hosts")
-        || stdout.includes("target host allowlisting disabled");
+        stdout.includes("Allowed target hosts") ||
+        stdout.includes("target host allowlisting disabled");
 
       if (hasListeningLog && hasTargetPolicyLog) {
         resolve(undefined);
@@ -143,7 +156,11 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
     });
 
     child.once("exit", (code, signal) => {
-      reject(new Error(`proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
+      reject(
+        new Error(
+          `proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
+        ),
+      );
     });
   });
 
@@ -154,10 +171,14 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
     }),
   ]);
 
-  const match = stdout.match(/CORS proxy listening on http:\/\/127\.0\.0\.1:(\d+)/);
+  const match = stdout.match(
+    /CORS proxy listening on http:\/\/127\.0\.0\.1:(\d+)/,
+  );
   if (!match) {
     await stopChild(child);
-    throw new Error(`Could not parse proxy port from logs\n${stdout}\n${stderr}`);
+    throw new Error(
+      `Could not parse proxy port from logs\n${stdout}\n${stderr}`,
+    );
   }
 
   return {
@@ -217,9 +238,12 @@ test("proxy blocks loopback targets by default", async (t) => {
   });
 
   const target = encodeURIComponent("http://127.0.0.1:59999/");
-  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
-    headers: { Origin: ORIGIN },
-  });
+  const response = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${target}`,
+    {
+      headers: { Origin: ORIGIN },
+    },
+  );
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -233,9 +257,12 @@ test("proxy blocks non-allowlisted hosts by default", async (t) => {
   });
 
   const target = encodeURIComponent("https://example.com/");
-  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
-    headers: { Origin: ORIGIN },
-  });
+  const response = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${target}`,
+    {
+      headers: { Origin: ORIGIN },
+    },
+  );
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -253,7 +280,10 @@ test("proxy default allowlist includes supported OAuth and web search providers"
     .split("\n")
     .find((line) => line.includes("Allowed target hosts"));
 
-  assert.ok(allowlistLine, "Expected startup logs to include default allowed target hosts");
+  assert.ok(
+    allowlistLine,
+    "Expected startup logs to include default allowed target hosts",
+  );
 
   const loggedHosts = new Set(
     allowlistLine
@@ -268,6 +298,7 @@ test("proxy default allowlist includes supported OAuth and web search providers"
   const requiredHosts = [
     "platform.claude.com",
     "auth.openai.com",
+    "openrouter.ai",
     "s.jina.ai",
     "api.firecrawl.dev",
     "google.serper.dev",
@@ -276,7 +307,10 @@ test("proxy default allowlist includes supported OAuth and web search providers"
   ];
 
   for (const host of requiredHosts) {
-    assert.ok(loggedHosts.has(host), `Expected ${host} in default target allowlist log`);
+    assert.ok(
+      loggedHosts.has(host),
+      `Expected ${host} in default target allowlist log`,
+    );
   }
 });
 
@@ -286,10 +320,15 @@ test("proxy allows GitHub enterprise OAuth-style endpoints on custom domains by 
     await proxy.stop();
   });
 
-  const target = encodeURIComponent("https://ghe.example.invalid/login/device/code");
-  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
-    headers: { Origin: ORIGIN },
-  });
+  const target = encodeURIComponent(
+    "https://ghe.example.invalid/login/device/code",
+  );
+  const response = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${target}`,
+    {
+      headers: { Origin: ORIGIN },
+    },
+  );
 
   assert.equal(response.status, 502);
   const text = await response.text();
@@ -305,10 +344,15 @@ test("explicit ALLOWED_TARGET_HOSTS keeps enterprise-path host checks strict", a
     await proxy.stop();
   });
 
-  const target = encodeURIComponent("https://ghe.example.invalid/login/device/code");
-  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
-    headers: { Origin: ORIGIN },
-  });
+  const target = encodeURIComponent(
+    "https://ghe.example.invalid/login/device/code",
+  );
+  const response = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${target}`,
+    {
+      headers: { Origin: ORIGIN },
+    },
+  );
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -347,7 +391,7 @@ test("proxy keeps its own CORS headers when upstream sends conflicting ones", as
     "Access-Control-Allow-Methods": "GET",
     "Access-Control-Allow-Headers": "x-upstream-only",
     "Access-Control-Max-Age": "0",
-    "Vary": "Accept-Encoding",
+    Vary: "Accept-Encoding",
     "X-Upstream-Custom": "passthrough",
   });
   t.after(async () => {
@@ -383,6 +427,153 @@ test("proxy keeps its own CORS headers when upstream sends conflicting ones", as
   assert.equal(response.headers.get("x-upstream-custom"), "passthrough");
 });
 
+test("proxy cancels the upstream request when the client disconnects mid-stream", async (t) => {
+  const port = await getFreePort();
+  let upstreamClosed;
+  const upstreamClosedPromise = new Promise((resolve) => {
+    upstreamClosed = resolve;
+  });
+  let upstreamStarted;
+  const upstreamStartedPromise = new Promise((resolve) => {
+    upstreamStarted = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    upstreamStarted();
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write("data: first\n\n");
+    const ticker = setInterval(() => res.write("data: tick\n\n"), 25);
+    // A generation that never finishes on its own; only a cancelled upstream request ends it.
+    req.on("close", () => {
+      clearInterval(ticker);
+      upstreamClosed(Date.now());
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(undefined));
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  });
+
+  const proxy = await startProxy({
+    ALLOW_LOOPBACK_TARGETS: "1",
+    ALLOW_PRIVATE_TARGETS: "1",
+  });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const url = encodeURIComponent(`http://127.0.0.1:${port}/v1/messages`);
+  const client = new AbortController();
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${url}`, {
+    method: "POST",
+    headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+    body: "{}",
+    signal: client.signal,
+  });
+  assert.equal(response.status, 200);
+  await upstreamStartedPromise;
+  const reader = response.body.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+
+  const abortedAt = Date.now();
+  client.abort();
+
+  const closedAt = await Promise.race([
+    upstreamClosedPromise,
+    delay(3000).then(() => null),
+  ]);
+  assert.notEqual(
+    closedAt,
+    null,
+    "upstream request kept running after the client disconnected",
+  );
+  assert.ok(closedAt - abortedAt < 3000);
+
+  // The proxy must stay healthy and must not report the cancellation as an upstream error.
+  await delay(100);
+  const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
+  assert.equal(health.status, 200);
+  const { stdout, stderr } = proxy.getLogs();
+  assert.doesNotMatch(
+    `${stdout}\n${stderr}`,
+    /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u,
+  );
+});
+
+test("proxy cancels an upstream request the client abandons before any response arrives", async (t) => {
+  const port = await getFreePort();
+  let upstreamClosed;
+  const upstreamClosedPromise = new Promise((resolve) => {
+    upstreamClosed = resolve;
+  });
+  let upstreamStarted;
+  const upstreamStartedPromise = new Promise((resolve) => {
+    upstreamStarted = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    upstreamStarted();
+    // Provider still "thinking": no headers yet. Only a cancelled request ends this.
+    const pending = setTimeout(() => res.end("late"), 10_000);
+    req.on("close", () => {
+      clearTimeout(pending);
+      upstreamClosed(true);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(undefined));
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  });
+
+  const proxy = await startProxy({
+    ALLOW_LOOPBACK_TARGETS: "1",
+    ALLOW_PRIVATE_TARGETS: "1",
+  });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const url = encodeURIComponent(`http://127.0.0.1:${port}/v1/messages`);
+  const client = new AbortController();
+  const request = fetch(`http://127.0.0.1:${proxy.port}/?url=${url}`, {
+    method: "POST",
+    headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+    body: "{}",
+    signal: client.signal,
+  });
+  await upstreamStartedPromise;
+  client.abort();
+  await assert.rejects(request, { name: "AbortError" });
+
+  const closed = await Promise.race([
+    upstreamClosedPromise,
+    delay(3000).then(() => false),
+  ]);
+  assert.equal(
+    closed,
+    true,
+    "upstream request kept running after the client disconnected",
+  );
+
+  await delay(100);
+  const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
+  assert.equal(health.status, 200);
+  const { stdout, stderr } = proxy.getLogs();
+  assert.doesNotMatch(
+    `${stdout}\n${stderr}`,
+    /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u,
+  );
+  assert.match(stdout, /cancelled by client/u);
+});
+
 test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
   const proxy = await startProxy({
     ALLOWED_TARGET_HOSTS: "api.openai.com",
@@ -392,9 +583,12 @@ test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
   });
 
   const blocked = encodeURIComponent("https://example.com/");
-  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${blocked}`, {
-    headers: { Origin: ORIGIN },
-  });
+  const response = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${blocked}`,
+    {
+      headers: { Origin: ORIGIN },
+    },
+  );
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -412,9 +606,12 @@ test("proxy blocks requests without an allowed Origin header", async (t) => {
   const noOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`);
   assert.equal(noOrigin.status, 403);
 
-  const badOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
-    headers: { Origin: "https://evil.example.com" },
-  });
+  const badOrigin = await fetch(
+    `http://127.0.0.1:${proxy.port}/?url=${target}`,
+    {
+      headers: { Origin: "https://evil.example.com" },
+    },
+  );
   assert.equal(badOrigin.status, 403);
 });
 
@@ -472,7 +669,11 @@ test("proxy captures OAuth callbacks for supported localhost providers", async (
     },
   ];
 
-  await Promise.all(cases.map((entry) => waitForHttpStatus(`http://127.0.0.1:${entry.port}/not-found`, 404)));
+  await Promise.all(
+    cases.map((entry) =>
+      waitForHttpStatus(`http://127.0.0.1:${entry.port}/not-found`, 404),
+    ),
+  );
 
   for (const entry of cases) {
     const callbackUrl =
@@ -480,7 +681,10 @@ test("proxy captures OAuth callbacks for supported localhost providers", async (
       `code=${encodeURIComponent(entry.code)}&state=${encodeURIComponent(entry.state)}`;
     const callbackResponse = await fetch(callbackUrl);
     assert.equal(callbackResponse.status, 200);
-    assert.match(await callbackResponse.text(), new RegExp(`${entry.label} login captured`));
+    assert.match(
+      await callbackResponse.text(),
+      new RegExp(`${entry.label} login captured`),
+    );
 
     const pollResponse = await fetch(
       `http://127.0.0.1:${proxy.port}/oauth/callback/${entry.id}?state=${encodeURIComponent(entry.state)}`,
@@ -518,19 +722,30 @@ test("proxy /healthz responds without an Origin header and never proxies", async
   const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
   assert.equal(health.status, 200);
   assert.equal(health.headers.get("x-pi-for-excel-proxy"), "1");
-  assert.equal(health.headers.get("x-pi-for-excel-codex-websocket-bridge"), "1");
+  assert.equal(
+    health.headers.get("x-pi-for-excel-codex-websocket-bridge"),
+    "1",
+  );
   assert.equal(await health.text(), "ok");
 
   const browserHealth = await fetch(`http://127.0.0.1:${proxy.port}/healthz`, {
     headers: { Origin: ORIGIN },
   });
   assert.equal(browserHealth.status, 200);
-  assert.equal(browserHealth.headers.get("access-control-allow-origin"), ORIGIN);
-  const exposedHeaders = browserHealth.headers.get("access-control-expose-headers")?.toLowerCase() ?? "";
+  assert.equal(
+    browserHealth.headers.get("access-control-allow-origin"),
+    ORIGIN,
+  );
+  const exposedHeaders =
+    browserHealth.headers.get("access-control-expose-headers")?.toLowerCase() ??
+    "";
   assert.match(exposedHeaders, /x-pi-for-excel-proxy/);
   assert.match(exposedHeaders, /x-pi-for-excel-codex-websocket-bridge/);
   assert.equal(browserHealth.headers.get("x-pi-for-excel-proxy"), "1");
-  assert.equal(browserHealth.headers.get("x-pi-for-excel-codex-websocket-bridge"), "1");
+  assert.equal(
+    browserHealth.headers.get("x-pi-for-excel-codex-websocket-bridge"),
+    "1",
+  );
   assert.equal(await browserHealth.text(), "ok");
 
   // Query strings (including ?url=) must not turn /healthz into a proxy path.
@@ -547,7 +762,9 @@ test("proxy restricts the Codex WebSocket bridge to the exact ChatGPT endpoint",
     await proxy.stop();
   });
 
-  const target = encodeURIComponent("https://chatgpt.com/backend-api/not-codex");
+  const target = encodeURIComponent(
+    "https://chatgpt.com/backend-api/not-codex",
+  );
   const response = await fetch(
     `http://127.0.0.1:${proxy.port}/?pi_transport=codex-websocket&url=${target}`,
     {
@@ -558,7 +775,10 @@ test("proxy restricts the Codex WebSocket bridge to the exact ChatGPT endpoint",
   );
 
   assert.equal(response.status, 400);
-  assert.match(await response.text(), /target must be https:\/\/chatgpt\.com\/backend-api\/codex\/responses/);
+  assert.match(
+    await response.text(),
+    /target must be https:\/\/chatgpt\.com\/backend-api\/codex\/responses/,
+  );
 });
 
 test("proxy rejects unknown internal transport modes", async (t) => {
@@ -567,7 +787,9 @@ test("proxy rejects unknown internal transport modes", async (t) => {
     await proxy.stop();
   });
 
-  const target = encodeURIComponent("https://chatgpt.com/backend-api/codex/responses");
+  const target = encodeURIComponent(
+    "https://chatgpt.com/backend-api/codex/responses",
+  );
   const response = await fetch(
     `http://127.0.0.1:${proxy.port}/?pi_transport=unknown&url=${target}`,
     { method: "POST", headers: { Origin: ORIGIN }, body: "{}" },
@@ -595,13 +817,24 @@ test("proxy auto-selects a random port when default 3003 is busy and PORT is not
   assert.equal(await health.text(), "ok");
 
   const { stdout, stderr } = second.getLogs();
-  const listeningLogCount = stdout.match(/CORS proxy listening on/g)?.length ?? 0;
-  const settingsHintCount = stdout.match(/Update Pi for Excel \/settings → Proxy URL/g)?.length ?? 0;
+  const listeningLogCount =
+    stdout.match(/CORS proxy listening on/g)?.length ?? 0;
+  const settingsHintCount =
+    stdout.match(/Update Pi for Excel \/settings → Proxy URL/g)?.length ?? 0;
   assert.equal(listeningLogCount, 1);
   assert.equal(settingsHintCount, 1);
-  assert.match(stderr, /Port 3003 is already in use; choosing a random available port instead\./);
-  assert.match(stdout, new RegExp(`CORS proxy listening on http://127\\.0\\.0\\.1:${second.port}`));
-  assert.match(stdout, /Update Pi for Excel \/settings → Proxy URL to http:\/\/127\.0\.0\.1:\d+/);
+  assert.match(
+    stderr,
+    /Port 3003 is already in use; choosing a random available port instead\./,
+  );
+  assert.match(
+    stdout,
+    new RegExp(`CORS proxy listening on http://127\\.0\\.0\\.1:${second.port}`),
+  );
+  assert.match(
+    stdout,
+    /Update Pi for Excel \/settings → Proxy URL to http:\/\/127\.0\.0\.1:\d+/,
+  );
 });
 
 test("proxy boots with ALLOWED_CLIENT_CIDRS, warns, and still serves loopback", async (t) => {
@@ -616,7 +849,10 @@ test("proxy boots with ALLOWED_CLIENT_CIDRS, warns, and still serves loopback", 
   assert.equal(health.status, 200);
 
   const { stdout } = proxy.getLogs();
-  assert.match(stdout, /WARNING: accepting non-loopback clients from: 10\.96\.0\.0\/13, 192\.168\.1\.5/);
+  assert.match(
+    stdout,
+    /WARNING: accepting non-loopback clients from: 10\.96\.0\.0\/13, 192\.168\.1\.5/,
+  );
 });
 
 test("proxy exits on invalid ALLOWED_CLIENT_CIDRS (fail closed)", async () => {
@@ -751,5 +987,8 @@ test("proxy exits on explicit ALLOWED_TARGET_HOSTS with no valid entries (fail c
   ]);
 
   assert.equal(code, 1);
-  assert.match(stderr, /ALLOWED_TARGET_HOSTS was set but contained no valid host entries/);
+  assert.match(
+    stderr,
+    /ALLOWED_TARGET_HOSTS was set but contained no valid host entries/,
+  );
 });

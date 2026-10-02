@@ -1,4 +1,4 @@
-function isExtensionsSandboxRuntimePayloadShape(value: DynamicValue): value is DynamicObject {
+function isExtensionsSandboxRuntimePayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -25,6 +25,8 @@ import type {
   SkillSummary,
 } from "../commands/extension-api.js";
 import type { ConnectionState, ConnectionStatus } from "../connections/types.js";
+import { decodeModelInputLimits } from "../models/input-limits.js";
+import type { ToolConnectionMetadata } from "../tools/connection-requirements.js";
 import type { ExtensionCapability } from "./permissions.js";
 import {
   clearExtensionWidgets,
@@ -57,11 +59,11 @@ import {
   asNonEmptyString,
   asSandboxPayload,
   asWidgetPlacementOrUndefined,
+  dispatchSandboxLlmCompletion,
   getErrorMessage,
   normalizeSandboxToolParameters,
   normalizeSandboxToolResult,
   parseSandboxHttpRequestOptions,
-  parseSandboxLlmCompletionRequest,
   sanitizeText,
 } from "./sandbox/runtime-helpers.js";
 
@@ -86,13 +88,13 @@ export interface SandboxActivationOptions {
   extensionName: string;
   source: SandboxExtensionSource;
   registerCommand: (name: string, cmd: ExtensionCommand) => void;
-  registerTool: (tool: AgentTool<TSchema, DynamicValue>) => void;
+  registerTool: (tool: AgentTool<TSchema, unknown>) => void;
   unregisterTool: (name: string) => void;
   subscribeAgentEvents: (handler: (event: AgentEvent) => void) => () => void;
   llmComplete: (request: LlmCompletionRequest) => Promise<LlmCompletionResult>;
   httpFetch: (url: string, options?: HttpRequestOptions) => Promise<HttpResponse>;
-  storageGet: (key: string) => Promise<DynamicValue>;
-  storageSet: (key: string, value: DynamicValue) => Promise<void>;
+  storageGet: (key: string) => Promise<unknown>;
+  storageSet: (key: string, value: unknown) => Promise<void>;
   storageDelete: (key: string) => Promise<void>;
   storageKeys: () => Promise<string[]>;
   clipboardWriteText: (text: string) => Promise<void>;
@@ -125,12 +127,12 @@ export interface SandboxActivationOptions {
 }
 
 interface SandboxPendingRequest {
-  resolve: (value: DynamicValue) => void;
-  reject: (reason: DynamicValue) => void;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
-function parseConnectionStatus(value: DynamicValue): ConnectionStatus {
+function parseConnectionStatus(value: unknown): ConnectionStatus {
   if (value === "connected" || value === "missing" || value === "invalid" || value === "error") {
     return value;
   }
@@ -138,7 +140,7 @@ function parseConnectionStatus(value: DynamicValue): ConnectionStatus {
   throw new Error("Invalid connection status.");
 }
 
-function parseConnectionSecrets(value: DynamicValue): Record<string, string> {
+function parseConnectionSecrets(value: unknown): Record<string, string> {
   const payload = asSandboxPayload(value, "connection secrets");
   const secrets: Record<string, string> = {};
 
@@ -153,7 +155,7 @@ function parseConnectionSecrets(value: DynamicValue): Record<string, string> {
   return secrets;
 }
 
-function parseConnectionHttpAuth(value: DynamicValue): ExtensionConnectionDefinition["httpAuth"] {
+function parseConnectionHttpAuth(value: unknown): ExtensionConnectionDefinition["httpAuth"] {
   if (value === undefined || value === null) {
     return undefined;
   }
@@ -197,7 +199,7 @@ function parseConnectionHttpAuth(value: DynamicValue): ExtensionConnectionDefini
   };
 }
 
-function parseConnectionDefinition(value: DynamicValue): ExtensionConnectionDefinition {
+function parseConnectionDefinition(value: unknown): ExtensionConnectionDefinition {
   const payload = asSandboxPayload(value, "connection definition");
   const title = asNonEmptyString(payload.title, "title");
   const id = asNonEmptyString(payload.id, "id");
@@ -257,7 +259,7 @@ function parseConnectionDefinition(value: DynamicValue): ExtensionConnectionDefi
   };
 }
 
-function parseModelProviderDefinition(value: DynamicValue): ExtensionModelProviderDefinition {
+function parseModelProviderDefinition(value: unknown): ExtensionModelProviderDefinition {
   const payload = asSandboxPayload(value, "model provider definition");
   const id = asNonEmptyString(payload.id, "provider.id");
   const name = asNonEmptyString(payload.name, "provider.name");
@@ -296,6 +298,17 @@ function parseModelProviderDefinition(value: DynamicValue): ExtensionModelProvid
       }
     }
 
+    const inputLimitsValue = model.inputLimits;
+    const inputLimits = inputLimitsValue === undefined
+      ? undefined
+      : typeof inputLimitsValue === "object" && inputLimitsValue !== null
+        ? decodeModelInputLimits(inputLimitsValue)
+        : null;
+    if (inputLimits === null) {
+      throw new Error(
+        `provider.models[${index}].inputLimits must contain positive integer limits with jpegQuality at most 100.`,
+      );
+    }
     const contextWindow = asFiniteNumberOrNullOrUndefined(model.contextWindow);
     const maxTokens = asFiniteNumberOrNullOrUndefined(model.maxTokens);
     if (contextWindow === null || maxTokens === null) {
@@ -307,6 +320,7 @@ function parseModelProviderDefinition(value: DynamicValue): ExtensionModelProvid
       ...(modelName !== undefined ? { name: modelName } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
       ...(input !== undefined ? { input } : {}),
+      ...(inputLimits !== undefined ? { inputLimits } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
     };
@@ -351,13 +365,13 @@ class SandboxRuntimeHost {
     this.bootstrapSandboxPort();
   };
 
-  private readonly onPortMessage = (event: MessageEvent<DynamicValue>) => {
+  private readonly onPortMessage = (event: MessageEvent<unknown>) => {
     this.handlePortMessage(event);
   };
 
   private readonly readyPromise: Promise<void>;
   private resolveReady: (() => void) | null = null;
-  private rejectReady: ((reason: DynamicValue) => void) | null = null;
+  private rejectReady: ((reason: unknown) => void) | null = null;
 
   private nextRequestId = 1;
   private disposed = false;
@@ -506,11 +520,11 @@ class SandboxRuntimeHost {
 
   private async callSandbox(
     method: string,
-    params: DynamicValue,
+    params: unknown,
     options?: {
       allowWhenDisposed?: boolean;
     },
-  ): Promise<DynamicValue> {
+  ): Promise<unknown> {
     if (this.disposed && !options?.allowWhenDisposed) {
       throw new Error("Sandbox runtime is already disposed.");
     }
@@ -518,7 +532,7 @@ class SandboxRuntimeHost {
     const requestId = `req-${this.nextRequestId}`;
     this.nextRequestId += 1;
 
-    return new Promise<DynamicValue>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(new Error(`Sandbox request timed out: ${method}`));
@@ -547,7 +561,7 @@ class SandboxRuntimeHost {
   private sendResponse(
     requestId: string,
     ok: boolean,
-    payload: DynamicValue,
+    payload: unknown,
   ): void {
     if (!this.port) {
       return;
@@ -571,7 +585,7 @@ class SandboxRuntimeHost {
     this.port.postMessage(envelope);
   }
 
-  private sendEvent(eventName: string, data: DynamicValue): void {
+  private sendEvent(eventName: string, data: unknown): void {
     if (!this.port) {
       return;
     }
@@ -609,12 +623,12 @@ class SandboxRuntimeHost {
 
   private dispatchSandboxUiAction(actionId: string): void {
     void this.callSandbox("ui_action", { actionId })
-      .catch((error: DynamicValue) => {
+      .catch((error: unknown) => {
         console.warn(`[pi] Sandbox UI action failed: ${getErrorMessage(error)}`);
       });
   }
 
-  private handlePortMessage(event: MessageEvent<DynamicValue>): void {
+  private handlePortMessage(event: MessageEvent<unknown>): void {
     const envelope = event.data;
     if (!isSandboxEnvelope(envelope)) {
       return;
@@ -679,101 +693,205 @@ class SandboxRuntimeHost {
     throw new Error(this.options.formatCapabilityError(capability));
   }
 
+  private registerSandboxCommand(request: SandboxRequestEnvelope): void {
+    this.assertCapability("commands.register");
+    const payload = asSandboxPayload(request.params, "register_command params");
+    const commandId = asNonEmptyString(payload.commandId, "commandId");
+    const name = asNonEmptyString(payload.name, "name");
+    const description = typeof payload.description === "string" ? payload.description : "";
+    const busyAllowed = typeof payload.busyAllowed === "boolean" ? payload.busyAllowed : true;
+
+    this.options.registerCommand(name, {
+      description,
+      busyAllowed,
+      handler: async (args: string) => {
+        await this.callSandbox("invoke_command", { commandId, args });
+      },
+    });
+  }
+
+  private registerSandboxTool(request: SandboxRequestEnvelope): void {
+    this.assertCapability("tools.register");
+    const payload = asSandboxPayload(request.params, "register_tool params");
+    const toolId = asNonEmptyString(payload.toolId, "toolId");
+    const name = asNonEmptyString(payload.name, "name");
+    const label = typeof payload.label === "string" && payload.label.trim().length > 0
+      ? payload.label.trim()
+      : name;
+    const description = typeof payload.description === "string" ? payload.description : "";
+    const parameters = normalizeSandboxToolParameters(payload.parameters);
+
+    const requiresConnectionRaw = payload.requiresConnection;
+    let requiresConnection: string[] | undefined;
+    if (requiresConnectionRaw !== undefined) {
+      if (!Array.isArray(requiresConnectionRaw)) {
+        throw new Error("register_tool requiresConnection must be an array of strings.");
+      }
+
+      const normalizedRequirements: string[] = [];
+      for (const requirement of requiresConnectionRaw) {
+        if (typeof requirement !== "string") {
+          throw new Error("register_tool requiresConnection entries must be strings.");
+        }
+
+        const trimmed = requirement.trim().toLowerCase();
+        if (trimmed.length === 0) continue;
+        const ownerPrefix = `${this.widgetOwnerId.toLowerCase()}.`;
+        normalizedRequirements.push(trimmed.startsWith(ownerPrefix) ? trimmed : `${ownerPrefix}${trimmed}`);
+      }
+
+      if (normalizedRequirements.length > 0) {
+        requiresConnection = Array.from(new Set(normalizedRequirements));
+      }
+    }
+
+    const tool: AgentTool<TSchema, unknown> & ToolConnectionMetadata = {
+      name,
+      label,
+      description,
+      parameters,
+      execute: async (
+        _toolCallId: string,
+        toolParams: unknown,
+      ): Promise<AgentToolResult<unknown>> => {
+        const result = await this.callSandbox("invoke_tool", { toolId, params: toolParams });
+        return normalizeSandboxToolResult(result);
+      },
+      ...(requiresConnection ? { requiresConnection } : {}),
+    };
+
+    this.options.registerTool(tool);
+  }
+
+  private showSandboxOverlay(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.overlay");
+    const payload = asSandboxPayload(request.params, "overlay_show params");
+    const tree = normalizeSandboxUiNode(payload.tree);
+    const actionIds = showOverlayNode(tree, (actionId) => {
+      if (this.overlayActionIds.has(actionId)) this.dispatchSandboxUiAction(actionId);
+    });
+    this.replaceActionIds(this.overlayActionIds, actionIds);
+  }
+
+  private showTextSandboxOverlay(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.overlay");
+    const payload = asSandboxPayload(request.params, "overlay_show_text params");
+    const fallbackNode = createTextOnlyUiNode(sanitizeText(payload.text));
+    const actionIds = showOverlayNode(fallbackNode, () => undefined);
+    this.replaceActionIds(this.overlayActionIds, actionIds);
+  }
+
+  private showSandboxWidget(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.widget");
+    const payload = asSandboxPayload(request.params, "widget_show params");
+    const tree = normalizeSandboxUiNode(payload.tree);
+    const onAction = (actionId: string) => {
+      const knownActionIds = this.widgetActionIdsByWidgetId.get(LEGACY_WIDGET_ID);
+      if (knownActionIds?.has(actionId)) this.dispatchSandboxUiAction(actionId);
+    };
+    const actionIds = this.widgetApiV2Enabled
+      ? upsertSandboxWidgetNode({
+        ownerId: this.widgetOwnerId,
+        widgetId: LEGACY_WIDGET_ID,
+        node: tree,
+        onAction,
+        placement: "above-input",
+        order: 0,
+      })
+      : showWidgetNode(tree, onAction);
+    this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
+  }
+
+  private showTextSandboxWidget(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.widget");
+    const payload = asSandboxPayload(request.params, "widget_show_text params");
+    const fallbackNode = createTextOnlyUiNode(sanitizeText(payload.text));
+    const noAction = () => undefined;
+    const actionIds = this.widgetApiV2Enabled
+      ? upsertSandboxWidgetNode({
+        ownerId: this.widgetOwnerId,
+        widgetId: LEGACY_WIDGET_ID,
+        node: fallbackNode,
+        onAction: noAction,
+        placement: "above-input",
+        order: 0,
+      })
+      : showWidgetNode(fallbackNode, noAction);
+    this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
+  }
+
+  private upsertSandboxWidget(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.widget");
+    if (!this.widgetApiV2Enabled) {
+      throw new Error("Widget API v2 is disabled. Enable /experimental on extension-widget-v2.");
+    }
+
+    const payload = asSandboxPayload(request.params, "widget_upsert params");
+    const widgetId = asNonEmptyString(payload.widgetId, "widgetId");
+    const tree = normalizeSandboxUiNode(payload.tree);
+    const title = typeof payload.title === "string" ? payload.title : undefined;
+    const placement = asWidgetPlacementOrUndefined(payload.placement);
+    const order = asFiniteNumberOrNull(payload.order);
+    const minHeightPx = asFiniteNumberOrNullOrUndefined(payload.minHeightPx);
+    const maxHeightPx = asFiniteNumberOrNullOrUndefined(payload.maxHeightPx);
+    const collapsible = asBooleanOrUndefined(payload.collapsible);
+    const collapsed = asBooleanOrUndefined(payload.collapsed);
+
+    const actionIds = upsertSandboxWidgetNode({
+      ownerId: this.widgetOwnerId,
+      widgetId,
+      node: tree,
+      onAction: (actionId) => {
+        const knownActionIds = this.widgetActionIdsByWidgetId.get(widgetId);
+        if (knownActionIds?.has(actionId)) this.dispatchSandboxUiAction(actionId);
+      },
+      ...(title !== undefined ? { title } : {}),
+      ...(placement !== undefined ? { placement } : {}),
+      ...(order !== null ? { order } : {}),
+      ...(collapsible !== undefined ? { collapsible } : {}),
+      ...(collapsed !== undefined ? { collapsed } : {}),
+      ...(minHeightPx !== undefined ? { minHeightPx } : {}),
+      ...(maxHeightPx !== undefined ? { maxHeightPx } : {}),
+    });
+    this.replaceWidgetActionIds(widgetId, actionIds);
+  }
+
+  private removeSandboxWidget(request: SandboxRequestEnvelope): void {
+    this.assertCapability("ui.widget");
+    if (!this.widgetApiV2Enabled) {
+      throw new Error("Widget API v2 is disabled. Enable /experimental on extension-widget-v2.");
+    }
+    const payload = asSandboxPayload(request.params, "widget_remove params");
+    const widgetId = asNonEmptyString(payload.widgetId, "widgetId");
+    this.clearWidgetActionIds(widgetId);
+    removeExtensionWidget(this.widgetOwnerId, widgetId);
+  }
+
+  private subscribeSandboxAgentEvents(request: SandboxRequestEnvelope): void {
+    this.assertCapability("agent.events.read");
+    const payload = asSandboxPayload(request.params, "subscribe_agent_events params");
+    const subscriptionId = asNonEmptyString(payload.subscriptionId, "subscriptionId");
+    if (this.eventSubscriptions.has(subscriptionId)) return;
+
+    const unsubscribe = this.options.subscribeAgentEvents((agentEvent) => {
+      this.sendEvent("agent_event", { subscriptionId, event: agentEvent });
+    });
+    this.eventSubscriptions.set(subscriptionId, unsubscribe);
+  }
+
   private async handleSandboxRequest(envelope: SandboxRequestEnvelope): Promise<void> {
     const { method, requestId, params } = envelope;
 
     try {
       switch (method) {
         case "register_command": {
-          this.assertCapability("commands.register");
-
-          const payload = asSandboxPayload(params, "register_command params");
-          const commandId = asNonEmptyString(payload.commandId, "commandId");
-          const name = asNonEmptyString(payload.name, "name");
-          const description = typeof payload.description === "string" ? payload.description : "";
-          const busyAllowed = typeof payload.busyAllowed === "boolean" ? payload.busyAllowed : true;
-
-          this.options.registerCommand(name, {
-            description,
-            busyAllowed,
-            handler: async (args: string) => {
-              await this.callSandbox("invoke_command", {
-                commandId,
-                args,
-              });
-            },
-          });
-
+          this.registerSandboxCommand(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
 
         case "register_tool": {
-          this.assertCapability("tools.register");
-
-          const payload = asSandboxPayload(params, "register_tool params");
-          const toolId = asNonEmptyString(payload.toolId, "toolId");
-          const name = asNonEmptyString(payload.name, "name");
-          const label = typeof payload.label === "string" && payload.label.trim().length > 0
-            ? payload.label.trim()
-            : name;
-          const description = typeof payload.description === "string" ? payload.description : "";
-          const parametersRaw = payload.parameters;
-          const parameters = normalizeSandboxToolParameters(parametersRaw);
-
-          const requiresConnectionRaw = payload.requiresConnection;
-          let requiresConnection: string[] | undefined;
-
-          if (requiresConnectionRaw !== undefined) {
-            if (!Array.isArray(requiresConnectionRaw)) {
-              throw new Error("register_tool requiresConnection must be an array of strings.");
-            }
-
-            const normalizedRequirements: string[] = [];
-            for (const requirement of requiresConnectionRaw) {
-              if (typeof requirement !== "string") {
-                throw new Error("register_tool requiresConnection entries must be strings.");
-              }
-
-              const trimmed = requirement.trim().toLowerCase();
-              if (trimmed.length === 0) continue;
-
-              const ownerPrefix = `${this.widgetOwnerId.toLowerCase()}.`;
-              const qualified = trimmed.startsWith(ownerPrefix)
-                ? trimmed
-                : `${ownerPrefix}${trimmed}`;
-
-              normalizedRequirements.push(qualified);
-            }
-
-            requiresConnection = normalizedRequirements.length > 0
-              ? Array.from(new Set(normalizedRequirements))
-              : undefined;
-          }
-
-          const tool: AgentTool<TSchema, DynamicValue> = {
-            name,
-            label,
-            description,
-            parameters,
-            execute: async (
-              _toolCallId: string,
-              toolParams: DynamicValue,
-            ): Promise<AgentToolResult<DynamicValue>> => {
-              const result = await this.callSandbox("invoke_tool", {
-                toolId,
-                params: toolParams,
-              });
-
-              return normalizeSandboxToolResult(result);
-            },
-          };
-
-          if (requiresConnection && requiresConnection.length > 0) {
-            Reflect.set(tool, "requiresConnection", requiresConnection);
-          }
-
-          this.options.registerTool(tool);
+          this.registerSandboxTool(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
@@ -817,9 +935,7 @@ class SandboxRuntimeHost {
         case "llm_complete": {
           this.assertCapability("llm.complete");
 
-          const payload = asSandboxPayload(params, "llm_complete params");
-          const completionRequest = parseSandboxLlmCompletionRequest(payload.request);
-          const result = await this.options.llmComplete(completionRequest);
+          const result = await dispatchSandboxLlmCompletion(params, this.options.llmComplete);
           this.sendResponse(requestId, true, result);
           return;
         }
@@ -1082,35 +1198,13 @@ class SandboxRuntimeHost {
         }
 
         case "overlay_show": {
-          this.assertCapability("ui.overlay");
-
-          const payload = asSandboxPayload(params, "overlay_show params");
-          const tree = normalizeSandboxUiNode(payload.tree);
-          const actionIds = showOverlayNode(tree, (actionId) => {
-            if (!this.overlayActionIds.has(actionId)) {
-              return;
-            }
-
-            this.dispatchSandboxUiAction(actionId);
-          });
-
-          this.replaceActionIds(this.overlayActionIds, actionIds);
-
+          this.showSandboxOverlay(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
 
         case "overlay_show_text": {
-          this.assertCapability("ui.overlay");
-
-          const payload = asSandboxPayload(params, "overlay_show_text params");
-          const fallbackNode = createTextOnlyUiNode(sanitizeText(payload.text));
-          const actionIds = showOverlayNode(fallbackNode, () => {
-            // legacy text-only path has no actions
-          });
-
-          this.replaceActionIds(this.overlayActionIds, actionIds);
-
+          this.showTextSandboxOverlay(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
@@ -1124,73 +1218,13 @@ class SandboxRuntimeHost {
         }
 
         case "widget_show": {
-          this.assertCapability("ui.widget");
-
-          const payload = asSandboxPayload(params, "widget_show params");
-          const tree = normalizeSandboxUiNode(payload.tree);
-
-          if (this.widgetApiV2Enabled) {
-            const actionIds = upsertSandboxWidgetNode({
-              ownerId: this.widgetOwnerId,
-              widgetId: LEGACY_WIDGET_ID,
-              node: tree,
-              onAction: (actionId) => {
-                const knownActionIds = this.widgetActionIdsByWidgetId.get(LEGACY_WIDGET_ID);
-                if (!knownActionIds || !knownActionIds.has(actionId)) {
-                  return;
-                }
-
-                this.dispatchSandboxUiAction(actionId);
-              },
-              placement: "above-input",
-              order: 0,
-            });
-
-            this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
-          } else {
-            const actionIds = showWidgetNode(tree, (actionId) => {
-              const knownActionIds = this.widgetActionIdsByWidgetId.get(LEGACY_WIDGET_ID);
-              if (!knownActionIds || !knownActionIds.has(actionId)) {
-                return;
-              }
-
-              this.dispatchSandboxUiAction(actionId);
-            });
-
-            this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
-          }
-
+          this.showSandboxWidget(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
 
         case "widget_show_text": {
-          this.assertCapability("ui.widget");
-
-          const payload = asSandboxPayload(params, "widget_show_text params");
-          const fallbackNode = createTextOnlyUiNode(sanitizeText(payload.text));
-
-          if (this.widgetApiV2Enabled) {
-            const actionIds = upsertSandboxWidgetNode({
-              ownerId: this.widgetOwnerId,
-              widgetId: LEGACY_WIDGET_ID,
-              node: fallbackNode,
-              onAction: () => {
-                // legacy text-only path has no actions
-              },
-              placement: "above-input",
-              order: 0,
-            });
-
-            this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
-          } else {
-            const actionIds = showWidgetNode(fallbackNode, () => {
-              // legacy text-only path has no actions
-            });
-
-            this.replaceWidgetActionIds(LEGACY_WIDGET_ID, actionIds);
-          }
-
+          this.showTextSandboxWidget(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
@@ -1198,71 +1232,20 @@ class SandboxRuntimeHost {
         case "widget_dismiss": {
           this.assertCapability("ui.widget");
           this.clearWidgetActionIds(LEGACY_WIDGET_ID);
-
-          if (this.widgetApiV2Enabled) {
-            removeExtensionWidget(this.widgetOwnerId, LEGACY_WIDGET_ID);
-          } else {
-            dismissWidget();
-          }
-
+          if (this.widgetApiV2Enabled) removeExtensionWidget(this.widgetOwnerId, LEGACY_WIDGET_ID);
+          else dismissWidget();
           this.sendResponse(requestId, true, null);
           return;
         }
 
         case "widget_upsert": {
-          this.assertCapability("ui.widget");
-          if (!this.widgetApiV2Enabled) {
-            throw new Error("Widget API v2 is disabled. Enable /experimental on extension-widget-v2.");
-          }
-
-          const payload = asSandboxPayload(params, "widget_upsert params");
-          const widgetId = asNonEmptyString(payload.widgetId, "widgetId");
-          const tree = normalizeSandboxUiNode(payload.tree);
-          const title = typeof payload.title === "string" ? payload.title : undefined;
-          const placement = asWidgetPlacementOrUndefined(payload.placement);
-          const order = asFiniteNumberOrNull(payload.order);
-          const minHeightPx = asFiniteNumberOrNullOrUndefined(payload.minHeightPx);
-          const maxHeightPx = asFiniteNumberOrNullOrUndefined(payload.maxHeightPx);
-          const collapsible = asBooleanOrUndefined(payload.collapsible);
-          const collapsed = asBooleanOrUndefined(payload.collapsed);
-
-          const actionIds = upsertSandboxWidgetNode({
-            ownerId: this.widgetOwnerId,
-            widgetId,
-            node: tree,
-            onAction: (actionId) => {
-              const knownActionIds = this.widgetActionIdsByWidgetId.get(widgetId);
-              if (!knownActionIds || !knownActionIds.has(actionId)) {
-                return;
-              }
-
-              this.dispatchSandboxUiAction(actionId);
-            },
-            ...(title !== undefined ? { title } : {}),
-            ...(placement !== undefined ? { placement } : {}),
-            ...(order !== null ? { order } : {}),
-            ...(collapsible !== undefined ? { collapsible } : {}),
-            ...(collapsed !== undefined ? { collapsed } : {}),
-            ...(minHeightPx !== undefined ? { minHeightPx } : {}),
-            ...(maxHeightPx !== undefined ? { maxHeightPx } : {}),
-          });
-
-          this.replaceWidgetActionIds(widgetId, actionIds);
+          this.upsertSandboxWidget(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
 
         case "widget_remove": {
-          this.assertCapability("ui.widget");
-          if (!this.widgetApiV2Enabled) {
-            throw new Error("Widget API v2 is disabled. Enable /experimental on extension-widget-v2.");
-          }
-
-          const payload = asSandboxPayload(params, "widget_remove params");
-          const widgetId = asNonEmptyString(payload.widgetId, "widgetId");
-          this.clearWidgetActionIds(widgetId);
-          removeExtensionWidget(this.widgetOwnerId, widgetId);
-
+          this.removeSandboxWidget(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
@@ -1272,7 +1255,6 @@ class SandboxRuntimeHost {
           if (!this.widgetApiV2Enabled) {
             throw new Error("Widget API v2 is disabled. Enable /experimental on extension-widget-v2.");
           }
-
           this.clearAllWidgetActionIds();
           clearExtensionWidgets(this.widgetOwnerId);
           this.sendResponse(requestId, true, null);
@@ -1280,22 +1262,7 @@ class SandboxRuntimeHost {
         }
 
         case "subscribe_agent_events": {
-          this.assertCapability("agent.events.read");
-
-          const payload = asSandboxPayload(params, "subscribe_agent_events params");
-          const subscriptionId = asNonEmptyString(payload.subscriptionId, "subscriptionId");
-
-          if (!this.eventSubscriptions.has(subscriptionId)) {
-            const unsubscribe = this.options.subscribeAgentEvents((agentEvent) => {
-              this.sendEvent("agent_event", {
-                subscriptionId,
-                event: agentEvent,
-              });
-            });
-
-            this.eventSubscriptions.set(subscriptionId, unsubscribe);
-          }
-
+          this.subscribeSandboxAgentEvents(envelope);
           this.sendResponse(requestId, true, null);
           return;
         }
@@ -1303,13 +1270,11 @@ class SandboxRuntimeHost {
         case "unsubscribe_agent_events": {
           const payload = asSandboxPayload(params, "unsubscribe_agent_events params");
           const subscriptionId = asNonEmptyString(payload.subscriptionId, "subscriptionId");
-
           const unsubscribe = this.eventSubscriptions.get(subscriptionId);
           if (unsubscribe) {
             this.eventSubscriptions.delete(subscriptionId);
             unsubscribe();
           }
-
           this.sendResponse(requestId, true, null);
           return;
         }

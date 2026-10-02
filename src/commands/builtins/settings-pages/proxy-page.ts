@@ -20,14 +20,10 @@ import {
 } from "../../../ui/extensions-hub-components.js";
 import type { SettingsShellPage } from "../../../ui/settings-shell.js";
 import { showToast } from "../../../ui/toast.js";
+import type { SettingsWriter } from "../../../storage/local/settings-store.js";
 
-function isProxyPagePayloadShape(value: DynamicValue): value is DynamicObject {
+function isProxyPagePayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-interface SettingsStore {
-  get<T>(key: string): Promise<T | null>;
-  set(key: string, value: DynamicValue): Promise<void>;
 }
 
 function resolveProxyCallout(args: {
@@ -77,7 +73,7 @@ export function createProxyPage(): SettingsShellPage {
     parentId: "root",
     title: () => t("settings.section.proxy"),
     render: (ctx) => {
-      const settingsStore: SettingsStore = getAppStorage().settings;
+      const settingsStore: SettingsWriter = getAppStorage().settings;
 
       const card = document.createElement("div");
       card.className = "pi-overlay-surface pi-settings-proxy-card";
@@ -211,7 +207,7 @@ export function createProxyPage(): SettingsShellPage {
       const onProxyStateChanged = (event: Event): void => {
         if (!(event instanceof CustomEvent)) return;
 
-        const detail: DynamicValue = event.detail;
+        const detail: unknown = event.detail;
         if (!isProxyPagePayloadShape(detail)) return;
 
         const state = detail.state;
@@ -254,8 +250,8 @@ export function createProxyPage(): SettingsShellPage {
 
       void (async () => {
         try {
-          const storedEnabled = await settingsStore.get<boolean>("proxy.enabled");
-          const storedUrl = await settingsStore.get<string>("proxy.url");
+          const storedEnabled = await settingsStore.get("proxy.enabled");
+          const storedUrl = await settingsStore.get("proxy.url");
 
           enabled = storedEnabled === true;
           proxyUrl = typeof storedUrl === "string" && storedUrl.trim().length > 0

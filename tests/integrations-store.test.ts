@@ -15,15 +15,26 @@ import {
 const KNOWN_INTEGRATIONS = ["web_search", "mcp_tools"] as const;
 
 class MemorySettingsStore {
-  private readonly values = new Map<string, DynamicValue>();
+  private readonly values = new Map<string, unknown>();
 
-  get(key: string): Promise<DynamicValue> {
+  get(key: string): Promise<unknown> {
     return Promise.resolve(this.values.has(key) ? this.values.get(key) ?? null : null);
   }
 
-  set(key: string, value: DynamicValue): Promise<void> {
+  set(key: string, value: unknown): Promise<void> {
     this.values.set(key, value);
     return Promise.resolve();
+  }
+}
+
+class RejectingSettingsStore extends MemorySettingsStore {
+  readsFail = true;
+
+  override get(key: string): Promise<unknown> {
+    if (this.readsFail) {
+      return Promise.reject(new Error("seeded read failure"));
+    }
+    return super.get(key);
   }
 }
 
@@ -98,6 +109,38 @@ void test("external tools gate defaults on and can be disabled", async () => {
 
   await setExternalToolsEnabled(settings, true);
   assert.equal(await getExternalToolsEnabled(settings), true);
+});
+
+void test("integration capability reads reject instead of enabling defaults when settings are unreadable", async () => {
+  const settings = new RejectingSettingsStore();
+
+  await assert.rejects(
+    getWorkbookIntegrationIds(settings, "unreadable-workbook", KNOWN_INTEGRATIONS),
+    /seeded read failure/u,
+  );
+  await assert.rejects(getExternalToolsEnabled(settings), /seeded read failure/u);
+});
+
+void test("a failed integration change leaves the session configuration unchanged", async () => {
+  const settings = new RejectingSettingsStore();
+
+  await assert.rejects(
+    setIntegrationEnabledInScope({
+      settings,
+      scope: "session",
+      identifier: "unreadable-session",
+      integrationId: "web_search",
+      enabled: true,
+      knownIntegrationIds: KNOWN_INTEGRATIONS,
+    }),
+    /seeded read failure/u,
+  );
+
+  settings.readsFail = false;
+  assert.deepEqual(
+    await getSessionIntegrationIds(settings, "unreadable-session", KNOWN_INTEGRATIONS),
+    [],
+  );
 });
 
 void test("unconfigured session scope is explicit empty", async () => {

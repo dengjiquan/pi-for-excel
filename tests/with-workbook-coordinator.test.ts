@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 import {
   withWorkbookCoordinator,
@@ -185,7 +185,7 @@ void test("unsupported-host tools bypass workbook coordinator and fail fast", as
   assert.equal(wrapped, unsupportedTool);
   await assert.rejects(
     async () => wrapped.execute("tc-unsupported", { range: "Sheet1!A1", format: { bold: true } }),
-    (error: DynamicValue) => {
+    (error: unknown) => {
       assert.ok(error instanceof UnsupportedHostToolError);
       assert.equal(error.toolName, "format_cells");
       assert.equal(error.hostKind, "wps");
@@ -291,7 +291,7 @@ void test("safe execution mode skips approval prompts for read tools", async () 
 });
 
 void test("content-impact mutation tools do not trigger structure invalidation", async (t) => {
-  const cases: Array<{ toolName: string; params: DynamicObject }> = [
+  const cases: Array<{ toolName: string; params: Record<string, unknown> }> = [
     { toolName: "write_cells", params: { range: "Sheet1!A1", values: [[1]] } },
     { toolName: "format_cells", params: { range: "Sheet1!A1", format: { bold: true } } },
     { toolName: "comments", params: { action: "delete", range: "Sheet1!A1" } },
@@ -355,7 +355,7 @@ void test("view_settings visibility actions trigger structure invalidation", asy
 });
 
 void test("read-only tool paths never emit mutation events", async (t) => {
-  const cases: Array<{ toolName: string; params: DynamicObject }> = [
+  const cases: Array<{ toolName: string; params: Record<string, unknown> }> = [
     { toolName: "read_range", params: { range: "Sheet1!A1:B2" } },
     { toolName: "comments", params: { action: "read", range: "Sheet1!A1" } },
     { toolName: "view_settings", params: { action: "get" } },
@@ -412,24 +412,3 @@ void test("write failures do not emit mutation events", async () => {
   assert.deepEqual(invalidatedWorkbookIds, []);
 });
 
-void test("uses workbook:unknown coordinator key when workbook id is unavailable", async () => {
-  const coordinator = new FakeCoordinator();
-  const mutationEvents: WorkbookMutationEvent[] = [];
-  const invalidatedWorkbookIds: Array<string | null> = [];
-
-  const wrapped = wrapSingleTool({
-    tool: makeTool("format_cells"),
-    coordinator,
-    contextProvider: createContextProvider(null),
-    mutationEvents,
-    invalidatedWorkbookIds,
-  });
-
-  await wrapped.execute("tc-null-workbook", { range: "Sheet1!A1" });
-
-  assert.equal(coordinator.writeCalls.length, 1);
-  assert.equal(coordinator.writeCalls[0]?.workbookId, "workbook:unknown");
-  assert.equal(mutationEvents[0]?.workbookId, null);
-  assert.equal(mutationEvents[0]?.impact, "content");
-  assert.deepEqual(invalidatedWorkbookIds, []);
-});

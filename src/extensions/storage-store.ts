@@ -1,4 +1,6 @@
-function isExtensionsStorageStorePayloadShape(value: DynamicValue): value is DynamicObject {
+import type { SettingsWriter } from "../storage/local/settings-store.js";
+
+function isExtensionsStorageStorePayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -9,15 +11,10 @@ const MAX_EXTENSION_STORAGE_BYTES = 1_000_000;
 
 interface ExtensionStorageDocument {
   version: number;
-  items: Record<string, DynamicObject>;
+  items: Record<string, Record<string, unknown>>;
 }
 
-export interface ExtensionStorageSettings {
-  get(key: string): Promise<DynamicValue>;
-  set(key: string, value: DynamicValue): Promise<void>;
-}
-
-function normalizeStorageDocument(raw: DynamicValue): ExtensionStorageDocument {
+function normalizeStorageDocument(raw: unknown): ExtensionStorageDocument {
   if (!isExtensionsStorageStorePayloadShape(raw) || typeof raw.version !== "number" || !isExtensionsStorageStorePayloadShape(raw.items)) {
     return {
       version: EXTENSION_STORAGE_VERSION,
@@ -25,7 +22,7 @@ function normalizeStorageDocument(raw: DynamicValue): ExtensionStorageDocument {
     };
   }
 
-  const items: Record<string, DynamicObject> = {};
+  const items: Record<string, Record<string, unknown>> = {};
 
   for (const [extensionId, extensionRecord] of Object.entries(raw.items)) {
     if (!isExtensionsStorageStorePayloadShape(extensionRecord)) {
@@ -41,13 +38,24 @@ function normalizeStorageDocument(raw: DynamicValue): ExtensionStorageDocument {
   };
 }
 
-async function loadStorageDocument(settings: ExtensionStorageSettings): Promise<ExtensionStorageDocument> {
+async function readStorageDocument(settings: SettingsWriter): Promise<ExtensionStorageDocument> {
+  try {
+    const raw = await settings.get(EXTENSION_STORAGE_KEY);
+    return normalizeStorageDocument(raw);
+  } catch {
+    return normalizeStorageDocument(null);
+  }
+}
+
+async function loadStorageDocumentForUpdate(
+  settings: SettingsWriter,
+): Promise<ExtensionStorageDocument> {
   const raw = await settings.get(EXTENSION_STORAGE_KEY);
   return normalizeStorageDocument(raw);
 }
 
 async function saveStorageDocument(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   document: ExtensionStorageDocument,
 ): Promise<void> {
   await settings.set(EXTENSION_STORAGE_KEY, {
@@ -65,28 +73,28 @@ function normalizeStorageKey(key: string): string {
   return trimmed;
 }
 
-function calculateSerializedSize(value: DynamicValue): number {
+function calculateSerializedSize(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
 }
 
 export async function getExtensionStorageValue(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   extensionId: string,
   key: string,
-): Promise<DynamicValue> {
-  const document = await loadStorageDocument(settings);
+): Promise<unknown> {
+  const document = await readStorageDocument(settings);
   const extensionStore = document.items[extensionId] ?? {};
   return extensionStore[normalizeStorageKey(key)];
 }
 
 export async function setExtensionStorageValue(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   extensionId: string,
   key: string,
-  value: DynamicValue,
+  value: unknown,
 ): Promise<void> {
   const normalizedKey = normalizeStorageKey(key);
-  const document = await loadStorageDocument(settings);
+  const document = await loadStorageDocumentForUpdate(settings);
   const extensionStore = {
     ...(document.items[extensionId] ?? {}),
     [normalizedKey]: value,
@@ -101,12 +109,12 @@ export async function setExtensionStorageValue(
 }
 
 export async function deleteExtensionStorageValue(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   extensionId: string,
   key: string,
 ): Promise<void> {
   const normalizedKey = normalizeStorageKey(key);
-  const document = await loadStorageDocument(settings);
+  const document = await loadStorageDocumentForUpdate(settings);
   const extensionStore = { ...(document.items[extensionId] ?? {}) };
 
   if (!(normalizedKey in extensionStore)) {
@@ -125,19 +133,19 @@ export async function deleteExtensionStorageValue(
 }
 
 export async function listExtensionStorageKeys(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   extensionId: string,
 ): Promise<string[]> {
-  const document = await loadStorageDocument(settings);
+  const document = await readStorageDocument(settings);
   const extensionStore = document.items[extensionId] ?? {};
   return Object.keys(extensionStore).sort((left, right) => left.localeCompare(right));
 }
 
 export async function clearExtensionStorage(
-  settings: ExtensionStorageSettings,
+  settings: SettingsWriter,
   extensionId: string,
 ): Promise<void> {
-  const document = await loadStorageDocument(settings);
+  const document = await loadStorageDocumentForUpdate(settings);
   if (!(extensionId in document.items)) {
     return;
   }

@@ -32,7 +32,7 @@ import type { SettingsPageContext, SettingsShellPage } from "../../../ui/setting
 import { showToast } from "../../../ui/toast.js";
 import { getSettingsPagesDependencies } from "./dependencies.js";
 
-function isRootPagePayloadShape(value: DynamicValue): value is DynamicObject {
+function isRootPagePayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -87,7 +87,7 @@ function buildProvidersGroup(ctx: SettingsPageContext): HTMLElement {
     }
 
     try {
-      const proxyEnabled = await storage.settings.get<boolean>("proxy.enabled");
+      const proxyEnabled = await storage.settings.get("proxy.enabled");
       proxyRow.setValue(proxyEnabled === true ? t("settings.value.on") : t("settings.value.off"));
     } catch {
       // leave preview empty
@@ -137,7 +137,7 @@ function buildBehaviorGroup(ctx: SettingsPageContext): HTMLElement {
 
     const onExecutionModeChanged = (event: Event): void => {
       if (!(event instanceof CustomEvent)) return;
-      const detail: DynamicValue = event.detail;
+      const detail: unknown = event.detail;
       if (!isRootPagePayloadShape(detail)) return;
       const mode = detail.mode;
       if (mode !== "yolo" && mode !== "safe") return;

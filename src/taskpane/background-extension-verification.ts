@@ -1,6 +1,6 @@
 import type { ConnectionManager } from "../connections/manager.js";
 import {
-  loadConnectionStoreDocument,
+  loadConnectionStoreDocumentForUpdate,
   saveConnectionStoreDocument,
 } from "../connections/store.js";
 import {
@@ -20,6 +20,7 @@ import {
 import type { BrowserModelRuntime } from "../models/browser-model-runtime.js";
 import { getAppStorage } from "../storage/local/app-storage.js";
 import type { SessionRuntime } from "./session-runtime-manager.js";
+import type { SettingsWriter } from "../storage/local/settings-store.js";
 
 export const EXTENSION_VERIFICATION_COMMAND_TYPES = [
   "assertLastAssistantText",
@@ -42,7 +43,7 @@ export type ExtensionVerificationCommandType =
   (typeof EXTENSION_VERIFICATION_COMMAND_TYPES)[number];
 
 interface JsonRecord {
-  [key: string]: DynamicValue;
+  [key: string]: unknown;
 }
 
 export interface ExtensionVerificationOptions {
@@ -53,23 +54,23 @@ export interface ExtensionVerificationOptions {
   refreshModels: (allowNetwork: boolean) => Promise<{ errors: string[] }>;
 }
 
-function isPayloadShape(value: DynamicValue): value is JsonRecord {
+function isPayloadShape(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(value: DynamicValue, key: string): string | undefined {
+function stringField(value: unknown, key: string): string | undefined {
   if (!isPayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "string" && field.trim().length > 0 ? field.trim() : undefined;
 }
 
-function booleanField(value: DynamicValue, key: string): boolean | undefined {
+function booleanField(value: unknown, key: string): boolean | undefined {
   if (!isPayloadShape(value)) return undefined;
   const field = value[key];
   return typeof field === "boolean" ? field : undefined;
 }
 
-function stringMapField(value: DynamicValue, key: string): Record<string, string> | undefined {
+function stringMapField(value: unknown, key: string): Record<string, string> | undefined {
   if (!isPayloadShape(value)) return undefined;
   const field = value[key];
   if (!isPayloadShape(field)) return undefined;
@@ -104,7 +105,7 @@ function latestAssistantText(runtime: SessionRuntime | null): string | null {
 }
 
 function assertLastAssistantText(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): JsonRecord {
   const expected = stringField(payload, "expected");
@@ -158,7 +159,7 @@ function parseExperimentalFeatureId(value: string): ExperimentalFeatureId {
 }
 
 async function installExtensionCode(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const name = stringField(payload, "name");
@@ -170,7 +171,7 @@ async function installExtensionCode(
 }
 
 async function setExtensionCapability(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
@@ -186,7 +187,7 @@ async function setExtensionCapability(
 }
 
 async function setExtensionEnabled(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
@@ -200,7 +201,7 @@ async function setExtensionEnabled(
 }
 
 async function reloadExtension(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
@@ -211,7 +212,7 @@ async function reloadExtension(
 }
 
 async function uninstallExtension(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
@@ -221,7 +222,7 @@ async function uninstallExtension(
   return { extensionId, uninstalled: true };
 }
 
-async function readExtensionStorage(payload: DynamicValue): Promise<JsonRecord> {
+async function readExtensionStorage(payload: unknown): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
   const key = stringField(payload, "key");
   if (!extensionId || !key) throw new Error("extensionStorageGet requires extensionId and key");
@@ -234,7 +235,7 @@ async function readExtensionStorage(payload: DynamicValue): Promise<JsonRecord> 
 }
 
 async function setConnectionSecrets(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const connectionId = stringField(payload, "connectionId");
@@ -253,7 +254,7 @@ async function setConnectionSecrets(
 }
 
 async function refreshModels(
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
 ): Promise<JsonRecord> {
   const allowNetwork = booleanField(payload, "allowNetwork") ?? true;
@@ -261,7 +262,7 @@ async function refreshModels(
   return { allowNetwork, errors: result.errors };
 }
 
-function listModels(payload: DynamicValue, options: ExtensionVerificationOptions): JsonRecord {
+function listModels(payload: unknown, options: ExtensionVerificationOptions): JsonRecord {
   const provider = stringField(payload, "provider");
   if (!provider) throw new Error("modelsList requires payload.provider");
 
@@ -279,7 +280,7 @@ function listModels(payload: DynamicValue, options: ExtensionVerificationOptions
   };
 }
 
-function setExperiment(payload: DynamicValue): JsonRecord {
+function setExperiment(payload: unknown): JsonRecord {
   const featureRaw = stringField(payload, "feature");
   const enabled = booleanField(payload, "enabled");
   if (!featureRaw || enabled === undefined) {
@@ -291,7 +292,10 @@ function setExperiment(payload: DynamicValue): JsonRecord {
   return { feature, enabled };
 }
 
-async function stageInlineExtensionUpgrade(payload: DynamicValue): Promise<JsonRecord> {
+export async function stageInlineExtensionUpgrade(
+  payload: unknown,
+  settings: SettingsWriter = getAppStorage().settings,
+): Promise<JsonRecord> {
   const extensionId = stringField(payload, "extensionId");
   const code = stringField(payload, "code");
   const connectionId = stringField(payload, "connectionId");
@@ -305,7 +309,6 @@ async function stageInlineExtensionUpgrade(payload: DynamicValue): Promise<JsonR
     throw new Error("Staged connection must be owned by the staged extension");
   }
 
-  const settings = getAppStorage().settings;
   const extensions = await loadStoredExtensions(settings);
   const entry = extensions.find((candidate) => candidate.id === extensionId);
   if (!entry) throw new Error("Extension not found");
@@ -315,7 +318,7 @@ async function stageInlineExtensionUpgrade(payload: DynamicValue): Promise<JsonR
   entry.source = { kind: "inline", code };
   entry.updatedAt = now;
 
-  const connections = await loadConnectionStoreDocument(settings);
+  const connections = await loadConnectionStoreDocumentForUpdate(settings);
   connections[connectionId] = {
     status: "connected",
     secrets,
@@ -343,9 +346,9 @@ function assertNever(value: never): never {
 
 export async function executeExtensionVerificationCommand(
   type: ExtensionVerificationCommandType,
-  payload: DynamicValue,
+  payload: unknown,
   options: ExtensionVerificationOptions,
-): Promise<DynamicValue> {
+): Promise<unknown> {
   switch (type) {
     case "assertLastAssistantText":
       return assertLastAssistantText(payload, options);
