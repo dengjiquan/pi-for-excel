@@ -57,8 +57,10 @@ if [ "$should_audit" -eq 0 ]; then
 fi
 
 if [ "$audit_reason" = "manifest_change" ]; then
-  printf "%s\n" "[pre-push] package.json/package-lock.json changed; running npm audit --audit-level=high"
+  printf "%s\n" "[pre-push] package.json/package-lock.json changed; running npm audit --omit=dev --audit-level=high"
 else
-  printf "%s\n" "[pre-push] Running npm audit --audit-level=high (conservative check)"
+  printf "%s\n" "[pre-push] Running npm audit --omit=dev --audit-level=high (conservative check)"
 fi
-npm audit --audit-level=high
+# Prod dependencies only: the dev toolchain (office-addin-debugging -> node-forge)
+# carries advisories with no patched release and does not ship in the bundle.
+npm audit --omit=dev --audit-level=high
