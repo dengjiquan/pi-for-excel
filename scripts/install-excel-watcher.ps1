@@ -1,13 +1,15 @@
 $ErrorActionPreference = "Stop"
 
 $TaskName = "Pi for Excel Watcher"
-$WatcherPath = Join-Path $PSScriptRoot "watch-excel-pi-services.ps1"
+$SilentLauncherPath = Join-Path $PSScriptRoot "watch-excel-pi-silent.vbs"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $StartupShortcutPath = Join-Path ([Environment]::GetFolderPath("Startup")) "Pi for Excel Watcher.lnk"
-$watcherArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$WatcherPath"""
+# wscript wrapper: powershell -WindowStyle Hidden still flashes a console at logon,
+# which looks like a mystery terminal and gets the entry disabled in Task Manager.
+$watcherArguments = """" + $SilentLauncherPath + """"
 
 $action = New-ScheduledTaskAction `
-  -Execute "powershell.exe" `
+  -Execute "wscript.exe" `
   -Argument $watcherArguments
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -31,17 +33,14 @@ try {
 catch {
   $shell = New-Object -ComObject WScript.Shell
   $shortcut = $shell.CreateShortcut($StartupShortcutPath)
-  $shortcut.TargetPath = "powershell.exe"
+  $shortcut.TargetPath = "wscript.exe"
   $shortcut.Arguments = $watcherArguments
   $shortcut.WorkingDirectory = $RepoRoot
   $shortcut.WindowStyle = 7
   $shortcut.Description = "Pi for Excel background watcher"
   $shortcut.Save()
 
-  Start-Process `
-    -FilePath "powershell.exe" `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", $WatcherPath) `
-    -WindowStyle Hidden
+  Start-Process -FilePath "wscript.exe" -ArgumentList $watcherArguments
 
   Write-Host "Scheduled task was not allowed, so Startup-folder watcher was installed instead."
   Write-Host "Startup shortcut: $StartupShortcutPath"
