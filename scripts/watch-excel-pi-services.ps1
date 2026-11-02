@@ -72,6 +72,29 @@ function Stop-PortListeners {
   }
 }
 
+function Test-PortOpen {
+  param([int]$Port)
+
+  # Probe by connecting, not by listing sockets: while Clash TUN ("Meta" adapter)
+  # is up, netstat/Get-NetTCPConnection cannot see new listeners on this machine,
+  # so a Listen-state query reports the port as dead even while it serves traffic.
+  foreach ($address in @("127.0.0.1", "::1")) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+      $connectTask = $client.ConnectAsync($address, $Port)
+      if ($connectTask.Wait(500) -and $client.Connected) {
+        return $true
+      }
+    }
+    catch { }
+    finally {
+      $client.Dispose()
+    }
+  }
+
+  return $false
+}
+
 function Wait-Port {
   param(
     [int]$Port,
@@ -81,7 +104,7 @@ function Wait-Port {
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
-    if ((Get-PortListenerProcessIds -Port $Port).Count -gt 0) {
+    if (Test-PortOpen -Port $Port) {
       Write-Log ("{0} ready on port {1}" -f $Name, $Port)
       return
     }
