@@ -10,7 +10,7 @@
 - push：`git push origin main`（main 追踪 upstream，push 必须显式 origin）。
 - **冲突文件取"纯上游 + 重新贴回本地意图"**：先落上游版本，再把本地功能按新结构贴回去。逐块调和会把 fork 的格式噪音永远带着走。
 - 判断一个文件的本地改动是"功能"还是"格式噪音"：把 base 和 fork 两个版本都按语法单元（去空白、去注释）展开后 diff。只有格式差异的文件直接还原成上游版本。
-- ⚠️ **不要用编辑器工具改仓库里的 `.ts` / `.mjs` / `.js`**：全局钩子 `meta-kim/post-format.mjs` 会在每次 Edit/Write 后跑 prettier（80 列 + 尾逗号），和上游风格不一致，整个文件被重排后下次合并会多出一堆假冲突。改用 `git show` 取版本 + 精确文本替换。`.css` / `.json` / `.md` / `.html` 不受影响。
+- 仓库里不要跑 prettier（仓库也没有 prettier 配置）：上游不是 prettier 默认风格（80 列 + 尾逗号），整个文件被重排后，下次合并会多出一堆假冲突。fork 过去每次合并都很疼的格式噪音，根因是一个全局钩子在每次 Edit/Write JS/TS 后自动跑 prettier；那个钩子（meta-kim）已于 2026-11-24 删除。
 - 品牌文案不手改语言文件：`src/language/fork-branding.ts` 在 `t()` 出口把 "Pi" 换成 "AI"。真实应用启动时调用 `enableForkBranding()`；单元测试和自动化浏览器里保持上游原文，所以上游测试一行不用改。
 
 ## 与上游重叠的本地功能
@@ -66,4 +66,3 @@ npm run test:browser   # 先 npx playwright install；本机旧版 Chromium 不�
 ## 本次合并后待办
 
 - Windows 桌面版 Excel 手动冒烟。上游 v0.12 的验收只覆盖了网页版和 Mac。
-- 建议把本仓库加进全局格式化钩子的排除名单。
