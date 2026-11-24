@@ -1,7 +1,7 @@
 # 本地集成清单（合并上游后必检）
 
 > fork = `dengjiquan/pi-for-excel`，长期跟进 `upstream = tmustier/pi-for-excel`。
-> 上次合并：2026-11-23，合入 `upstream/main` 到 `899295f5`（v0.12.0-pre，Pi 1.4.0）。
+> 上次合并：2026-11-24，合入 `upstream/main` 到 `899295f5`（v0.12.0-pre，Pi 1.4.0），合并提交 `99d7bfb9`。
 
 ## 合并策略
 
@@ -24,7 +24,7 @@
 | 单元格样式 / 命名公式 | `src/tools/format-cells.ts`、`src/tools/format-cells-cell-style.ts`、`src/tools/get-workbook-overview.ts`、`src/workbook/recovery/{schemas,format-selection,format-state}.ts`、`src/prompt/system-prompt.ts`、`src/ui/humanize-params.ts` | `format_cells` 的 `cell_style`（Excel 内置样式，可恢复）；总览里列出命名公式的定义 |
 | 截断提示 | `src/ui/messages/messages.ts` | 输出因 token 上限被截断时给出提示（`messages.lengthTruncated`） |
 | 提示词 | `src/taskpane/init.ts`、语言文件里的 `hint.financial.*` / `hint.messy.*` | 工程造价方向的空状态提示 |
-| 品牌 | `manifest*.xml`、`src/taskpane.html`、`src/taskpane/status-bar.ts`、`public/`、`README.md` | "AI for Excel" |
+| 品牌 | `manifest*.xml`、`src/taskpane.html`、`src/taskpane/status-bar.ts`、`src/taskpane/welcome-login.ts`、`public/`、`README.md`、`src/language/fork-branding.ts` | "AI for Excel" |
 
 ## Windows / 端口契约
 
@@ -53,11 +53,17 @@
 npm run check
 npm run build
 npm test
-npm run test:browser   # 需要 Playwright 的 Chromium
+npm run test:browser   # 先 npx playwright install；本机旧版 Chromium 不匹配时整份套件在启动阶段失败
 ```
+
+- `npm run check`、`npm test` 和浏览器测试不要同时跑：同时跑会出现 `tsgolint` 崩溃和成片的整文件超时，看起来像代码坏了，其实是资源争抢。
+- 上游有些测试默认只在 macOS / Linux 上能过（路径分隔符、8.3 短名临时目录）。碰到只在 Windows 上挂的测试，先怀疑可移植性，再怀疑代码。
+
+## 升级前先备份存储
+
+上游发版说明里出现 "Stored data upgrade is one-way" 时，新版本第一次打开就会迁移数据，旧版本读不回来。合并这类版本后、打开 Excel 之前，先关掉 Excel，把 `%LOCALAPPDATA%\Microsoft\Office\16.0\Wef\webview2\<当前 profile>` 下的 `IndexedDB`、`File System`、`Local Storage`、`Session Storage`、`WebStorage` 整目录拷走（`scripts/recover-wef-storage.ps1 -DryRun` 能列出哪个是当前 profile）。回退 = 还原旧提交 + 把这几份拷回去。
 
 ## 本次合并后待办
 
 - Windows 桌面版 Excel 手动冒烟。上游 v0.12 的验收只覆盖了网页版和 Mac。
-- `src/taskpane/welcome-login.ts` 的登录页标志仍是上游的 π。
 - 建议把本仓库加进全局格式化钩子的排除名单。
