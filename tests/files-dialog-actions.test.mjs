@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { createFilesDialogDetailActions } from "../src/ui/files-dialog-actions.ts";
-import { installFakeDom } from "./fake-dom.test.ts";
+import { installFakeDom } from "./fixtures/fake-dom.ts";
 
 function makeFile(path, overrides = {}) {
   return {
@@ -75,7 +75,6 @@ test("detail actions show open/download only for read-only files", () => {
       onAfterDelete: () => Promise.resolve(),
     });
 
-    // Built-in docs use clipboard copy instead of Open (blob URLs fail in Office WebView).
     assert.deepEqual(getButtonLabels(actions), ["Copy content", "Download"]);
   } finally {
     restore();
@@ -140,7 +139,7 @@ test("edit opens writable text files and saves changes", async () => {
 
     const viewer = document.getElementById("pi-files-text-viewer-overlay");
     assert.ok(viewer);
-    assert.equal(viewer.style.zIndex, "300");
+    assert.equal(viewer.getAttribute("aria-modal"), "true");
 
     const editor = document.querySelectorAll("textarea")[0];
     assert.ok(editor);
@@ -209,7 +208,7 @@ test("download uses the WebView-safe text path for writable text files", async (
   }
 });
 
-test("rename dialog appears above the files workspace", () => {
+test("rename button opens the rename dialog", () => {
   const { document, restore } = installFakeDom();
 
   try {
@@ -234,7 +233,7 @@ test("rename dialog appears above the files workspace", () => {
 
     const renameDialog = document.getElementById("pi-text-input-dialog-overlay");
     assert.ok(renameDialog);
-    assert.equal(renameDialog.style.zIndex, "300");
+    assert.equal(renameDialog.getAttribute("aria-modal"), "true");
   } finally {
     restore();
   }
@@ -242,5 +241,5 @@ test("rename dialog appears above the files workspace", () => {
 
 test("file detail ignores audit-only workspace events to prevent render loops", () => {
   const source = readFileSync(new URL("../src/ui/files-dialog.ts", import.meta.url), "utf8");
-  assert.match(source, /detail\?\.reason === "audit"\) return/);
+  assert.match(source, /detail\.reason === "audit"\) return/);
 });

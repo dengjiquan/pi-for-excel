@@ -49,10 +49,50 @@ export function parseQualifiedCellAddress(cellRef: string, defaultSheet: string)
   }
 }
 
-export function normalizeTraversalAddress(address: string, defaultSheet: string): string | null {
-  const parsed = parseQualifiedCellAddress(address, defaultSheet);
-  if (!parsed) return null;
-  return qualifiedAddress(parsed.sheet, cellAddress(parsed.col, parsed.row));
+export const MAX_EXPANDED_RANGE_CELLS = 16;
+
+export function expandReferenceBounds(
+  sheet: string,
+  bounds: { startCol: number; startRow: number; endCol: number; endRow: number },
+): string[] {
+  const width = bounds.endCol - bounds.startCol + 1;
+  const height = bounds.endRow - bounds.startRow + 1;
+  if (width * height > MAX_EXPANDED_RANGE_CELLS) {
+    const start = cellAddress(bounds.startCol, bounds.startRow);
+    const end = cellAddress(bounds.endCol, bounds.endRow);
+    return [qualifiedAddress(sheet, `${start}:${end}`)];
+  }
+  const cells: string[] = [];
+  for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+    for (let col = bounds.startCol; col <= bounds.endCol; col += 1) {
+      cells.push(qualifiedAddress(sheet, cellAddress(col, row)));
+    }
+  }
+  return cells;
+}
+
+export function expandTraversalAddress(address: string, defaultSheet: string): string[] {
+  try {
+    const parsed = parseRangeRef(address);
+    const sheetName = parsed.sheet ?? defaultSheet;
+    if (!sheetName) return [];
+    const result: string[] = [];
+    for (const area of parsed.address.split(",")) {
+      const [rawStart, rawEnd] = area.replace(/\$/gu, "").trim().split(":");
+      if (!rawStart) continue;
+      const start = parseCell(rawStart);
+      const end = parseCell(rawEnd ?? rawStart);
+      result.push(...expandReferenceBounds(sheetName, {
+        startCol: Math.min(start.col, end.col),
+        startRow: Math.min(start.row, end.row),
+        endCol: Math.max(start.col, end.col),
+        endRow: Math.max(start.row, end.row),
+      }));
+    }
+    return result;
+  } catch {
+    return [];
+  }
 }
 
 export function extractFormulaReferences(formula: string, currentSheet: string): ParsedFormulaReference[] {
@@ -105,7 +145,6 @@ export function extractFormulaReferences(formula: string, currentSheet: string):
         startAddress: qualifiedAddress(sheetName, cellAddress(startCol, startRow)),
       });
     } catch {
-      // Skip malformed reference tokens.
     }
   }
 

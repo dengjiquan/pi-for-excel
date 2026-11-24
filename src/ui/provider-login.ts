@@ -1,20 +1,23 @@
-/**
- * Shared provider login row builder — used by both welcome screen and /login command.
- *
- * Renders an inline expandable row with:
- * - OAuth button (for providers that support it)
- * - "or enter API key" divider
- * - API key input + Save button
- */
-
 import { getAppStorage } from "../storage/local/app-storage.js";
-import { isCorsError } from "../auth/cors-error.js";
+import { checkProviderApiKey } from "../auth/api-key-check.js";
+import { showToast } from "./toast.js";
+import { isMacPlatform, isWindowsPlatform } from "../utils/platform.js";
+
+function terminalAppName(): string {
+  if (isMacPlatform()) return t("platform.terminal.mac");
+  if (isWindowsPlatform()) return t("platform.terminal.windows");
+  return t("platform.terminal.other");
+}
+import { isCorsError, isModuleLoadError } from "../auth/cors-error.js";
+import { checkProxyOnce, isProxyBlockedByBrowser } from "../taskpane/proxy-status.js";
 import { pollOAuthCallbackCapture } from "../auth/oauth-callback-capture.js";
 import { getOAuthProvider } from "../auth/oauth-provider-registry.js";
+import { withOAuthProviderLock } from "../auth/oauth-refresh.js";
 import { clearOAuthCredentials, saveOAuthCredentials } from "../auth/oauth-storage.js";
 import {
   DEFAULT_PROXY_IS_REMOTE,
   DEFAULT_PROXY_URL,
+  PROXY_HELPER_COMMAND,
   PROXY_HELPER_DOCS_URL,
   probeProxyReachability,
   resolveConfiguredProxyUrl,
@@ -26,10 +29,6 @@ import { escapeAttr, escapeHtml, setSafeInnerHTML } from "../utils/html.js";
 import { t } from "../language/index.js";
 import { filterProvidersByAllowlist, resolveAllowedProviderIds } from "./provider-allowlist.js";
 
-/**
- * Quick reachability check against the configured proxy URL.
- * Returns true if the proxy is enabled and responding.
- */
 async function isProxyReachable(): Promise<boolean> {
   try {
     const storage = getAppStorage();
@@ -44,14 +43,7 @@ async function isProxyReachable(): Promise<boolean> {
   }
 }
 
-/**
- * Show a blocking dialog explaining the proxy is needed, with
- * a copy-able terminal command and retry / cancel buttons.
- *
- * Resolves `true` if the user retried and proxy is now reachable.
- * Resolves `false` if the user cancelled.
- */
-function showProxyGateDialog(): Promise<boolean> {
+function showProxyGateDialog(signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     closeOverlayById(PROXY_GATE_OVERLAY_ID);
 
@@ -70,7 +62,7 @@ function showProxyGateDialog(): Promise<boolean> {
     message.style.lineHeight = "1.5";
     message.textContent = DEFAULT_PROXY_IS_REMOTE
       ? t("provider.proxy_gate.message_remote")
-      : t("provider.proxy_gate.message");
+      : t("provider.proxy_gate.message", { terminal: terminalAppName() });
 
     const codeRow = document.createElement("div");
     codeRow.style.cssText = "display:flex;align-items:center;gap:8px;margin:12px 0;";
@@ -80,14 +72,14 @@ function showProxyGateDialog(): Promise<boolean> {
       "flex:1;padding:8px 10px;border-radius:6px;" +
       "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4);" +
       "font-size:13px;font-family:var(--pi-monospace, monospace);user-select:all;";
-    codeEl.textContent = "npx pi-for-excel-proxy";
+    codeEl.textContent = PROXY_HELPER_COMMAND;
 
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.textContent = t("provider.proxy_gate.copy");
     copyBtn.style.cssText = "padding:6px 12px;border-radius:6px;font-size:13px;cursor:pointer;";
     copyBtn.addEventListener("click", () => {
-      void navigator.clipboard.writeText("npx pi-for-excel-proxy").then(() => {
+      void navigator.clipboard.writeText(PROXY_HELPER_COMMAND).then(() => {
         copyBtn.textContent = t("provider.proxy_gate.copied");
         setTimeout(() => { copyBtn.textContent = t("provider.proxy_gate.copy"); }, 1500);
       });
@@ -104,7 +96,7 @@ function showProxyGateDialog(): Promise<boolean> {
     } else {
       setSafeInnerHTML(
         hint,
-        `${escapeHtml(t("provider.proxy_gate.hint_html"))} ` +
+        `${escapeHtml(t("provider.proxy_gate.hint_html", { terminal: terminalAppName() }))} ` +
           `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
         "proxy gate helper link markup with escaped localized text",
       );
@@ -126,39 +118,46 @@ function showProxyGateDialog(): Promise<boolean> {
     actions.append(cancelBtn, retryBtn);
     dialog.card.append(title, message, codeRow, hint, actions);
 
-    let settled = false;
+    let phase: "idle" | "probing" | "committing" | "settled" = "idle";
 
     const doCancel = (): void => {
-      if (settled) return;
-      settled = true;
+      if (phase === "settled") return;
+      phase = "settled";
       dialog.close();
       resolve(false);
     };
 
     const doRetry = (): void => {
-      if (settled) return;
+      if (phase !== "idle") return;
+      phase = "probing";
+      retryBtn.disabled = true;
       retryBtn.textContent = t("provider.proxy_gate.checking");
       retryBtn.style.opacity = "0.7";
 
       void (async () => {
-        // Auto-enable the proxy setting so the fetch interceptor will route through it.
         try {
           const storage = getAppStorage();
           const url = await storage.settings.get("proxy.url");
+          if (signal.aborted || phase !== "probing") return;
           const proxyUrl = resolveConfiguredProxyUrl(url);
           const ok = await probeProxyReachability(proxyUrl, 1500);
 
+          if (signal.aborted || phase !== "probing") return;
           if (ok) {
+            phase = "committing";
             await storage.settings.set("proxy.enabled", true);
-            settled = true;
+            if (signal.aborted) return;
+            phase = "settled";
             dialog.close();
             resolve(true);
             return;
           }
         } catch {
-          // fall through
         }
 
+        if (signal.aborted || phase === "settled") return;
+        phase = "idle";
+        retryBtn.disabled = false;
         retryBtn.textContent = t("provider.proxy_gate.retry");
         retryBtn.style.opacity = "1";
         if (DEFAULT_PROXY_IS_REMOTE) {
@@ -166,7 +165,7 @@ function showProxyGateDialog(): Promise<boolean> {
         } else {
           setSafeInnerHTML(
             hint,
-            `${escapeHtml(t("provider.proxy_gate.not_detected_html"))} ` +
+            `${escapeHtml(t("provider.proxy_gate.not_detected_html", { terminal: terminalAppName() }))} ` +
               `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
             "proxy retry helper link markup with escaped localized text",
           );
@@ -180,10 +179,13 @@ function showProxyGateDialog(): Promise<boolean> {
     dialog.addCleanup(() => {
       cancelBtn.removeEventListener("click", doCancel);
       retryBtn.removeEventListener("click", doRetry);
-      if (!settled) { settled = true; resolve(false); }
+      signal.removeEventListener("abort", doCancel);
+      if (phase !== "settled") { phase = "settled"; resolve(false); }
     });
 
+    signal.addEventListener("abort", doCancel, { once: true });
     dialog.mount();
+    if (signal.aborted) doCancel();
   });
 }
 
@@ -208,36 +210,27 @@ const OAUTH_CALLBACK_CAPTURE_IDS = new Set([
 
 export interface ProviderDef {
   id: string;
-  label: string;
+  brand: string;
   oauth?: string;
   desc?: string;
 }
 
 export const ALL_PROVIDERS: ProviderDef[] = [
-  // OAuth providers first (subscription / account-based flows)
-  // Only list flows that are supported in-browser (PKCE with proxy-assisted or manual callback handling).
-  // desc holds a locale key (resolved via t() at render time in buildProviderRow).
-  { id: "anthropic",          label: /* brand */ "Anthropic",                oauth: "anthropic",          desc: "provider.desc.claude" },
-  { id: "openai-codex",       label: /* brand */ "OpenAI (ChatGPT)",         oauth: "openai-codex",       desc: "provider.desc.openai_sub" },
-  { id: "google-gemini-cli",  label: /* brand */ "Google Code Assist",       oauth: "google-gemini-cli",  desc: "provider.desc.gemini_account" },
-  { id: "google-antigravity", label: /* brand */ "Google Antigravity",       oauth: "google-antigravity", desc: "provider.desc.antigravity" },
-  { id: "github-copilot",     label: /* brand */ "GitHub Copilot",           oauth: "github-copilot" },
+  { id: "openai", brand: "OpenAI (API)", desc: "provider.desc.api_key" },
+  { id: "google", brand: "Google Gemini (API)", desc: "provider.desc.api_key" },
+  { id: "deepseek", brand: "DeepSeek" },
+  { id: "mistral", brand: "Mistral" },
+  { id: "groq", brand: "Groq" },
+  { id: "xai", brand: "xAI / Grok" },
+  { id: "anthropic",          brand: "Anthropic",                oauth: "anthropic",          desc: "provider.desc.claude" },
+  { id: "openai-codex",       brand: "OpenAI (ChatGPT)",         oauth: "openai-codex",       desc: "provider.desc.openai_sub" },
+  { id: "google-gemini-cli",  brand: "Google Code Assist",       oauth: "google-gemini-cli",  desc: "provider.desc.gemini_account" },
+  { id: "google-antigravity", brand: "Google Antigravity",       oauth: "google-antigravity", desc: "provider.desc.antigravity" },
+  { id: "github-copilot",     brand: "GitHub Copilot",           oauth: "github-copilot" },
 
-  // API key providers
-  { id: "openai",             label: /* brand */ "OpenAI (API)",             desc: "provider.desc.api_key" },
-  { id: "google",             label: /* brand */ "Google Gemini (API)",      desc: "provider.desc.api_key" },
-  { id: "deepseek",           label: /* brand */ "DeepSeek" },
-  { id: "amazon-bedrock",     label: /* brand */ "Amazon Bedrock" },
-  { id: "mistral",            label: /* brand */ "Mistral" },
-  { id: "groq",               label: /* brand */ "Groq" },
-  { id: "xai",                label: /* brand */ "xAI / Grok" },
+  { id: "amazon-bedrock",     brand: "Amazon Bedrock" },
 ];
 
-/**
- * Providers to show in connect UIs. Equals ALL_PROVIDERS unless the build
- * sets VITE_PI_ALLOWED_PROVIDERS (org deployments — see docs/central-proxy.md).
- * UI-level filter only; enforcement lives at the proxy/network layer.
- */
 export const VISIBLE_PROVIDERS: ProviderDef[] = filterProvidersByAllowlist(
   ALL_PROVIDERS,
   resolveAllowedProviderIds(
@@ -260,17 +253,14 @@ function normalizeAnthropicAuthorizationInput(input: string): string {
   const value = input.trim();
   if (!value) return value;
 
-  // Accept full redirect URL (or any URL with code/state query params)
   try {
     const url = new URL(value);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (code) return state ? `${code}#${state}` : code;
   } catch {
-    // ignore
   }
 
-  // Accept query-string style pastes (code=...&state=...)
   if (value.includes("code=")) {
     try {
       const params = new URLSearchParams(value.startsWith("?") ? value.slice(1) : value);
@@ -278,11 +268,9 @@ function normalizeAnthropicAuthorizationInput(input: string): string {
       const state = params.get("state");
       if (code) return state ? `${code}#${state}` : code;
     } catch {
-      // ignore
     }
   }
 
-  // Accept whitespace-separated values (code state)
   if (!value.includes("#")) {
     const parts = value.split(/\s+/).filter(Boolean);
     const [code, state] = parts;
@@ -326,14 +314,11 @@ function normalizeApiKeyForProvider(
   let key = raw.trim();
   if (!key) return { ok: false, error: t("provider.error.empty_key") };
 
-  // Common copy/paste format: "Bearer <token>"
   if (/^bearer\s+/i.test(key)) {
     key = key.replace(/^bearer\s+/i, "").trim();
   }
 
   if (providerId === "anthropic") {
-    // Prevent saving Anthropic OAuth *authorization code* (code#state) as an API key.
-    // OAuth access tokens are sk-ant-oat*, API keys are sk-ant-api*.
     const looksLikeAuthCode = key.includes("#") && !key.includes("sk-ant-");
     if (looksLikeAuthCode) {
       return { ok: false, error: t("provider.error.oauth_code_as_key") };
@@ -355,12 +340,10 @@ function normalizeApiKeyForProvider(
   return { ok: true, key };
 }
 
-/**
- * Show a non-blocking dialog with a device-code login code (e.g. GitHub
- * Copilot). The login flow keeps polling in the background, so the dialog
- * only informs the user; the caller closes it when login settles.
- */
-function showDeviceCodeDialog(info: { userCode: string; verificationUri: string }): () => void {
+function showDeviceCodeDialog(
+  info: { userCode: string; verificationUri: string },
+  onClose: () => void,
+): () => void {
   closeOverlayById(PROVIDER_PROMPT_OVERLAY_ID);
 
   const dialog = createOverlayDialog({
@@ -405,17 +388,18 @@ function showDeviceCodeDialog(info: { userCode: string; verificationUri: string 
   helper.textContent = t("provider.device_code.helper", { uri: info.verificationUri });
 
   dialog.card.append(title, message, codeRow, helper);
+  let completed = false;
+  dialog.addCleanup(() => { if (!completed) onClose(); });
   dialog.mount();
 
-  return () => dialog.close();
+  return () => {
+    completed = true;
+    dialog.close();
+  };
 }
 
-/**
- * Show a select dialog for OAuth flows that need the user to pick between
- * options (pi-ai `OAuthLoginCallbacks.onSelect`). Resolves the selected
- * option id, or `undefined` if the user cancels.
- */
 function promptForSelect(opts: {
+  signal: AbortSignal;
   title: string;
   message: string;
   options: { id: string; label: string }[];
@@ -470,7 +454,10 @@ function promptForSelect(opts: {
 
     dialog.card.append(titleEl, messageEl, optionList, actions);
 
+    const onAbort = (): void => settle(undefined);
+    opts.signal.addEventListener("abort", onAbort, { once: true });
     dialog.addCleanup(() => {
+      opts.signal.removeEventListener("abort", onAbort);
       if (!settled) {
         settled = true;
         resolve(undefined);
@@ -478,6 +465,7 @@ function promptForSelect(opts: {
     });
 
     dialog.mount();
+    if (opts.signal.aborted) onAbort();
   });
 }
 
@@ -488,7 +476,6 @@ async function copyTextToClipboard(text: string): Promise<void> {
       await clipboard.writeText(text);
       return;
     } catch {
-      // Fall through to legacy copy for WebViews/insecure dev origins.
     }
   }
 
@@ -509,6 +496,7 @@ async function copyTextToClipboard(text: string): Promise<void> {
 }
 
 function promptForText(opts: {
+  signal: AbortSignal;
   title: string;
   message: string;
   placeholder?: string;
@@ -680,11 +668,13 @@ function promptForText(opts: {
       submit();
     };
 
+    opts.signal.addEventListener("abort", cancel, { once: true });
     cancelBtn.addEventListener("click", cancel);
     okBtn.addEventListener("click", submit);
     input.addEventListener("keydown", onInputKeyDown);
 
     dialog.addCleanup(() => {
+      opts.signal.removeEventListener("abort", cancel);
       cancelBtn.removeEventListener("click", cancel);
       okBtn.removeEventListener("click", submit);
       input.removeEventListener("keydown", onInputKeyDown);
@@ -697,6 +687,10 @@ function promptForText(opts: {
     });
 
     dialog.mount();
+    if (opts.signal.aborted) {
+      cancel();
+      return;
+    }
 
     if (opts.autoCapture) {
       captureStatusEl.textContent = t("provider.oauth.capture_waiting");
@@ -731,18 +725,15 @@ function promptForText(opts: {
   });
 }
 
-/**
- * Build a provider login row with inline OAuth + API key.
- * Manages expand/collapse via the shared expandedRef.
- */
 export function buildProviderRow(
   provider: ProviderDef,
   opts: {
     isActive: boolean;
+    signal: AbortSignal;
     expandedRef: { current: HTMLElement | null };
   } & ProviderRowCallbacks,
 ): HTMLElement {
-  const { id, label, oauth, desc } = provider;
+  const { id, brand: label, oauth, desc } = provider;
   const { isActive, expandedRef, onConnected, onDisconnected } = opts;
   const storage = getAppStorage();
 
@@ -757,7 +748,10 @@ export function buildProviderRow(
   const row = document.createElement("div");
   row.className = "pi-login-row";
   const labelText = escapeHtml(label);
-  const descriptionMarkup = desc ? `<span class="pi-login-desc">${escapeHtml(t(desc))}</span>` : "";
+  const requirement = t(id === "amazon-bedrock"
+    ? "provider.requirement.aws"
+    : oauth ? "provider.requirement.helper" : "provider.requirement.key");
+  const descriptionMarkup = `<span class="pi-login-desc">${escapeHtml([desc ? t(desc) : "", requirement].filter(Boolean).join(" · "))}</span>`;
   const oauthMarkup = oauth
     ? `
         <button class="pi-login-oauth">${escapeHtml(t("provider.login_with", { label }))}</button>
@@ -816,9 +810,55 @@ export function buildProviderRow(
     }
   };
 
+  type Operation = { kind: "logging-in" | "saving-key" | "disconnecting"; controller: AbortController };
+  type RowState = { kind: "idle" } | Operation | { kind: "disposed" };
+  let state: RowState = { kind: "idle" };
+
+  const transition = (next: RowState): void => {
+    state = next;
+    const busy = next.kind !== "idle";
+    saveBtn.disabled = busy;
+    saveBtn.textContent = t(next.kind === "saving-key" ? "provider.testing" : "provider.save");
+    saveBtn.style.opacity = next.kind === "saving-key" ? "0.7" : "1";
+    keyInput.disabled = busy;
+    if (oauthBtn) {
+      oauthBtn.disabled = busy;
+      oauthBtn.textContent = next.kind === "logging-in" ? t("provider.opening_login") : t("provider.login_with", { label });
+      oauthBtn.style.opacity = next.kind === "logging-in" ? "0.7" : "1";
+    }
+    if (disconnectBtn) {
+      disconnectBtn.disabled = next.kind === "disconnecting" || next.kind === "disposed";
+      disconnectBtn.textContent = next.kind === "disconnecting" ? t("provider.disconnecting") : t("provider.disconnect", { label });
+      disconnectBtn.style.opacity = next.kind === "disconnecting" ? "0.7" : "1";
+    }
+    headerBtn.disabled = next.kind === "disposed";
+  };
+  const begin = (kind: Operation["kind"]): Operation | undefined => {
+    if (state.kind === "disposed" || state.kind === "disconnecting") return undefined;
+    if (state.kind !== "idle") {
+      if (kind !== "disconnecting") return undefined;
+      state.controller.abort();
+    }
+    const operation = { kind, controller: new AbortController() };
+    transition(operation);
+    return operation;
+  };
+  const finish = (operation: Operation): void => {
+    if (state === operation) transition({ kind: "idle" });
+  };
+  const collapseOwnDetail = (): void => {
+    detail.hidden = true;
+    if (expandedRef.current === detail) expandedRef.current = null;
+  };
+  const dispose = (): void => {
+    if (state.kind !== "idle" && state.kind !== "disposed") state.controller.abort();
+    transition({ kind: "disposed" });
+    if (expandedRef.current === detail) expandedRef.current = null;
+  };
+  opts.signal.addEventListener("abort", dispose, { once: true });
+  if (opts.signal.aborted) dispose();
   setConnectedState(isActive);
 
-  // Toggle expand
   headerBtn.addEventListener("click", () => {
     if (expandedRef.current === detail) {
       detail.hidden = true;
@@ -831,65 +871,67 @@ export function buildProviderRow(
     }
   });
 
-  // OAuth login
-  if (oauthBtn) {
+  if (oauthBtn && oauth) {
     oauthBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      oauthBtn.textContent = t("provider.opening_login");
-      oauthBtn.style.opacity = "0.7";
+      const operation = begin("logging-in");
+      if (!operation) return;
+      const loginAbort = operation.controller;
       void (async () => {
         errorEl.hidden = true;
         try {
-          if (!oauth) {
-            throw new Error("OAuth provider id missing");
-          }
-
           const oauthProvider = getOAuthProvider(oauth);
           if (!oauthProvider) {
             throw new Error(`OAuth provider not supported: ${oauth}`);
           }
 
-          // In production, OAuth providers need the local CORS proxy.
-          // Check reachability before sending the user through the browser login.
           if (!import.meta.env.DEV && OAUTH_IDS_NEEDING_PROXY.has(id)) {
             const reachable = await isProxyReachable();
             if (!reachable) {
-              const userRetried = await showProxyGateDialog();
+              loginAbort.signal.throwIfAborted();
+              await checkProxyOnce(getAppStorage().settings);
+              loginAbort.signal.throwIfAborted();
+              if (isProxyBlockedByBrowser()) {
+                errorEl.textContent = t("proxy.blocked_by_browser");
+                errorEl.hidden = false;
+                return;
+              }
+              const userRetried = await showProxyGateDialog(loginAbort.signal);
               if (!userRetried) {
-                // User cancelled — reset button and bail.
-                oauthBtn.textContent = t("provider.login_with", { label });
-                oauthBtn.style.opacity = "1";
                 return;
               }
             }
           }
 
-          const deviceCodeDialogRef: { close: (() => void) | null } = { close: null };
-          const authUrlRef: { current: string | null } = { current: null };
+          let closeDeviceCodeDialog: (() => void) | undefined;
+          let authUrl: string | null = null;
 
+          loginAbort.signal.throwIfAborted();
           let cred;
           try {
             cred = await oauthProvider.login({
               onAuth: (info) => {
-                authUrlRef.current = info.url;
-                // Prevent the OAuth page from gaining a handle to the add-in window.
+                loginAbort.signal.throwIfAborted();
+                authUrl = info.url;
                 const w = window.open(info.url, "_blank", "noopener,noreferrer");
                 if (w) w.opener = null;
               },
               onDeviceCode: (info) => {
-                // Device-code flows (e.g. GitHub Copilot): open the verification
-                // page and show the user code to enter there.
+                loginAbort.signal.throwIfAborted();
                 const w = window.open(info.verificationUri, "_blank", "noopener,noreferrer");
                 if (w) w.opener = null;
-                deviceCodeDialogRef.close = showDeviceCodeDialog(info);
+                closeDeviceCodeDialog = showDeviceCodeDialog(info, () => loginAbort.abort());
+                loginAbort.signal.addEventListener("abort", () => closeDeviceCodeDialog?.(), { once: true });
               },
               onSelect: (prompt) =>
                 promptForSelect({
+                  signal: loginAbort.signal,
                   title: t("provider.login_with", { label }),
                   message: prompt.message,
                   options: prompt.options,
                 }),
               onPrompt: async (prompt) => {
+                loginAbort.signal.throwIfAborted();
                 const helperText = id === "anthropic"
                   ? t("provider.oauth.helper.anthropic")
                   : id === "openai-codex"
@@ -902,16 +944,17 @@ export function buildProviderRow(
                   ? oauth
                   : undefined;
                 const oauthCallbackState = oauthCallbackProviderId
-                  ? getOAuthStateFromAuthUrl(authUrlRef.current)
+                  ? getOAuthStateFromAuthUrl(authUrl)
                   : undefined;
 
                 const value = await promptForText({
+                  signal: loginAbort.signal,
                   title: t("provider.login_with", { label }),
                   message: prompt.message,
                   placeholder: prompt.placeholder || "",
                   ...(helperText !== undefined ? { helperText } : {}),
                   submitLabel: t("provider.prompt.continue"),
-                  ...(authUrlRef.current !== null ? { externalUrl: authUrlRef.current } : {}),
+                  ...(authUrl !== null ? { externalUrl: authUrl } : {}),
                   ...(oauthCallbackProviderId && oauthCallbackState
                     ? { autoCapture: { providerId: oauthCallbackProviderId, state: oauthCallbackState } }
                     : {}),
@@ -923,86 +966,93 @@ export function buildProviderRow(
 
                 return value;
               },
-              onProgress: (msg) => { oauthBtn.textContent = msg; },
+              onProgress: (msg) => { if (!loginAbort.signal.aborted) oauthBtn.textContent = msg; },
+              signal: loginAbort.signal,
             });
           } finally {
-            deviceCodeDialogRef.close?.();
+            closeDeviceCodeDialog?.();
           }
 
+          loginAbort.signal.throwIfAborted();
           const apiKey = oauthProvider.getApiKey(cred);
-          await storage.providerKeys.set(id, apiKey);
-          await saveOAuthCredentials(storage.settings, id, cred);
+          await withOAuthProviderLock(oauth, async () => {
+            loginAbort.signal.throwIfAborted();
+            await saveOAuthCredentials(storage.settings, oauth, cred);
+            await storage.providerKeys.set(id, apiKey);
+          });
+          loginAbort.signal.throwIfAborted();
           setConnectedState(true);
           onConnected(row, id, label);
-          detail.hidden = true;
-          expandedRef.current = null;
+          collapseOwnDetail();
         } catch (err) {
-          if (err instanceof PromptCancelledError) {
-            // User cancelled the prompt; leave UI unchanged.
+          if (loginAbort.signal.aborted || err instanceof PromptCancelledError) {
             return;
           }
 
           const msg = getErrorMessage(err);
-          const isLikelyCors =
+          const flowUnavailable = err instanceof Error && isModuleLoadError(err);
+          const isLikelyCors = !flowUnavailable && (
             isCorsError(err) ||
-            (typeof msg === "string" && /load failed|failed to fetch|cors|cross-origin|networkerror/i.test(msg));
+            (typeof msg === "string" && /load failed|failed to fetch|cors|cross-origin|networkerror/i.test(msg)));
 
           if (isLikelyCors) {
-            if (DEFAULT_PROXY_IS_REMOTE) {
+            if (isProxyBlockedByBrowser()) {
+              errorEl.textContent = t("proxy.blocked_by_browser");
+            } else if (DEFAULT_PROXY_IS_REMOTE) {
               errorEl.textContent = t("provider.cors_error_remote", { url: DEFAULT_PROXY_URL });
             } else {
               setSafeInnerHTML(
                 errorEl,
-                `${escapeHtml(t("provider.cors_error"))} <code style="padding:2px 5px;border-radius:4px;` +
+                `${escapeHtml(t("provider.cors_error", { terminal: terminalAppName() }))} <code style="padding:2px 5px;border-radius:4px;` +
                   "background:var(--pi-code-bg, #1e1e1e);color:var(--pi-code-fg, #d4d4d4)\">" +
-                  `npx pi-for-excel-proxy</code>${escapeHtml(t("provider.cors_error.retry"))} ` +
+                  `${escapeHtml(PROXY_HELPER_COMMAND)}</code>${escapeHtml(t("provider.cors_error.retry"))} ` +
                   `<a href="${escapeAttr(PROXY_HELPER_DOCS_URL)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("provider.proxy_gate.guide"))}</a>`,
                 "provider CORS helper error markup with escaped localized text",
               );
             }
+          } else if (flowUnavailable) {
+            errorEl.textContent = t("provider.oauth.flow_unavailable", { label });
           } else {
             errorEl.textContent = msg || t("provider.login_failed");
           }
           errorEl.hidden = false;
         } finally {
-          oauthBtn.textContent = t("provider.login_with", { label });
-          oauthBtn.style.opacity = "1";
+          finish(operation);
         }
       })();
     });
   }
 
-  // Credential disconnect
   if (disconnectBtn) {
     disconnectBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      const operation = begin("disconnecting");
+      if (!operation) return;
       void (async () => {
-        disconnectBtn.textContent = t("provider.disconnecting");
-        disconnectBtn.disabled = true;
-        disconnectBtn.style.opacity = "0.7";
         errorEl.hidden = true;
 
         try {
-          await storage.providerKeys.delete(id);
-          await clearOAuthCredentials(storage.settings, id);
-
+          await withOAuthProviderLock(oauth ?? id, async () => {
+            operation.controller.signal.throwIfAborted();
+            await clearOAuthCredentials(storage.settings, oauth ?? id);
+            await storage.providerKeys.delete(id);
+          });
+          operation.controller.signal.throwIfAborted();
           setConnectedState(false);
           keyInput.value = "";
           onDisconnected?.(row, id, label);
         } catch (err) {
+          if (operation.controller.signal.aborted) return;
           const msg = getErrorMessage(err);
           errorEl.textContent = msg ? t("provider.disconnect_failed_msg", { msg }) : t("provider.disconnect_failed");
           errorEl.hidden = false;
         } finally {
-          disconnectBtn.textContent = t("provider.disconnect", { label });
-          disconnectBtn.disabled = false;
-          disconnectBtn.style.opacity = "1";
+          finish(operation);
         }
       })();
     });
   }
 
-  // API key save
   saveBtn.addEventListener("click", () => { void (async () => {
     const rawKey = keyInput.value.trim();
     if (!rawKey) return;
@@ -1014,27 +1064,41 @@ export function buildProviderRow(
       return;
     }
 
+    const operation = begin("saving-key");
+    if (!operation) return;
     const key = normalized.key;
-    saveBtn.textContent = t("provider.testing");
-    saveBtn.style.opacity = "0.7";
     errorEl.hidden = true;
     try {
-      await storage.providerKeys.set(id, key);
+      const check = await checkProviderApiKey(id, key, fetch, operation.controller.signal);
+      operation.controller.signal.throwIfAborted();
+      if (check.status === "rejected") {
+        errorEl.textContent = t("provider.key_rejected", { label, status: String(check.httpStatus) });
+        errorEl.hidden = false;
+        return;
+      }
+
+      await withOAuthProviderLock(oauth ?? id, async () => {
+        operation.controller.signal.throwIfAborted();
+        await clearOAuthCredentials(storage.settings, oauth ?? id);
+        await storage.providerKeys.set(id, key);
+      });
+      operation.controller.signal.throwIfAborted();
       setConnectedState(true);
       onConnected(row, id, label);
-      detail.hidden = true;
-      expandedRef.current = null;
+      if (check.status === "unverified") {
+        showToast(t("provider.key_unverified", { label }), 4000);
+      }
+      collapseOwnDetail();
     } catch (err) {
+      if (operation.controller.signal.aborted) return;
       const msg = getErrorMessage(err);
       errorEl.textContent = msg ? t("provider.save_failed_msg", { msg }) : t("provider.save_failed");
       errorEl.hidden = false;
     } finally {
-      saveBtn.textContent = t("provider.save");
-      saveBtn.style.opacity = "1";
+      finish(operation);
     }
   })(); });
 
-  // Enter key in input
   keyInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") saveBtn.click();
   });

@@ -18,7 +18,6 @@ class MemoryStorageBackend implements StorageBackend {
 
   get<T = unknown>(storeName: string, key: string): Promise<T | null> {
     const value = this.store(storeName).get(key);
-    // This boundary mirrors IndexedDB: callers own the requested persisted type.
     return Promise.resolve(value === undefined ? null : structuredClone(value) as T);
   }
 
@@ -170,9 +169,9 @@ void test("format_cells rejects an invalid border value before changing the host
   const range = new FormatRange();
   const params = { range: "A1", borders: "remove-all" };
 
-  // Runtime tool input originates from model JSON, so this deliberately bypasses compile-time schema checking.
   const result = await withFormatHost(range, () => createFormatCellsTool().execute("format-2", params));
 
-  assert.match(firstText(result), /Error formatting: Invalid borders/u);
+  assert.match(firstText(result), /Error formatting A1 — no formatting was applied\. Invalid borders/u);
+  assert.equal(result.isError, true);
   assert.deepEqual([...range.borders], []);
 });

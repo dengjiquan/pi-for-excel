@@ -1,3 +1,5 @@
+import { createConcurrencyLimit } from "../utils/concurrency.js";
+
 import {
   loadConnectionStoreDocument,
   loadConnectionStoreDocumentForUpdate,
@@ -24,20 +26,6 @@ type ConnectionManagerListener = () => void;
 const CONNECTION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{1,95}$/;
 const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const HTTP_ALLOWED_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
-
-const ALL_CONNECTION_STATUSES: readonly ConnectionStatus[] = [
-  "connected",
-  "missing",
-  "invalid",
-  "error",
-];
-
-const STATUS_TRANSITIONS: Readonly<Record<ConnectionStatus, readonly ConnectionStatus[]>> = {
-  connected: ALL_CONNECTION_STATUSES,
-  missing: ALL_CONNECTION_STATUSES,
-  invalid: ALL_CONNECTION_STATUSES,
-  error: ALL_CONNECTION_STATUSES,
-};
 
 function normalizeNonEmpty(input: string, field: string): string {
   const trimmed = input.trim();
@@ -173,13 +161,6 @@ function buildDefaultSetupHint(title: string): string {
   return `Open /tools → Connections → ${title}`;
 }
 
-function assertStatusTransition(from: ConnectionStatus, to: ConnectionStatus): void {
-  const allowed = STATUS_TRANSITIONS[from];
-  if (!allowed.includes(to)) {
-    throw new Error(`Invalid connection status transition: ${from} → ${to}`);
-  }
-}
-
 function hasRequiredSecrets(definition: ConnectionDefinition, secrets: Record<string, string> | undefined): boolean {
   const currentSecrets = secrets ?? {};
 
@@ -308,34 +289,41 @@ function toPublicConnectionDefinition(
   return publicDefinition;
 }
 
+const mutateDocumentSerially = createConcurrencyLimit(1);
+
 async function mutateConnectionRecord(args: {
   settings: SettingsWriter;
   connectionId: string;
   mutator: (record: StoredConnectionRecord | undefined) => StoredConnectionRecord | null;
 }): Promise<boolean> {
-  const items = await loadConnectionStoreDocumentForUpdate(args.settings);
-  const previous = items[args.connectionId];
-  const next = args.mutator(previous);
+  return mutateDocumentSerially(async () => {
+    const items = await loadConnectionStoreDocumentForUpdate(args.settings);
+    const previous = items[args.connectionId];
+    const next = args.mutator(previous);
 
-  if (!next) {
-    if (!(args.connectionId in items)) {
+    if (!next) {
+      if (!(args.connectionId in items)) {
+        return false;
+      }
+
+      delete items[args.connectionId];
+      await saveConnectionStoreDocument(args.settings, items);
+      return true;
+    }
+
+    next.credentialRevision = JSON.stringify(previous?.secrets ?? {}) === JSON.stringify(next.secrets ?? {})
+      ? previous?.credentialRevision ?? crypto.randomUUID()
+      : crypto.randomUUID();
+    const previousSerialized = JSON.stringify(previous ?? null);
+    const nextSerialized = JSON.stringify(next);
+    if (previousSerialized === nextSerialized) {
       return false;
     }
 
-    delete items[args.connectionId];
+    items[args.connectionId] = next;
     await saveConnectionStoreDocument(args.settings, items);
     return true;
-  }
-
-  const previousSerialized = JSON.stringify(previous ?? null);
-  const nextSerialized = JSON.stringify(next);
-  if (previousSerialized === nextSerialized) {
-    return false;
-  }
-
-  items[args.connectionId] = next;
-  await saveConnectionStoreDocument(args.settings, items);
-  return true;
+  });
 }
 
 export class ConnectionManager {
@@ -416,6 +404,21 @@ export class ConnectionManager {
     }
   }
 
+  async deleteStoredRecords(shouldDelete: (connectionId: string) => boolean): Promise<void> {
+    const changed = await mutateDocumentSerially(async () => {
+      const items = await loadConnectionStoreDocumentForUpdate(this.settings);
+      const doomed = Object.keys(items).filter(shouldDelete);
+      if (doomed.length === 0) return false;
+
+      for (const connectionId of doomed) {
+        delete items[connectionId];
+      }
+      await saveConnectionStoreDocument(this.settings, items);
+      return true;
+    });
+    if (changed) this.notify();
+  }
+
   hasDefinition(connectionId: string): boolean {
     const normalizedConnectionId = normalizeConnectionId(connectionId);
     return this.definitions.has(normalizedConnectionId);
@@ -425,16 +428,12 @@ export class ConnectionManager {
     return Array.from(this.definitions.keys()).sort((left, right) => left.localeCompare(right));
   }
 
-  // ── Host-facing APIs (trusted UI surface) ──────────
-
-  /** Returns the full definition for a registered connection, or null. */
   getDefinition(connectionId: string): ConnectionDefinition | null {
     const definition = this.definitions.get(normalizeConnectionId(connectionId));
     if (!definition) return null;
     return toPublicConnectionDefinition(definition);
   }
 
-  /** Returns all registered definitions, sorted by title. */
   listDefinitions(): ConnectionDefinition[] {
     const results: ConnectionDefinition[] = [];
     for (const definition of this.definitions.values()) {
@@ -444,10 +443,6 @@ export class ConnectionManager {
     return results;
   }
 
-  /**
-   * Returns presence flags for each secret field (true = stored, false = absent).
-   * Never exposes raw secret values to the UI.
-   */
   async getSecretFieldPresence(connectionId: string): Promise<Record<string, boolean>> {
     const definition = this.getRequiredDefinition(connectionId);
     const items = await loadConnectionStoreDocument(this.settings);
@@ -462,10 +457,6 @@ export class ConnectionManager {
     return presence;
   }
 
-  /**
-   * Redacts stored secret values for a registered connection from a message.
-   * Useful for tool/runtime error surfaces that must never leak credentials.
-   */
   async redactMessageForConnection(connectionId: string, message: string): Promise<string> {
     const definition = this.getRequiredDefinition(connectionId);
     const normalizedMessage = normalizeNonEmpty(message, "message");
@@ -475,11 +466,6 @@ export class ConnectionManager {
     return redactSecretsInMessage(normalizedMessage, record?.secrets);
   }
 
-  /**
-   * Merge-patch secrets from the host UI (bypasses owner check).
-   * Only non-empty values are merged; empty strings are ignored.
-   * Clears error/invalid status on save (optimistic recovery).
-   */
   async updateSecretsFromHost(connectionId: string, partialSecrets: Record<string, string>): Promise<void> {
     const definition = this.getRequiredDefinition(connectionId);
     const patch = normalizeSecrets(partialSecrets);
@@ -512,9 +498,6 @@ export class ConnectionManager {
     }
   }
 
-  /**
-   * Clear all secrets for a connection from the host UI (bypasses owner check).
-   */
   async clearSecretsFromHost(connectionId: string): Promise<void> {
     const definition = this.getRequiredDefinition(connectionId);
 
@@ -600,16 +583,11 @@ export class ConnectionManager {
     const changed = await mutateConnectionRecord({
       settings: this.settings,
       connectionId: definition.id,
-      mutator: (record) => {
-        const previousStatus = record?.status ?? "missing";
-        assertStatusTransition(previousStatus, nextStatus);
-
-        return buildStoredConnectionRecord({
-          status: nextStatus,
-          secrets: normalizedSecrets,
-          ...(requiredPresent ? { lastValidatedAt: now } : {}),
-        });
-      },
+      mutator: () => buildStoredConnectionRecord({
+        status: nextStatus,
+        secrets: normalizedSecrets,
+        ...(requiredPresent ? { lastValidatedAt: now } : {}),
+      }),
     });
 
     if (changed) {
@@ -624,15 +602,10 @@ export class ConnectionManager {
     const changed = await mutateConnectionRecord({
       settings: this.settings,
       connectionId: definition.id,
-      mutator: (record) => {
-        const previousStatus = record?.status ?? "missing";
-        assertStatusTransition(previousStatus, "missing");
-
-        return buildStoredConnectionRecord({
-          status: "missing",
-          secrets: {},
-        });
-      },
+      mutator: () => buildStoredConnectionRecord({
+        status: "missing",
+        secrets: {},
+      }),
     });
 
     if (changed) {
@@ -648,17 +621,13 @@ export class ConnectionManager {
       settings: this.settings,
       connectionId: definition.id,
       mutator: (record) => {
-        const previousStatus = record?.status ?? "missing";
-
         if (!hasRequiredSecrets(definition, record?.secrets)) {
-          assertStatusTransition(previousStatus, "missing");
           return buildStoredConnectionRecord({
             status: "missing",
             ...(record?.secrets !== undefined ? { secrets: record.secrets } : {}),
           });
         }
 
-        assertStatusTransition(previousStatus, "connected");
         return buildStoredConnectionRecord({
           status: "connected",
           ...(record?.secrets !== undefined ? { secrets: record.secrets } : {}),
@@ -681,9 +650,6 @@ export class ConnectionManager {
       settings: this.settings,
       connectionId: definition.id,
       mutator: (record) => {
-        const previousStatus = record?.status ?? "missing";
-        assertStatusTransition(previousStatus, "invalid");
-
         const redactedReason = redactSecretsInMessage(trimmedReason, record?.secrets);
 
         return buildStoredConnectionRecord({
@@ -700,7 +666,7 @@ export class ConnectionManager {
     }
   }
 
-  async markRuntimeAuthFailure(connectionId: string, failure: ConnectionRuntimeAuthFailure): Promise<void> {
+  async markRuntimeAuthFailure(connectionId: string, failure: ConnectionRuntimeAuthFailure, credentialRevision?: string): Promise<void> {
     const definition = this.getRequiredDefinition(connectionId);
     const message = normalizeNonEmpty(failure.message, "failure message");
 
@@ -708,8 +674,7 @@ export class ConnectionManager {
       settings: this.settings,
       connectionId: definition.id,
       mutator: (record) => {
-        const previousStatus = record?.status ?? "missing";
-        assertStatusTransition(previousStatus, "error");
+        if (credentialRevision !== undefined && credentialRevision !== (record?.credentialRevision ?? "")) return record ?? null;
 
         const redactedMessage = redactSecretsInMessage(message, record?.secrets);
 
@@ -728,38 +693,31 @@ export class ConnectionManager {
   }
 
   async getSnapshot(connectionId: string): Promise<ConnectionSnapshot | null> {
-    const definition = this.definitions.get(normalizeConnectionId(connectionId));
-    if (!definition) {
-      return null;
-    }
+    return (await this.listSnapshotsUnsorted([connectionId]))[0] ?? null;
+  }
+
+  private async listSnapshotsUnsorted(connectionIds: readonly string[]): Promise<ConnectionSnapshot[]> {
+    const definitions = connectionIds
+      .map((connectionId) => this.definitions.get(normalizeConnectionId(connectionId)))
+      .filter((definition) => definition !== undefined);
+    if (definitions.length === 0) return [];
 
     const items = await loadConnectionStoreDocument(this.settings);
-    const record = items[definition.id];
-
-    const status = resolveEffectiveStatus(definition, record);
-
-    const setupHint = definition.setupHint ?? buildDefaultSetupHint(definition.title);
-
-    const lastError = (status === "invalid" || status === "error")
-      ? record?.lastError
-      : undefined;
-
-    const snapshot: ConnectionSnapshot = {
-      connectionId: definition.id,
-      title: definition.title,
-      capability: definition.capability,
-      status,
-      setupHint,
-    };
-
-    if (record?.lastValidatedAt !== undefined) {
-      snapshot.lastValidatedAt = record.lastValidatedAt;
-    }
-    if (lastError !== undefined) {
-      snapshot.lastError = lastError;
-    }
-
-    return snapshot;
+    return definitions.map((definition) => {
+      const record = items[definition.id];
+      const status = resolveEffectiveStatus(definition, record);
+      const lastError = status === "invalid" || status === "error" ? record?.lastError : undefined;
+      return {
+        connectionId: definition.id,
+        credentialRevision: record?.credentialRevision ?? "",
+        title: definition.title,
+        capability: definition.capability,
+        status,
+        setupHint: definition.setupHint ?? buildDefaultSetupHint(definition.title),
+        ...(record?.lastValidatedAt !== undefined ? { lastValidatedAt: record.lastValidatedAt } : {}),
+        ...(lastError !== undefined ? { lastError } : {}),
+      };
+    });
   }
 
   async getState(connectionId: string): Promise<ConnectionState | null> {
@@ -786,13 +744,7 @@ export class ConnectionManager {
       ? Array.from(new Set(connectionIds.map((id) => normalizeConnectionId(id))))
       : this.listRegisteredConnectionIds();
 
-    const snapshots: ConnectionSnapshot[] = [];
-
-    for (const connectionId of ids) {
-      const snapshot = await this.getSnapshot(connectionId);
-      if (!snapshot) continue;
-      snapshots.push(snapshot);
-    }
+    const snapshots = await this.listSnapshotsUnsorted(ids);
 
     snapshots.sort((left, right) => left.title.localeCompare(right.title));
     return snapshots;

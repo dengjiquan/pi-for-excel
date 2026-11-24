@@ -1,9 +1,4 @@
-/**
- * Helper to make overlay dialogs Esc-dismissible and mark them as
- * Escape owners so streaming Esc abort is suppressed while open.
- */
-
-import { blurTextEntryTarget } from "../utils/text-entry.js";
+import { isTextEntryTarget } from "../utils/text-entry.js";
 
 function getTargetElement(target: EventTarget | null): Element | null {
   if (!target) return null;
@@ -24,9 +19,14 @@ function isTopmostEscapeClaim(overlay: HTMLElement): boolean {
   return claimingOverlays[claimingOverlays.length - 1] === overlay;
 }
 
+export function isDialogOverlayOpen(): boolean {
+  return typeof document !== "undefined" && document.querySelector("[data-claims-escape='true']") !== null;
+}
+
 export function installOverlayEscapeClose(
   overlay: HTMLElement,
   closeOverlay: () => void,
+  stepOutTarget: HTMLElement = overlay,
 ): () => void {
   overlay.dataset.claimsEscape = "true";
 
@@ -46,10 +46,12 @@ export function installOverlayEscapeClose(
     }
 
     const targetElement = getTargetElement(event.target);
-    if (targetElement && overlay.contains(targetElement) && blurTextEntryTarget(targetElement)) {
+    if (targetElement && overlay.contains(targetElement) && isTextEntryTarget(targetElement)) {
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
+      if (!stepOutTarget.hasAttribute("tabindex")) stepOutTarget.tabIndex = -1;
+      stepOutTarget.focus({ preventScroll: true });
       return;
     }
 

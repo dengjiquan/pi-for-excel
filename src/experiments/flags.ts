@@ -1,18 +1,9 @@
-/**
- * Experimental feature flags.
- *
- * These flags are local-only toggles for in-progress capabilities and rollout
- * controls. Most are opt-in; some can be default-on with a persisted override.
- */
-
 import { t } from "../language/index.js";
 import { ALLOW_REMOTE_EXTENSION_URLS_STORAGE_KEY } from "../commands/extension-source-policy.js";
 import { dispatchExperimentalFeatureChanged } from "./events.js";
 
 export type ExperimentalFeatureId =
-  | "ui_dark_mode"
   | "remote_extension_urls"
-  | "extension_permission_gates"
   | "extension_sandbox_runtime"
   | "extension_widget_v2";
 
@@ -20,30 +11,18 @@ export type ExperimentalFeatureWiring = "wired" | "flag-only";
 
 export interface ExperimentalFeatureDefinition {
   id: ExperimentalFeatureId;
-  /** Slash-command token, e.g. `/experimental on extension-permissions` */
   slug: string;
-  /** Alternate tokens accepted by the resolver. */
   aliases: readonly string[];
   title: string;
   description: string;
   warning?: string;
   wiring: ExperimentalFeatureWiring;
   storageKey: string;
-  /** Used when no explicit value has been persisted yet. */
   defaultEnabled?: boolean;
 }
 
 function getFeatures(): readonly ExperimentalFeatureDefinition[] {
   return [
-    {
-      id: "ui_dark_mode",
-      slug: "dark-mode",
-      aliases: ["theme-dark", "ui-dark-mode"],
-      title: t("experimental.dark_mode.title"),
-      description: t("experimental.dark_mode.desc"),
-      wiring: "wired",
-      storageKey: "pi.experimental.uiDarkMode",
-    },
     {
       id: "remote_extension_urls",
       slug: "remote-extension-urls",
@@ -53,15 +32,6 @@ function getFeatures(): readonly ExperimentalFeatureDefinition[] {
       warning: t("experimental.remote_urls.warning"),
       wiring: "wired",
       storageKey: ALLOW_REMOTE_EXTENSION_URLS_STORAGE_KEY,
-    },
-    {
-      id: "extension_permission_gates",
-      slug: "extension-permissions",
-      aliases: ["extensions-permissions", "extension-capability-gates"],
-      title: t("experimental.permission_gates.title"),
-      description: t("experimental.permission_gates.desc"),
-      wiring: "wired",
-      storageKey: "pi.experimental.extensionPermissionGates",
     },
     {
       id: "extension_sandbox_runtime",
@@ -119,7 +89,6 @@ function safeSetItem(key: string, value: string): void {
     if (typeof localStorage === "undefined") return;
     localStorage.setItem(key, value);
   } catch {
-    // ignore (private mode / disabled storage)
   }
 }
 

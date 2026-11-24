@@ -5,7 +5,6 @@ import {
   checkApiKeyFormat,
   clearWebSearchApiKey,
   getApiKeyForProvider,
-  isApiKeyRequired,
   loadWebSearchProviderConfig,
   migrateLegacyWebSearchApiKeysToConnectionStore,
   saveWebSearchApiKey,
@@ -163,14 +162,6 @@ void test("legacy migration does not overwrite existing connection-store keys", 
   assert.equal(getApiKeyForProvider(config, "serper"), "sp-new");
 });
 
-void test("all providers require an API key", () => {
-  assert.equal(isApiKeyRequired("jina"), true);
-  assert.equal(isApiKeyRequired("firecrawl"), true);
-  assert.equal(isApiKeyRequired("serper"), true);
-  assert.equal(isApiKeyRequired("tavily"), true);
-  assert.equal(isApiKeyRequired("brave"), true);
-});
-
 void test("web search config stores firecrawl api key", async () => {
   const settings = new MemorySettingsStore();
 
@@ -207,8 +198,6 @@ void test("web search config clears only the selected provider key", async () =>
   assert.equal(getApiKeyForProvider(config, "serper"), undefined);
   assert.equal(getApiKeyForProvider(config, "brave"), "br-123");
 });
-
-// ── checkApiKeyFormat ────────────────────────────────────
 
 void test("API-key format policy accepts and diagnoses representative keys", () => {
   const rows = [

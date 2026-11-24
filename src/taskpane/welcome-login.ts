@@ -1,7 +1,3 @@
-/**
- * Welcome/login overlay shown when no providers are configured.
- */
-
 import { t, initLanguage, getLanguage } from "../language/index.js";
 
 import type { ModelRefreshOwner } from "../models/model-refresh-owner.js";
@@ -16,8 +12,11 @@ import {
   PROXY_HELPER_DOCS_URL,
   probeProxyReachability,
   resolveConfiguredProxyUrl,
+  validateOfficeProxyUrl,
 } from "../auth/proxy-validation.js";
-import { readTaskpaneProxySettings } from "./settings.js";
+import { getErrorMessage } from "../utils/errors.js";
+import { checkProxyOnce } from "./proxy-status.js";
+import { needsRemoteProxyWarning, readTaskpaneProxySettings, saveTaskpaneProxyUrl } from "./settings.js";
 
 function createElement<K extends keyof HTMLElementTagNameMap>(
   tagName: K,
@@ -37,7 +36,6 @@ async function testLocalHttpsProxy(proxyUrl: string): Promise<boolean> {
 export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Promise<void> {
   const { VISIBLE_PROVIDERS, buildProviderRow } = await import("../ui/provider-login.js");
 
-  // Make OAuth flows usable even before the user can access /settings.
   try {
     const storage = getAppStorage();
     const proxySettings = await readTaskpaneProxySettings(storage.settings);
@@ -47,7 +45,6 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
       await storage.settings.set("proxy.url", currentUrl);
     }
 
-    // Auto-enable if a local HTTPS proxy is actually reachable.
     if (!proxySettings.enabled) {
       const ok = await testLocalHttpsProxy(currentUrl);
       if (ok) {
@@ -55,7 +52,6 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
       }
     }
   } catch {
-    // ignore — welcome overlay should still show
   }
 
   closeOverlayById(WELCOME_LOGIN_OVERLAY_ID);
@@ -67,6 +63,8 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
       cardClassName: "pi-welcome-card",
     });
 
+    const lifetime = new AbortController();
+    dialog.addCleanup(() => lifetime.abort());
     let settled = false;
     dialog.addCleanup(() => {
       if (settled) {
@@ -87,7 +85,10 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
     const subtitleId = `${WELCOME_LOGIN_OVERLAY_ID}-subtitle`;
 
     const logo = createElement("div", "pi-welcome-logo");
-    logo.textContent = "π";
+    const logoImage = createElement("img");
+    logoImage.src = "/assets/ai-for-excel-icon-128.png";
+    logoImage.alt = t("welcome.title");
+    logo.appendChild(logoImage);
 
     const title = createElement("h2", "pi-welcome-title");
     title.id = titleId;
@@ -170,52 +171,33 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
     proxyPanel.append(proxyTopRow, proxyUrlRow, proxyHint);
 
 
-    // Language bar at the top
     const langBar = createElement("div", "pi-welcome-lang-bar");
-    langBar.style.cssText = "display:flex;justify-content:flex-end;gap:4px;padding:4px 8px;";
+    langBar.setAttribute("role", "group");
+    langBar.setAttribute("aria-label", t("welcome.language.aria"));
 
-    const engBtn = createElement("button");
-    engBtn.type = "button";
-    engBtn.textContent = t("language.english");
-    engBtn.style.cssText = "font-size:11px;padding:2px 8px;border:1px solid #ccc;border-radius:4px;background:var(--pi-bg, #fff);cursor:pointer;";
-
-    const zhBtn = createElement("button");
-    zhBtn.type = "button";
-    zhBtn.textContent = "中文";
-    zhBtn.style.cssText = "font-size:11px;padding:2px 8px;border:1px solid #ccc;border-radius:4px;background:var(--pi-bg, #fff);cursor:pointer;";
-
-    const currentLang2 = getLanguage();
-    if (currentLang2 === "zh-CN") {
-      zhBtn.style.borderColor = "var(--color-accent, #3b82f6)";
-      zhBtn.style.color = "var(--color-accent, #3b82f6)";
-    } else {
-      engBtn.style.borderColor = "var(--color-accent, #3b82f6)";
-      engBtn.style.color = "var(--color-accent, #3b82f6)";
-    }
-
-    engBtn.addEventListener("click", () => {
-      if (getLanguage() === "en") return;
-      initLanguage("en");
-      void (async () => {
-        try {
-          const storage = getAppStorage();
-          await storage.settings.set("language", "en");
+    const createLanguageButton = (lang: "en" | "zh-CN", label: string): HTMLButtonElement => {
+      const button = createElement("button", "pi-welcome-lang-btn");
+      button.type = "button";
+      button.textContent = label;
+      button.setAttribute("aria-pressed", getLanguage() === lang ? "true" : "false");
+      button.addEventListener("click", () => {
+        if (getLanguage() === lang) return;
+        void (async () => {
+          try {
+            await getAppStorage().settings.set("language", lang);
+          } catch {
+            showToast(t("welcome.language.saveFailed"), { variant: "error" });
+            return;
+          }
+          initLanguage(lang);
           location.reload();
-        } catch { /* ignore */ }
-      })();
-    });
+        })();
+      });
+      return button;
+    };
 
-    zhBtn.addEventListener("click", () => {
-      if (getLanguage() === "zh-CN") return;
-      initLanguage("zh-CN");
-      void (async () => {
-        try {
-          const storage = getAppStorage();
-          await storage.settings.set("language", "zh-CN");
-          location.reload();
-        } catch { /* ignore */ }
-      })();
-    });
+    const engBtn = createLanguageButton("en", t("language.english"));
+    const zhBtn = createLanguageButton("zh-CN", "中文");
 
     langBar.append(engBtn, zhBtn);
 
@@ -252,7 +234,7 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
       proxyPanel.hidden = !willOpen;
       proxyToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
       proxyToggle.textContent = willOpen
-        ? "Hide proxy settings"
+        ? t("welcome.proxy.hide")
         : proxyToggleClosedLabel;
 
       if (willOpen) {
@@ -268,14 +250,28 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
     };
 
     const saveProxyUi = async () => {
+      const storage = getAppStorage();
+      let proxyUrl: string;
       try {
-        const storage = getAppStorage();
+        proxyUrl = validateOfficeProxyUrl(proxyUrlEl.value.trim() || DEFAULT_PROXY_URL);
+      } catch (error) {
+        showToast(t("welcome.toast.proxy_url_not_saved", { error: getErrorMessage(error) }), { variant: "error" });
+        return;
+      }
+
+      try {
         await storage.settings.set("proxy.enabled", proxyEnabledEl.checked);
-        await storage.settings.set("proxy.url", proxyUrlEl.value.trim());
-        showToast(t("welcome.toast.proxy_saved"));
+        proxyUrlEl.value = await saveTaskpaneProxyUrl(storage.settings, proxyUrl);
       } catch {
         showToast(t("welcome.toast.proxy_failed"));
+        return;
       }
+
+      showToast(t("welcome.toast.proxy_saved"));
+      if (needsRemoteProxyWarning({ enabled: proxyEnabledEl.checked, url: proxyUrl })) {
+        showToast(t("init.securityWarning"), { variant: "error" });
+      }
+      void checkProxyOnce(storage.settings, { force: true });
     };
 
     proxyEnabledEl.addEventListener("change", () => {
@@ -292,6 +288,7 @@ export async function showWelcomeLogin(modelRefreshOwner: ModelRefreshOwner): Pr
     for (const provider of VISIBLE_PROVIDERS) {
       const row = buildProviderRow(provider, {
         isActive: false,
+        signal: lifetime.signal,
         expandedRef,
         onConnected: (_row, _id, label) => {
           document.dispatchEvent(new CustomEvent("pi:providers-changed"));

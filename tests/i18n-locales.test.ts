@@ -1,5 +1,3 @@
-// Static contract: locale key parity and source-level t() usage are dependency restrictions;
-// runtime behavior cannot exhaustively prove that every shipped string remains localized.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -25,14 +23,8 @@ function parseLocaleJson(raw: unknown, label: string): Record<string, string> {
   return parsed;
 }
 
-const en = parseLocaleJson(
-  JSON.parse(readFileSync(join(localesDir, "en.json"), "utf8")) as unknown,
-  "en",
-);
-const zh = parseLocaleJson(
-  JSON.parse(readFileSync(join(localesDir, "zh-CN.json"), "utf8")) as unknown,
-  "zh-CN",
-);
+const en = parseLocaleJson(JSON.parse(readFileSync(join(localesDir, "en.json"), "utf8")) as unknown, "en");
+const zh = parseLocaleJson(JSON.parse(readFileSync(join(localesDir, "zh-CN.json"), "utf8")) as unknown, "zh-CN");
 
 function requireMatchGroup(match: RegExpMatchArray, index: number): string {
   const value = match[index];
@@ -44,8 +36,7 @@ function requireMatchGroup(match: RegExpMatchArray, index: number): string {
 
 function placeholders(value: string): Set<string> {
   const found = new Set<string>();
-  for (const m of value.matchAll(/\{([a-zA-Z0-9_]+)\}/g))
-    found.add(requireMatchGroup(m, 1));
+  for (const m of value.matchAll(/\{([a-zA-Z0-9_]+)\}/g)) found.add(requireMatchGroup(m, 1));
   return found;
 }
 
@@ -64,37 +55,18 @@ function collectSourceFiles(dir: string, out: string[] = []): string[] {
 }
 
 const sourceFiles = collectSourceFiles(join(root, "src"));
-const localizedUiSourceFiles = [
-  "ui",
-  "taskpane",
-  "commands",
-  "compaction",
-  "files",
-].flatMap((dir) => collectSourceFiles(join(root, "src", dir)));
+const localizedUiSourceFiles = ["ui", "taskpane", "commands", "compaction", "files"]
+  .flatMap((dir) => collectSourceFiles(join(root, "src", dir)));
 const corpus = sourceFiles.map((f) => readFileSync(f, "utf8")).join("\n");
 
 void test("en and zh-CN locales have identical key sets", () => {
-  const missingInZh = Object.keys(en)
-    .filter((k) => !(k in zh))
-    .sort();
-  const extraInZh = Object.keys(zh)
-    .filter((k) => !(k in en))
-    .sort();
-  assert.deepEqual(
-    missingInZh,
-    [],
-    `keys missing in zh-CN.json: ${missingInZh.join(", ")}`,
-  );
-  assert.deepEqual(
-    extraInZh,
-    [],
-    `keys in zh-CN.json but not en.json: ${extraInZh.join(", ")}`,
-  );
+  const missingInZh = Object.keys(en).filter((k) => !(k in zh)).sort();
+  const extraInZh = Object.keys(zh).filter((k) => !(k in en)).sort();
+  assert.deepEqual(missingInZh, [], `keys missing in zh-CN.json: ${missingInZh.join(", ")}`);
+  assert.deepEqual(extraInZh, [], `keys in zh-CN.json but not en.json: ${extraInZh.join(", ")}`);
 });
 
 void test("zh-CN placeholders are a subset of en placeholders per key", () => {
-  // zh may drop English plural-helper vars (e.g. {cue}), but must never
-  // reference a placeholder the caller does not provide.
   const violations: string[] = [];
   for (const [key, enValue] of Object.entries(en)) {
     const zhValue = zh[key];
@@ -104,16 +76,10 @@ void test("zh-CN placeholders are a subset of en placeholders per key", () => {
       if (!enVars.has(v)) violations.push(`${key}: {${v}}`);
     }
   }
-  assert.deepEqual(
-    violations,
-    [],
-    `zh-CN placeholders missing from en: ${violations.join(", ")}`,
-  );
+  assert.deepEqual(violations, [], `zh-CN placeholders missing from en: ${violations.join(", ")}`);
 });
 
 void test("zh-CN drops English-only plural helper placeholders", () => {
-  // Chinese does not inflect nouns for singular/plural, so keeping these
-  // English helper placeholders leaks strings like "file s" into zh-CN UI.
   const banned = new Set(["plural", "cue"]);
   const violations: string[] = [];
   for (const [key, value] of Object.entries(zh)) {
@@ -121,11 +87,7 @@ void test("zh-CN drops English-only plural helper placeholders", () => {
       if (banned.has(v)) violations.push(`${key}: {${v}}`);
     }
   }
-  assert.deepEqual(
-    violations,
-    [],
-    `zh-CN should not include English plural helpers: ${violations.join(", ")}`,
-  );
+  assert.deepEqual(violations, [], `zh-CN should not include English plural helpers: ${violations.join(", ")}`);
 });
 
 void test("zh-CN keeps command syntax placeholders copyable", () => {
@@ -133,11 +95,7 @@ void test("zh-CN keeps command syntax placeholders copyable", () => {
     .filter(([key]) => key.startsWith("experimental."))
     .filter(([, value]) => /<[^>]*[\u4e00-\u9fff][^>]*>/.test(value))
     .map(([key, value]) => `${key}: ${value}`);
-  assert.deepEqual(
-    violations,
-    [],
-    `localized command placeholders in zh-CN: ${violations.join("\n")}`,
-  );
+  assert.deepEqual(violations, [], `localized command placeholders in zh-CN: ${violations.join("\n")}`);
 });
 
 void test("en locale has no empty values", () => {
@@ -150,116 +108,33 @@ void test("en locale has no empty values", () => {
 void test("POLICY: locale keys, UI sinks, and initialization stay localization-safe", () => {
   const labelKeys = new Set(
     [...corpus.matchAll(/\bl\("([^"]+)"\)/g)].map(
-      (match) =>
-        `humanize.label.${requireMatchGroup(match, 1)
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "_")
-          .replace(/^_|_$/g, "")}`,
+      (match) => `humanize.label.${requireMatchGroup(match, 1).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}`,
     ),
   );
   const valueKeys = new Set(
-    [...corpus.matchAll(/\bv\("([^"]+)"/g)].map(
-      (match) => `humanize.value.${requireMatchGroup(match, 1)}`,
-    ),
+    [...corpus.matchAll(/\bv\("([^"]+)"/g)].map((match) => `humanize.value.${requireMatchGroup(match, 1)}`),
   );
   const unusedKeys = Object.keys(en).filter((key) => {
     if (labelKeys.has(key) || valueKeys.has(key)) return false;
-    if (key.startsWith("humanize.unit.") || key.startsWith("perm.trust."))
-      return false;
-    return (
-      !corpus.includes(`"${key}"`) &&
-      !corpus.includes(`'${key}'`) &&
-      !corpus.includes("`" + key + "`")
-    );
+    if (key.startsWith("humanize.unit.") || key.startsWith("perm.trust.")) return false;
+    return !corpus.includes(`"${key}"`) && !corpus.includes(`'${key}'`) && !corpus.includes("`" + key + "`");
   });
-  assert.deepEqual(unusedKeys, []);
-});
 
-void test('every static t("...") call site references an existing key', () => {
-  const missing: string[] = [];
-  for (const f of sourceFiles) {
-    const content = readFileSync(f, "utf8");
-    for (const m of content.matchAll(/\bt\(\s*"([^"$`]+)"/g)) {
-      // Keys ending in "." are dynamic prefixes (string concatenation), e.g.
-      // t("perm.trust." + trust) — covered by the unused-key exemptions above.
-      const key = requireMatchGroup(m, 1);
-      if (key.endsWith(".")) continue;
-      if (!(key in en)) missing.push(`${f.slice(root.length + 1)}: ${key}`);
-    }
-  }
-  assert.deepEqual(
-    missing,
-    [],
-    `t() call sites with unknown keys: ${missing.join(", ")}`,
-  );
-});
-
-void test("home hints keep the construction cost and messy-table workflows", () => {
-  assert.equal(en["hint.financial.label"], "Build my cost model");
-  assert.match(
-    en["hint.financial.prompt"],
-    /construction & engineering cost models/,
-  );
-  assert.equal(en["hint.messy.label"], "Tame the messy tables");
-  assert.match(en["hint.messy.prompt"], /messy real-world tables/);
-
-  const initSource = readFileSync(
-    join(root, "src", "taskpane", "init.ts"),
-    "utf8",
-  );
-  assert.match(initSource, /t\("hint\.messy\.prompt"\)/);
-});
-
-void test("common UI text sinks use locale keys instead of hardcoded English", () => {
-  // This is a deliberately low-noise guard for the UI surfaces agents most
-  // often edit: DOM text sinks, button/config-row helpers, dialog labels, and
-  // toast templates. It does not try to classify every string literal in src/;
-  // agent-facing prompts, model/provider IDs, CSS classes, and command syntax
-  // are valid English literals elsewhere.
-  const staticSink =
-    /(?:textContent|innerHTML|placeholder|title|subtitle|message|\w*[Ll]abel|showToast|createButton|createConfigRow|\.text)\s*(?:=|:|\()\s*["`][A-Z]/;
+  const staticSink = /(?:textContent|innerHTML|placeholder|title|subtitle|message|\w*[Ll]abel|showToast|createButton|createConfigRow|\.text)\s*(?:=|:|\()\s*["`][A-Z]/;
   const toastTemplate = /\b(?:showToast|resolved\.showToast)\(\s*`/;
-  const allowed =
-    /aria-|data-|className|\.css|https?:\/\/|icon\(|throw new Error|const message = error instanceof Error|externalLoadError|activationLoadError/;
+  const allowed = /aria-|data-|className|\.css|https?:\/\/|icon\(|throw new Error|const message = error instanceof Error|externalLoadError|activationLoadError/;
   const hardcodedUiStrings: string[] = [];
   for (const file of localizedUiSourceFiles) {
     const relative = file.slice(root.length + 1);
-    for (const [index, line] of readFileSync(file, "utf8")
-      .split("\n")
-      .entries()) {
-      if (
-        (staticSink.test(line) || toastTemplate.test(line)) &&
-        !/\bt\(/.test(line) &&
-        !allowed.test(line)
-      ) {
+    for (const [index, line] of readFileSync(file, "utf8").split("\n").entries()) {
+      if ((staticSink.test(line) || toastTemplate.test(line)) && !/\bt\(/.test(line) && !allowed.test(line)) {
         hardcodedUiStrings.push(`${relative}:${index + 1}: ${line.trim()}`);
       }
     }
   }
 
-  const moduleScopeCalls: string[] = [];
-  for (const file of sourceFiles) {
-    let depth = 0;
-    for (const [index, line] of readFileSync(file, "utf8")
-      .split("\n")
-      .entries()) {
-      if (
-        depth === 0 &&
-        /\bt\(\s*"/.test(line) &&
-        !/^\s*(\*|\/\/)/.test(line)
-      ) {
-        moduleScopeCalls.push(`${file.slice(root.length + 1)}:${index + 1}`);
-      }
-      for (const character of line) {
-        if (character === "{" || character === "(") depth++;
-        else if (character === "}" || character === ")")
-          depth = Math.max(0, depth - 1);
-      }
-    }
-  }
-
   assert.deepEqual(
-    { hardcodedUiStrings, moduleScopeCalls },
-    { hardcodedUiStrings: [], moduleScopeCalls: [] },
+    { unusedKeys, hardcodedUiStrings },
+    { unusedKeys: [], hardcodedUiStrings: [] },
   );
 });

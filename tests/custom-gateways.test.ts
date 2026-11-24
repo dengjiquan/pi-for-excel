@@ -228,8 +228,6 @@ void test("saveOpenAiGatewayConfig rejects mismatched metadata and manual gatewa
       cacheRead: 0,
       cacheWrite: 0,
     });
-    // Fork default: 64 Ki output tokens (reasoning models die silently at 4 Ki),
-    // clamped by the 16 Ki context window fallback.
     assert.equal(storedModel?.maxTokens, 16_384);
   }
 });
@@ -264,6 +262,110 @@ void test("saveOpenAiGatewayConfig clamps maxTokens to the configured context wi
   const model = restarted.models.getModel(saved.providerName, "small-model");
   assert.equal(model?.contextWindow, 2_048);
   assert.equal(model?.maxTokens, 2_048);
+});
+
+void test("saveOpenAiGatewayConfig applies an explicit output-token limit to unknown gateway models", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const saved = await saveOpenAiGatewayConfig(store, {
+    displayName: "Long output",
+    endpointUrl: "https://gateway.example.com/v1",
+    modelId: "unlisted-model",
+    contextWindow: 200_000,
+    maxTokens: 32_000,
+  });
+
+  assert.equal(saved.maxTokens, 32_000);
+  assert.equal((await listOpenAiGatewayConfigs(store))[0]?.maxTokens, 32_000);
+
+  const restarted = await restartGatewayRuntime(store);
+  assert.equal(restarted.models.getModel(saved.providerName, "unlisted-model")?.maxTokens, 32_000);
+});
+
+void test("saveOpenAiGatewayConfig lets an explicit output-token limit override registry metadata", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const saved = await saveOpenAiGatewayConfig(store, {
+    endpointUrl: knownRegistryModel.baseUrl,
+    modelId: knownRegistryModel.id,
+    maxTokens: 8_000,
+  }, {
+    getModels: () => [knownRegistryModel],
+  });
+
+  assert.equal(saved.contextWindow, 1_050_000);
+  assert.equal((await store.get(saved.id))?.models?.[0]?.maxTokens, 8_000);
+});
+
+void test("saveOpenAiGatewayConfig clamps an explicit output-token limit to the context window", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const saved = await saveOpenAiGatewayConfig(store, {
+    endpointUrl: "https://gateway.example.com/v1",
+    modelId: "small-model",
+    contextWindow: 8_192,
+    maxTokens: 100_000,
+  });
+
+  assert.equal(saved.maxTokens, 8_192);
+});
+
+void test("saveOpenAiGatewayConfig rejects invalid output-token limits", async () => {
+  for (const maxTokens of [0, -1, 1.5, Number.NaN]) {
+    await assert.rejects(
+      saveOpenAiGatewayConfig(new MemoryCustomProvidersStore(), {
+        endpointUrl: "https://gateway.example.com/v1",
+        modelId: "bad-output-limit",
+        maxTokens,
+      }),
+      /Max output tokens must be/,
+    );
+  }
+});
+
+void test("saveOpenAiGatewayConfig stores the connect-directly choice and round-trips it for editing", async () => {
+  const store = new MemoryCustomProvidersStore();
+
+  const direct = await saveOpenAiGatewayConfig(store, {
+    endpointUrl: "https://llama.example.lan:8443/v1",
+    modelId: "local-model",
+    connectDirectly: true,
+  });
+  assert.equal(direct.connectDirectly, true);
+  assert.equal((await store.get(direct.id))?.connectDirectly, true);
+  assert.equal((await listOpenAiGatewayConfigs(store))[0]?.connectDirectly, true);
+
+  const proxied = await saveOpenAiGatewayConfig(store, {
+    id: direct.id,
+    endpointUrl: "https://llama.example.lan:8443/v1",
+    modelId: "local-model",
+  });
+  assert.equal(proxied.connectDirectly, false);
+  assert.equal((await store.get(direct.id))?.connectDirectly, undefined);
+});
+
+void test("saveOpenAiGatewayConfig rejects direct plain-http endpoints on other machines", async () => {
+  await assert.rejects(
+    saveOpenAiGatewayConfig(new MemoryCustomProvidersStore(), {
+      endpointUrl: "http://192.168.1.50:8080/v1",
+      modelId: "local-model",
+      connectDirectly: true,
+    }),
+    /Direct connections need an https:\/\/ endpoint/,
+  );
+
+  const proxied = await saveOpenAiGatewayConfig(new MemoryCustomProvidersStore(), {
+    endpointUrl: "http://192.168.1.50:8080/v1",
+    modelId: "local-model",
+  });
+  assert.equal(proxied.connectDirectly, false);
+
+  const loopback = await saveOpenAiGatewayConfig(new MemoryCustomProvidersStore(), {
+    endpointUrl: "http://localhost:8080/v1",
+    modelId: "local-model",
+    connectDirectly: true,
+  });
+  assert.equal(loopback.connectDirectly, true);
 });
 
 void test("saveOpenAiGatewayConfig rejects invalid context window values", async () => {
@@ -471,11 +573,9 @@ void test("gateway headers round-trip through save and parse", async () => {
   assert.equal(listed.length, 1);
   assert.deepEqual(listed[0]?.headers, parsed);
 
-  // pi-ai merges Model.headers (not provider.headers) into requests.
   const storedModel = (await store.get(saved.id))?.models?.[0];
   assert.deepEqual(storedModel?.headers, parsed);
 
-  // Saving without headers drops the field instead of merging stale values.
   await saveOpenAiGatewayConfig(store, {
     id: saved.id,
     displayName: "opencode-go",
@@ -507,7 +607,6 @@ void test("gateway api type selects the responses protocol end to end", async ()
   assert.equal(listed[0]?.api, "openai-responses");
   assert.equal(listed[0]?.modelId, "gpt-5.6-luna");
 
-  // Default stays chat completions for existing configs.
   const legacy = await saveOpenAiGatewayConfig(store, {
     displayName: "legacy",
     endpointUrl: "https://legacy.example.com/v1",
@@ -519,7 +618,6 @@ void test("gateway api type selects the responses protocol end to end", async ()
 void test("auto api mode resolves the protocol from the model name", async () => {
   const store = new MemoryCustomProvidersStore();
 
-  // gpt-* → responses, no manual switching needed
   const luna = await saveOpenAiGatewayConfig(store, {
     displayName: "go-luna",
     endpointUrl: "https://opencode.ai/zen/go/v1",
@@ -528,7 +626,6 @@ void test("auto api mode resolves the protocol from the model name", async () =>
   assert.equal(luna.api, "openai-responses");
   assert.equal(luna.apiMode, "auto");
 
-  // glm/deepseek/kimi → completions
   const glm = await saveOpenAiGatewayConfig(store, {
     displayName: "go-glm",
     endpointUrl: "https://opencode.ai/zen/go/v1",
@@ -536,7 +633,6 @@ void test("auto api mode resolves the protocol from the model name", async () =>
   });
   assert.equal(glm.api, "openai-completions");
 
-  // grok-* and muse-spark* → responses
   assert.equal(
     (
       await saveOpenAiGatewayConfig(store, {
@@ -547,7 +643,6 @@ void test("auto api mode resolves the protocol from the model name", async () =>
     "openai-responses",
   );
 
-  // Explicit lock wins over the name table (unknown future models)
   const locked = await saveOpenAiGatewayConfig(store, {
     endpointUrl: "https://opencode.ai/zen/go/v1",
     modelId: "gpt-future-model",
@@ -556,7 +651,6 @@ void test("auto api mode resolves the protocol from the model name", async () =>
   assert.equal(locked.api, "openai-completions");
   assert.equal(locked.apiMode, "openai-completions");
 
-  // Round-trip preserves the choice
   const listed = await listOpenAiGatewayConfigs(store);
   const reluna = listed.find((g) => g.id === luna.id);
   assert.equal(reluna?.apiMode, "auto");

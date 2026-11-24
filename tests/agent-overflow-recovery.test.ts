@@ -4,7 +4,9 @@ import { test } from "node:test";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import { createModels, fauxAssistantMessage, fauxProvider, type Context } from "@earendil-works/pi-ai";
 
+import { recoverFromContextOverflow } from "../src/compaction/overflow-recovery.ts";
 import { createActionQueue } from "../src/taskpane/action-queue.ts";
+import { createTabState } from "../src/taskpane/tab-state.ts";
 
 const LITELLM_OVERFLOW =
   "400 litellm.ContextWindowExceededError: ContextWindowExceededError: This model's maximum context length is 65536 tokens. However, your prompt contains 61441 input tokens.";
@@ -34,8 +36,8 @@ function createQueue(agent: Agent, runCompact: () => Promise<void>) {
     agent,
     autoCompactEnabled: true,
     runCompact,
-    sidebar: { setBusyIndicator: () => {} },
-    queueDisplay: { setActionQueue: () => {} },
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null },
   });
 }
 
@@ -64,9 +66,66 @@ void test("LiteLLM context overflow from the active model compacts and retries t
   queue.shutdown();
 });
 
-void test("non-overflow model errors do not compact or retry the agent request", async () => {
+void test("an overflow after compact-and-retry stays in the transcript until the next prompt", async () => {
+  const overflow = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: LITELLM_OVERFLOW });
+  const runtime = createHarness([overflow(), overflow(), overflow(), fauxAssistantMessage("recovered")]);
+  let compactRuns = 0;
+  const runCompact = () => {
+    compactRuns += 1;
+    runtime.agent.state.messages = [user(`compacted history ${compactRuns}`, 10 + compactRuns)];
+    return Promise.resolve();
+  };
+  const queue = createQueue(runtime.agent, runCompact);
+
+  queue.enqueuePrompt("analyze workbook");
+  await waitForIdle(queue);
+
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(compactRuns, 1);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /ContextWindowExceededError/u);
+
+  assert.equal(await recoverFromContextOverflow({ agent: runtime.agent, runCompact }), false);
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(compactRuns, 1);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /ContextWindowExceededError/u);
+
+  queue.enqueuePrompt("try again");
+  await waitForIdle(queue);
+
+  assert.equal(runtime.requests.length, 4);
+  assert.equal(compactRuns, 2);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /recovered/u);
+  queue.shutdown();
+});
+
+void test("an explicit Retry after an overflow-after-recovery compacts again for the same prompt", async () => {
+  const overflow = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: LITELLM_OVERFLOW });
+  const runtime = createHarness([overflow(), overflow(), overflow(), fauxAssistantMessage("recovered")]);
+  let compactRuns = 0;
+  const queue = createQueue(runtime.agent, () => {
+    compactRuns += 1;
+    runtime.agent.state.messages = [user(`compacted history ${compactRuns}`, 10 + compactRuns)];
+    return Promise.resolve();
+  });
+
+  queue.enqueuePrompt("analyze workbook");
+  await waitForIdle(queue);
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(compactRuns, 1);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /ContextWindowExceededError/u);
+
+  assert.equal(queue.retry(), true);
+  await waitForIdle(queue);
+
+  assert.equal(runtime.requests.length, 4);
+  assert.equal(compactRuns, 2);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /recovered/u);
+  queue.shutdown();
+});
+
+void test("non-overflow, non-transient model errors do not compact or retry the agent request", async () => {
   const runtime = createHarness([
-    fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 invalid tool schema" }),
   ]);
   let compacted = false;
   const queue = createQueue(runtime.agent, () => {
@@ -79,7 +138,7 @@ void test("non-overflow model errors do not compact or retry the agent request",
 
   assert.equal(runtime.requests.length, 1);
   assert.equal(compacted, false);
-  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /rate limit exceeded/u);
+  assert.match(JSON.stringify(runtime.agent.state.messages.at(-1)), /invalid tool schema/u);
   queue.shutdown();
 });
 

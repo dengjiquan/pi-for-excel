@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -271,6 +269,27 @@ function startBridge(bridgeArgs) {
     console.error(error.message);
     process.exit(1);
   });
+}
+
+if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
+  console.log(`Usage: npx pi-for-excel-tmux-bridge [--https | --http] [--install-missing]
+
+Local bridge that lets Pi for Excel drive tmux sessions.
+
+Starts at https://localhost:3341 by default, creating local certificates in
+~/.pi-for-excel/certs with mkcert when needed.
+
+Options:
+  --https             Serve HTTPS (the default)
+  --http              Serve plain HTTP instead (no certificates)
+  --install-missing   Install tmux with Homebrew if missing (macOS)
+  -h, --help          Show this help and exit
+
+Environment:
+  PORT, HOST          Listen address (default 3341 on localhost)
+  TMUX_BRIDGE_TOKEN   Require this bearer token
+  ALLOWED_ORIGINS     Comma-separated origins allowed to call the bridge`);
+  process.exit(0);
 }
 
 if (!fs.existsSync(bridgeScriptPath)) {

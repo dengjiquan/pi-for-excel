@@ -1,12 +1,3 @@
-/**
- * Tests for Pyodide fallback behavior in python_run and python_transform_range.
- *
- * These tests verify:
- * - Native bridge is preferred when configured
- * - Pyodide fallback is used when no bridge is configured
- * - Proper error when neither backend is available
- */
-
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -29,20 +20,27 @@ function makePyodideResponse(overrides: Partial<PythonBridgeResponse> = {}): Pyt
   };
 }
 
-void test("python_run propagates Pyodide execution errors", async () => {
+void test("python_run reports Pyodide failures with stderr and stdout when the error is empty", async () => {
   const tool = createPythonRunTool({
     getBridgeConfig: () => Promise.resolve(null),
     isPyodideAvailable: () => true,
     callPyodide: () => Promise.resolve(makePyodideResponse({
       ok: false,
-      error: "NameError: name 'foo' is not defined",
+      exit_code: 1,
+      error: "",
+      stdout: "before\n",
+      stderr: "Traceback (most recent call last):\n  File \"<exec>\", line 1, in <module>\n" +
+        "ModuleNotFoundError: No module named 'pandas'\nThe module 'pandas' is included in the Pyodide distribution, but it is not installed.",
     })),
   });
 
-  const result = await tool.execute("tc-4", { code: "foo()" });
+  const result = await tool.execute("tc-4", { code: "print('before')\nimport pandas" });
+  const text = firstText(result);
 
   assert.equal(result.details?.ok, false);
-  assert.match(firstText(result), /NameError/);
+  assert.match(text, /^Error: Python failed in Pyodide \(in-browser\) \(exit code 1\): ModuleNotFoundError: No module named 'pandas'/u);
+  assert.match(text, /Stderr:[\s\S]*is not installed/u);
+  assert.match(text, /Stdout:[\s\S]*before/u);
 });
 
 void test("python_run Pyodide returns result_json correctly", async () => {

@@ -1,33 +1,12 @@
-/**
- * Shared helpers for fullscreen overlays.
- *
- * Consolidates:
- * - single-instance toggle behavior by overlay id
- * - Escape handling
- * - backdrop-click close
- * - focus restoration after close
- */
-
 import { requestChatInputFocus } from "./input-focus.js";
 import { installOverlayEscapeClose } from "./overlay-escape.js";
 
 const overlayClosers = new WeakMap<HTMLElement, () => void>();
 
-export const NESTED_OVERLAY_Z_INDEX = 300;
-
-/**
- * Register a close handler for an overlay element that is not built through
- * `createOverlayDialog` (e.g. the settings shell), so `closeOverlayById`
- * routes through its cleanup path instead of removing the node directly.
- */
-export function registerOverlayCloser(
-  overlay: HTMLElement,
-  close: () => void,
-): void {
+export function registerOverlayCloser(overlay: HTMLElement, close: () => void): void {
   overlayClosers.set(overlay, close);
 }
 
-/** Remove a previously registered overlay close handler. */
 export function unregisterOverlayCloser(overlay: HTMLElement): void {
   overlayClosers.delete(overlay);
 }
@@ -53,6 +32,7 @@ export interface OverlayDialogOptions {
   cardClassName: string;
   closeOnBackdrop?: boolean;
   restoreFocusOnClose?: boolean;
+  onEscape?: () => boolean;
   zIndex?: number;
 }
 
@@ -119,17 +99,13 @@ export interface OverlayButtonOptions {
   type?: "button" | "submit" | "reset";
 }
 
-export function createOverlayButton(
-  options: OverlayButtonOptions,
-): HTMLButtonElement {
+export function createOverlayButton(options: OverlayButtonOptions): HTMLButtonElement {
   const button = document.createElement("button");
 
   button.type = options.type ?? "button";
   button.textContent = options.text;
   const hasVariant = options.className?.includes("pi-overlay-btn--") ?? false;
-  const base = hasVariant
-    ? "pi-overlay-btn"
-    : "pi-overlay-btn pi-overlay-btn--ghost";
+  const base = hasVariant ? "pi-overlay-btn" : "pi-overlay-btn pi-overlay-btn--ghost";
   button.className = mergeClassName(base, options.className);
 
   return button;
@@ -141,9 +117,7 @@ export interface OverlayInputOptions {
   className?: string;
 }
 
-export function createOverlayInput(
-  options: OverlayInputOptions,
-): HTMLInputElement {
+export function createOverlayInput(options: OverlayInputOptions): HTMLInputElement {
   const input = document.createElement("input");
 
   input.type = options.type ?? "text";
@@ -160,21 +134,7 @@ export function createOverlaySectionTitle(text: string): HTMLHeadingElement {
   return title;
 }
 
-export type OverlayBadgeTone = "ok" | "warn" | "muted";
-
-export function createOverlayBadge(
-  text: string,
-  tone: OverlayBadgeTone,
-): HTMLSpanElement {
-  const badge = document.createElement("span");
-  badge.className = `pi-overlay-badge pi-overlay-badge--${tone}`;
-  badge.textContent = text;
-  return badge;
-}
-
-export function createOverlayHeader(
-  options: OverlayHeaderOptions,
-): OverlayHeaderElements {
+export function createOverlayHeader(options: OverlayHeaderOptions): OverlayHeaderElements {
   const header = document.createElement("div");
   header.className = "pi-overlay-header";
 
@@ -190,10 +150,7 @@ export function createOverlayHeader(
   let subtitle: HTMLParagraphElement | null = null;
   if (options.subtitle !== undefined) {
     subtitle = document.createElement("p");
-    subtitle.className = mergeClassName(
-      "pi-overlay-subtitle",
-      options.subtitleClassName,
-    );
+    subtitle.className = mergeClassName("pi-overlay-subtitle", options.subtitleClassName);
     subtitle.textContent = options.subtitle;
     titleWrap.appendChild(subtitle);
   }
@@ -214,12 +171,156 @@ export function createOverlayHeader(
   };
 }
 
-export function createOverlayDialog(
-  options: OverlayDialogOptions,
-): OverlayDialogController {
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+  "[contenteditable='true']",
+].join(",");
+
+function isRendered(element: HTMLElement): boolean {
+  return element.getClientRects().length > 0 && !element.closest("[hidden], [inert]");
+}
+
+export function getTabbableElements(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(isRendered);
+}
+
+export function isModalOverlayOpen(): boolean {
+  if (typeof document === "undefined") return false;
+  return getTopmostModalOverlay() !== null;
+}
+
+function getTopmostModalOverlay(): HTMLElement | null {
+  const modals = Array.from(document.body.children).filter(
+    (element): element is HTMLElement => element instanceof HTMLElement
+      && element.getAttribute("aria-modal") === "true"
+      && !element.inert,
+  );
+  return modals[modals.length - 1] ?? null;
+}
+
+function pickInitialFocus(card: HTMLElement): HTMLElement {
+  const explicit = card.querySelector<HTMLElement>("[data-autofocus], [autofocus]");
+  if (explicit && isRendered(explicit)) return explicit;
+
+  const field = getTabbableElements(card).find((element) =>
+    element instanceof HTMLTextAreaElement
+    || element instanceof HTMLSelectElement
+    || (element instanceof HTMLInputElement && element.type !== "checkbox" && element.type !== "radio"),
+  );
+  if (field) return field;
+
+  if (!card.hasAttribute("tabindex")) card.tabIndex = -1;
+  return card;
+}
+
+export interface OverlayFocusHandle {
+  focusInitial: () => void;
+  restore: (fallbackToComposer: boolean) => void;
+  dispose: () => void;
+}
+
+export function installOverlayFocus(overlay: HTMLElement, card: HTMLElement): OverlayFocusHandle {
+  const activeElement = document.activeElement;
+  const opener = activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : null;
+
+  const isTopmost = () => overlay.isConnected && getTopmostModalOverlay() === overlay;
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "Tab" || event.defaultPrevented || !isTopmost()) return;
+    const tabbables = getTabbableElements(card);
+    const first = tabbables[0];
+    const last = tabbables[tabbables.length - 1];
+    const handled = (target: HTMLElement): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      target.focus();
+    };
+
+    if (!first || !last) {
+      handled(card);
+      return;
+    }
+
+    const index = document.activeElement instanceof HTMLElement ? tabbables.indexOf(document.activeElement) : -1;
+    if (index === -1) {
+      handled(event.shiftKey ? last : first);
+      return;
+    }
+    const step = event.shiftKey ? -1 : 1;
+    handled(tabbables[(index + step + tabbables.length) % tabbables.length] ?? first);
+  };
+
+  const onFocusIn = (event: FocusEvent) => {
+    if (!isTopmost()) return;
+    const target = event.target;
+    if (!(target instanceof Node) || overlay.contains(target)) return;
+    if (target instanceof Element && target.closest(".pi-toast-region")) return;
+    pickInitialFocus(card).focus({ preventScroll: true });
+  };
+
+  document.addEventListener("keydown", onKeyDown, true);
+  document.addEventListener("focusin", onFocusIn, true);
+
+  return {
+    focusInitial: () => {
+      const title = card.querySelector<HTMLElement>(".pi-overlay-title");
+      if (title && !overlay.hasAttribute("aria-labelledby")) {
+        if (!title.id) title.id = `${overlay.id || "pi-overlay"}-title`;
+        overlay.setAttribute("aria-labelledby", title.id);
+      }
+      const active = document.activeElement;
+      if (active instanceof Node && card.contains(active)) return;
+      pickInitialFocus(card).focus({ preventScroll: true });
+    },
+    restore: (fallbackToComposer) => {
+      if (opener && opener.isConnected && isRendered(opener)) {
+        opener.focus({ preventScroll: true });
+        if (document.activeElement === opener) return;
+      }
+      if (fallbackToComposer) requestChatInputFocus();
+    },
+    dispose: () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn, true);
+    },
+  };
+}
+
+const overlayCovers = new Map<HTMLElement, { count: number; inert: boolean }>();
+
+export function coverOpenOverlays(overlay: HTMLElement): () => void {
+  const covered = Array.from(document.body.children).filter(
+    (element): element is HTMLElement => element instanceof HTMLElement
+      && element !== overlay
+      && element.getAttribute("aria-modal") === "true",
+  );
+  for (const element of covered) {
+    const cover = overlayCovers.get(element) ?? { count: 0, inert: element.inert };
+    cover.count += 1;
+    overlayCovers.set(element, cover);
+    element.inert = true;
+  }
+  return () => {
+    for (const element of covered) {
+      const cover = overlayCovers.get(element);
+      if (!cover) continue;
+      cover.count -= 1;
+      if (cover.count > 0) continue;
+      element.inert = cover.inert;
+      overlayCovers.delete(element);
+    }
+  };
+}
+
+export function createOverlayDialog(options: OverlayDialogOptions): OverlayDialogController {
   const overlay = document.createElement("div");
   overlay.id = options.overlayId;
-  overlay.className = "pi-welcome-overlay";
+  overlay.className = "pi-overlay";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
   if (options.zIndex !== undefined) {
@@ -232,6 +333,7 @@ export function createOverlayDialog(
 
   const cleanups: Array<() => void> = [];
   let closed = false;
+  let focus: OverlayFocusHandle | null = null;
 
   const close = () => {
     if (closed) {
@@ -250,18 +352,18 @@ export function createOverlayDialog(
       try {
         cleanup();
       } catch {
-        // ignore cleanup errors
       }
     }
 
     overlay.remove();
-
-    if (options.restoreFocusOnClose !== false) {
-      requestChatInputFocus();
-    }
+    focus?.dispose();
+    focus?.restore(options.restoreFocusOnClose !== false);
   };
 
-  const cleanupEscape = installOverlayEscapeClose(overlay, close);
+  const cleanupEscape = installOverlayEscapeClose(overlay, () => {
+    if (options.onEscape?.() === true) return;
+    close();
+  }, card);
   cleanups.push(cleanupEscape);
 
   if (options.closeOnBackdrop !== false) {
@@ -284,7 +386,11 @@ export function createOverlayDialog(
     card,
     close,
     mount: () => {
+      if (closed || overlay.isConnected) return;
+      focus = installOverlayFocus(overlay, card);
+      cleanups.push(coverOpenOverlays(overlay));
       document.body.appendChild(overlay);
+      focus.focusInitial();
     },
     addCleanup: (cleanup) => {
       if (closed) {
@@ -297,13 +403,11 @@ export function createOverlayDialog(
   };
 }
 
-export function createOverlayDialogManager(
-  options: OverlayDialogOptions,
-): OverlayDialogManager {
+export function createOverlayDialogManager(options: OverlayDialogOptions): OverlayDialogManager {
   let current: OverlayDialogController | null = null;
 
   const ensure = (): OverlayDialogController => {
-    if (current && current.overlay.isConnected) {
+    if (current) {
       return current;
     }
 

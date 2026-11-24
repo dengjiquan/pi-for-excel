@@ -14,7 +14,6 @@ function tryExec(cmd) {
   }
 }
 
-// Not running in a git checkout (e.g. npm pack / CI artifact) → nothing to do.
 if (!tryExec("git --version") || !tryExec("git rev-parse --is-inside-work-tree")) {
   process.exit(0);
 }
@@ -23,16 +22,15 @@ const hooksPath = tryExec("git config --get core.hooksPath") ?? "";
 
 if (!hooksPath) {
   exec("git config core.hooksPath .githooks");
-  // eslint-disable-next-line no-console -- setup script must report hook installation status
+  // oxlint-disable-next-line no-console -- setup script must report hook installation status
   console.log("Configured git core.hooksPath = .githooks");
 } else if (hooksPath !== ".githooks") {
-  // eslint-disable-next-line no-console -- setup script must report existing hook configuration
+  // oxlint-disable-next-line no-console -- setup script must report existing hook configuration
   console.log(
     `git core.hooksPath already set to \"${hooksPath}\"; leaving unchanged (repo expects .githooks).`,
   );
 }
 
-// Best-effort: ensure hooks are executable (POSIX).
 try {
   const hookNames = ["pre-commit", "pre-push"];
   for (const hookName of hookNames) {
@@ -42,5 +40,4 @@ try {
     }
   }
 } catch {
-  // Ignore (e.g. Windows filesystems)
 }

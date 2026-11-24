@@ -1,113 +1,125 @@
-/**
- * Pyodide runtime adapter — main-thread API for in-browser Python execution.
- *
- * Manages a Web Worker that loads Pyodide (Python compiled to WebAssembly).
- * Provides the same request/response interface as the native Python bridge,
- * so callers don't need to know which backend is being used.
- *
- * Key design decisions:
- * - Lazy initialization: Pyodide (~15MB WASM) is only loaded on first use
- * - Web Worker isolation: Python runs off the main thread
- * - CDN loading: Pyodide served from jsDelivr, cached by the browser
- * - Timeout support: Worker calls are bounded by configurable timeouts
- */
-
 import type {
   PythonBridgeRequest,
   PythonBridgeResponse,
 } from "../tools/python-run.js";
 import type {
+  PyodideWorkerMessage,
   PyodideWorkerRequest,
   PyodideWorkerResponse,
 } from "./pyodide-worker.js";
+import { ToolStoppedError } from "../tools/tool-stopped.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-let worker: Worker | null = null;
-let requestCounter = 0;
-const pendingRequests = new Map<string, {
+interface PendingRequest {
+  request: PyodideWorkerRequest;
+  timeoutMs: number;
   resolve: (response: PyodideWorkerResponse) => void;
   reject: (error: Error) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
-}>();
+}
 
-function getOrCreateWorker(): Worker {
-  if (worker) return worker;
+type WorkerPhase =
+  | { kind: "idle" }
+  | { kind: "running"; pending: PendingRequest; timeoutId: ReturnType<typeof setTimeout> }
+  | { kind: "terminated" };
 
-  // The worker file is bundled by Vite as a separate chunk.
-  // Using `new URL(..., import.meta.url)` tells Vite to emit the worker file.
-  worker = new Worker(
-    new URL("./pyodide-worker.ts", import.meta.url),
-    { type: "module" },
-  );
+interface WorkerInstance {
+  worker: Worker;
+  loaded: boolean;
+  phase: WorkerPhase;
+  queue: PendingRequest[];
+}
 
-  worker.addEventListener("message", (event: MessageEvent<PyodideWorkerResponse>) => {
-    const response = event.data;
-    const pending = pendingRequests.get(response.id);
-    if (!pending) return;
+type RuntimeState = { kind: "stopped" } | { kind: "active"; instance: WorkerInstance };
+let runtime: RuntimeState = { kind: "stopped" };
+let requestCounter = 0;
 
-    clearTimeout(pending.timeoutId);
-    pendingRequests.delete(response.id);
-    pending.resolve(response);
-  });
+function terminateInstance(instance: WorkerInstance, error: Error): void {
+  const phase = instance.phase;
+  if (phase.kind === "terminated") return;
+  instance.phase = { kind: "terminated" };
+  if (runtime.kind === "active" && runtime.instance === instance) runtime = { kind: "stopped" };
+  instance.worker.terminate();
+  if (phase.kind === "running") {
+    clearTimeout(phase.timeoutId);
+    phase.pending.reject(error);
+  }
+  for (const pending of instance.queue.splice(0)) pending.reject(error);
+}
 
-  worker.addEventListener("error", (event) => {
-    // Reject all pending requests on worker crash
-    const error = new Error(`Pyodide worker error: ${event.message}`);
-    for (const [id, pending] of pendingRequests) {
-      clearTimeout(pending.timeoutId);
-      pending.reject(error);
-      pendingRequests.delete(id);
+function dispatchNext(instance: WorkerInstance): void {
+  if (instance.phase.kind !== "idle") return;
+  const pending = instance.queue.shift();
+  if (!pending) return;
+  const timeoutId = setTimeout(() => {
+    terminateInstance(instance, new Error(`Pyodide execution timed out after ${pending.timeoutMs}ms. Worker was terminated.`));
+  }, pending.timeoutMs);
+  instance.phase = { kind: "running", pending, timeoutId };
+  try {
+    instance.worker.postMessage(pending.request);
+  } catch (error) {
+    terminateInstance(instance, error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+function getOrCreateWorker(): WorkerInstance {
+  if (runtime.kind === "active") return runtime.instance;
+  const worker = new Worker(new URL("./pyodide-worker.ts", import.meta.url), { type: "module" });
+  const instance: WorkerInstance = { worker, loaded: false, phase: { kind: "idle" }, queue: [] };
+  runtime = { kind: "active", instance };
+  worker.addEventListener("message", (event: MessageEvent<PyodideWorkerMessage>) => {
+    if (instance.phase.kind === "terminated") return;
+    if ("type" in event.data) {
+      instance.loaded = true;
+      return;
     }
-
-    // Reset so next call creates a fresh worker
-    worker = null;
+    const phase = instance.phase;
+    if (phase.kind !== "running" || phase.pending.request.id !== event.data.id) return;
+    clearTimeout(phase.timeoutId);
+    instance.phase = { kind: "idle" };
+    phase.pending.resolve(event.data);
+    dispatchNext(instance);
   });
-
-  return worker;
+  worker.addEventListener("error", (event) => {
+    terminateInstance(instance, new Error(`Pyodide worker error: ${event.message}`));
+  });
+  return instance;
 }
 
 function sendToWorker(
   request: PyodideWorkerRequest,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<PyodideWorkerResponse> {
   return new Promise<PyodideWorkerResponse>((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      pendingRequests.delete(request.id);
-
-      // Terminate the hung worker so it doesn't block future calls
-      if (worker) {
-        worker.terminate();
-        worker = null;
+    const instance = getOrCreateWorker();
+    const abort = (): void => {
+      cleanup();
+      reject(new ToolStoppedError());
+      if (instance.phase.kind === "running" && instance.phase.pending.request.id === request.id) {
+        terminateInstance(instance, new Error("Aborted"));
+      } else {
+        const index = instance.queue.findIndex((pending) => pending.request.id === request.id);
+        if (index >= 0) instance.queue.splice(index, 1)[0]?.reject(new Error("Aborted"));
       }
-
-      reject(new Error(`Pyodide execution timed out after ${timeoutMs}ms. Worker was terminated.`));
-    }, timeoutMs);
-
-    pendingRequests.set(request.id, { resolve, reject, timeoutId });
-
-    const w = getOrCreateWorker();
-    w.postMessage(request);
+    };
+    const cleanup = (): void => signal?.removeEventListener("abort", abort);
+    instance.queue.push({
+      request, timeoutMs,
+      resolve: (response) => { cleanup(); resolve(response); },
+      reject: (error) => { cleanup(); reject(signal?.aborted ? new ToolStoppedError() : error); },
+    });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    dispatchNext(instance);
   });
 }
 
-/**
- * Execute Python code via Pyodide (in-browser WebAssembly runtime).
- *
- * Accepts the same request shape as the native Python bridge and returns
- * a compatible response, so callers can swap between backends transparently.
- */
 export async function callPyodideRuntime(
   request: PythonBridgeRequest,
   signal?: AbortSignal,
 ): Promise<PythonBridgeResponse> {
-  if (signal?.aborted) {
-    return {
-      ok: false,
-      action: "run_python",
-      error: "Aborted",
-    };
-  }
+  if (signal?.aborted) throw new ToolStoppedError();
 
   const id = `pyodide-${++requestCounter}`;
   const timeoutMs = request.timeout_ms ?? DEFAULT_TIMEOUT_MS;
@@ -121,22 +133,8 @@ export async function callPyodideRuntime(
     workerRequest.inputJson = request.input_json;
   }
 
-  // Set up abort handling
-  let abortHandler: (() => void) | null = null;
-  if (signal) {
-    abortHandler = () => {
-      const pending = pendingRequests.get(id);
-      if (pending) {
-        clearTimeout(pending.timeoutId);
-        pendingRequests.delete(id);
-        pending.reject(new Error("Aborted"));
-      }
-    };
-    signal.addEventListener("abort", abortHandler, { once: true });
-  }
-
   try {
-    const workerResponse = await sendToWorker(workerRequest, timeoutMs);
+    const workerResponse = await sendToWorker(workerRequest, timeoutMs, signal);
 
     const response: PythonBridgeResponse = {
       ok: workerResponse.ok,
@@ -154,41 +152,26 @@ export async function callPyodideRuntime(
     if (workerResponse.error !== undefined) response.error = workerResponse.error;
     return response;
   } catch (error) {
+    if (error instanceof ToolStoppedError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
       action: "run_python",
       error: message,
     };
-  } finally {
-    if (signal && abortHandler) {
-      signal.removeEventListener("abort", abortHandler);
-    }
   }
 }
 
-/** Check if Pyodide is available in this environment (Web Workers + WASM). */
 export function isPyodideAvailable(): boolean {
   if (typeof Worker === "undefined") return false;
   if (typeof WebAssembly === "undefined") return false;
   return true;
 }
 
-/** Check if Pyodide has already been loaded (warm). */
 export function isPyodideLoaded(): boolean {
-  return worker !== null;
+  return runtime.kind === "active" && runtime.instance.loaded;
 }
 
-/** Terminate the Pyodide worker and release resources. */
 export function terminatePyodide(): void {
-  if (!worker) return;
-
-  for (const [id, pending] of pendingRequests) {
-    clearTimeout(pending.timeoutId);
-    pending.reject(new Error("Pyodide runtime terminated"));
-    pendingRequests.delete(id);
-  }
-
-  worker.terminate();
-  worker = null;
+  if (runtime.kind === "active") terminateInstance(runtime.instance, new Error("Pyodide runtime terminated"));
 }

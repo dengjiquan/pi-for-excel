@@ -1,15 +1,4 @@
-/**
- * Integrations persistence helpers.
- *
- * Integrations can be enabled in two scopes:
- * - session: only for one chat tab/session
- * - workbook: applies to all sessions for the active workbook
- *
- * Workbook scope that has never been configured (null in storage) inherits
- * catalog defaults (e.g. web_search is enabled by default). Session scope
- * stays explicit by default, with an opt-in runtime fallback when workbook
- * identity is unavailable.
- */
+import { createConcurrencyLimit } from "../utils/concurrency.js";
 
 import { getDefaultEnabledIntegrationIds } from "./catalog.js";
 import type { SettingsWriter } from "../storage/local/settings-store.js";
@@ -17,10 +6,6 @@ import type { SettingsWriter } from "../storage/local/settings-store.js";
 export type IntegrationScope = "session" | "workbook";
 
 export interface SessionIntegrationIdsOptions {
-  /**
-   * When true and the session scope has never been configured, return
-   * catalog defaults instead of an empty set.
-   */
   applyDefaultsWhenUnconfigured?: boolean;
 }
 
@@ -91,8 +76,6 @@ async function readScopeIntegrationIds(
     : workbookIntegrationsKey(identifier);
   const raw = await settings.get(key);
 
-  // Never configured workbook scope inherits defaults (web search).
-  // Session scope stays explicit unless the caller opts into fallback defaults.
   if (raw == null) {
     if (scope === "workbook" || applyDefaultsWhenUnconfigured) {
       return normalizeIntegrationIds(getDefaultEnabledIntegrationIds(), knownIntegrationIds);
@@ -102,6 +85,8 @@ async function readScopeIntegrationIds(
 
   return normalizeIntegrationIds(raw, knownIntegrationIds);
 }
+
+const mutateIntegrationsSerially = createConcurrencyLimit(1);
 
 async function setScopeIntegrationIds(
   settings: SettingsWriter,
@@ -139,7 +124,7 @@ export async function setSessionIntegrationIds(
   integrationIds: readonly string[],
   knownIntegrationIds: readonly string[],
 ): Promise<void> {
-  await setScopeIntegrationIds(settings, "session", sessionId, integrationIds, knownIntegrationIds);
+  await mutateIntegrationsSerially(() => setScopeIntegrationIds(settings, "session", sessionId, integrationIds, knownIntegrationIds));
 }
 
 export async function getWorkbookIntegrationIds(
@@ -156,7 +141,7 @@ export async function setWorkbookIntegrationIds(
   integrationIds: readonly string[],
   knownIntegrationIds: readonly string[],
 ): Promise<void> {
-  await setScopeIntegrationIds(settings, "workbook", workbookId, integrationIds, knownIntegrationIds);
+  await mutateIntegrationsSerially(() => setScopeIntegrationIds(settings, "workbook", workbookId, integrationIds, knownIntegrationIds));
 }
 
 export async function setIntegrationEnabledInScope(args: {
@@ -166,25 +151,24 @@ export async function setIntegrationEnabledInScope(args: {
   integrationId: string;
   enabled: boolean;
   knownIntegrationIds: readonly string[];
+  applyDefaultsWhenUnconfigured?: boolean;
 }): Promise<void> {
-  const { settings, scope, identifier, integrationId, enabled, knownIntegrationIds } = args;
-  const key = scope === "session"
-    ? sessionIntegrationsKey(identifier)
-    : workbookIntegrationsKey(identifier);
-  const raw = await settings.get(key);
-  const existing = raw == null && scope === "workbook"
-    ? normalizeIntegrationIds(getDefaultEnabledIntegrationIds(), knownIntegrationIds)
-    : normalizeIntegrationIds(raw, knownIntegrationIds);
+  await mutateIntegrationsSerially(async () => {
+    const { settings, scope, identifier, integrationId, enabled, knownIntegrationIds } = args;
+    const existing = await readScopeIntegrationIds(
+      settings, scope, identifier, knownIntegrationIds, args.applyDefaultsWhenUnconfigured === true,
+    );
 
-  const nextSet = new Set<string>(existing);
-  if (enabled) {
-    nextSet.add(integrationId);
-  } else {
-    nextSet.delete(integrationId);
-  }
+    const nextSet = new Set<string>(existing);
+    if (enabled) {
+      nextSet.add(integrationId);
+    } else {
+      nextSet.delete(integrationId);
+    }
 
-  const nextIds = Array.from(nextSet);
-  await setScopeIntegrationIds(settings, scope, identifier, nextIds, knownIntegrationIds);
+    const nextIds = Array.from(nextSet);
+    await setScopeIntegrationIds(settings, scope, identifier, nextIds, knownIntegrationIds);
+  });
 }
 
 export async function resolveConfiguredIntegrationIds(args: {
@@ -195,15 +179,15 @@ export async function resolveConfiguredIntegrationIds(args: {
 }): Promise<string[]> {
   const { settings, sessionId, workbookId, knownIntegrationIds } = args;
 
-  const sessionIntegrationIds = await getSessionIntegrationIds(
-    settings,
-    sessionId,
-    knownIntegrationIds,
-    { applyDefaultsWhenUnconfigured: workbookId === null },
-  );
-  const workbookIntegrationIds = workbookId
-    ? await getWorkbookIntegrationIds(settings, workbookId, knownIntegrationIds)
-    : [];
+  const [sessionIntegrationIds, workbookIntegrationIds] = await Promise.all([
+    getSessionIntegrationIds(
+      settings,
+      sessionId,
+      knownIntegrationIds,
+      { applyDefaultsWhenUnconfigured: workbookId === null },
+    ),
+    workbookId ? getWorkbookIntegrationIds(settings, workbookId, knownIntegrationIds) : [],
+  ]);
 
   const enabledSet = new Set<string>([...workbookIntegrationIds, ...sessionIntegrationIds]);
 
@@ -229,7 +213,6 @@ function parseStoredBoolean(value: unknown): boolean {
 
 export async function getExternalToolsEnabled(settings: SettingsWriter): Promise<boolean> {
   const raw = await settings.get(EXTERNAL_TOOLS_ENABLED_SETTING_KEY);
-  // Default ON so web search is available once a provider API key is configured.
   if (raw == null) return true;
   return parseStoredBoolean(raw);
 }

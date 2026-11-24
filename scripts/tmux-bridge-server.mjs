@@ -1,17 +1,3 @@
-#!/usr/bin/env node
-
-/**
- * Local tmux bridge for Pi for Excel.
- *
- * Modes:
- * - stub (default): in-memory session simulator for local development/testing.
- * - tmux: real tmux subprocess backend (guarded; no shell interpolation).
- *
- * Endpoints:
- * - GET  /health
- * - POST /v1/tmux
- */
-
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
@@ -55,7 +41,7 @@ const keyPath = resolveOptionalEnvPath("PI_FOR_EXCEL_KEY_PATH") ?? path.join(cer
 const certPath = resolveOptionalEnvPath("PI_FOR_EXCEL_CERT_PATH") ?? path.join(certDir, "cert.pem");
 
 const DEFAULT_ALLOWED_ORIGINS = new Set([
-  "https://localhost:3141",
+  "https://localhost:3000",
   "https://pi-for-excel.vercel.app",
 ]);
 
@@ -121,10 +107,6 @@ const socketPath = path.resolve(
 );
 
 class HttpError extends Error {
-  /**
-   * @param {number} status
-   * @param {string} message
-   */
   constructor(status, message) {
     super("HttpError");
     this.name = "HttpError";
@@ -604,7 +586,6 @@ function ensureSocketDirectory() {
   try {
     fs.chmodSync(path.dirname(socketPath), 0o700);
   } catch {
-    // ignore chmod failures on platforms/filesystems that do not fully support it
   }
 }
 

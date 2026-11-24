@@ -11,7 +11,6 @@ import { PROXY_REACHABILITY_TARGET_URL } from "../src/auth/proxy-validation.ts";
 import { WEB_SEARCH_PROVIDER_ENDPOINT_HOSTS } from "../src/tools/web-search-config.ts";
 
 const ORIGIN = "https://localhost:3141";
-// fileURLToPath: .pathname yields "/D:/..." on Windows and breaks spawn.
 const PROXY_SCRIPT_PATH = fileURLToPath(
   new URL("../scripts/cors-proxy-server.mjs", import.meta.url),
 );
@@ -49,8 +48,6 @@ async function stopChild(child) {
 async function startProxy() {
   const port = await getFreePort();
   const env = { ...process.env };
-  // Local dev machines may keep permissive overrides in the user environment;
-  // security tests must exercise the strict defaults.
   delete env.ALLOW_ALL_TARGET_HOSTS;
   const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
     env: {
@@ -149,8 +146,6 @@ test("proxy behavior permits its reachability probe target", async (t) => {
   );
 });
 
-// Static contract: taskpane CSP is a shipped policy string; HTTP behavior cannot prove
-// that every provider origin remains declared in connect-src.
 test("static contract: taskpane CSP connect-src allows all web-search provider hosts", async () => {
   const connectTokens = await readTaskpaneConnectSrcTokens();
 

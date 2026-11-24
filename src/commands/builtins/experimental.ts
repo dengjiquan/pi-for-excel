@@ -2,10 +2,6 @@ function isCommandsBuiltinsExperimentalPayloadShape(value: unknown): value is Re
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Builtin command for managing experimental feature flags.
- */
-
 import type { SlashCommand } from "../types.js";
 import {
   getExperimentalFeatureSlugs,
@@ -23,7 +19,6 @@ import {
   DEFAULT_TMUX_BRIDGE_URL,
   PYTHON_BRIDGE_URL_SETTING_KEY,
   TMUX_BRIDGE_URL_SETTING_KEY,
-  type TmuxBridgeGateReason,
   type TmuxBridgeGateResult,
 } from "../../tools/experimental-tool-gates.js";
 import { PYTHON_BRIDGE_TOKEN_SETTING_KEY } from "../../tools/python-run.js";
@@ -546,25 +541,11 @@ async function handleTmuxStatusCommand(
     ? await dependencies.probeTmuxBridgeHealth(normalizedBridgeUrl)
     : undefined;
 
-  let gateReason: TmuxBridgeGateReason | undefined;
-  if (!configuredBridgeUrl) {
-    gateReason = "missing_bridge_url";
-  } else if (!normalizedBridgeUrl) {
-    gateReason = "invalid_bridge_url";
-  } else if (!health?.reachable) {
-    gateReason = "bridge_unreachable";
-  }
-
-  const gate: TmuxBridgeGateResult = gateReason
-    ? {
-      allowed: false,
-      reason: gateReason,
-      ...(normalizedBridgeUrl !== undefined ? { bridgeUrl: normalizedBridgeUrl } : {}),
-    }
-    : {
-      allowed: true,
-      ...(normalizedBridgeUrl !== undefined ? { bridgeUrl: normalizedBridgeUrl } : {}),
-    };
+  const gate: TmuxBridgeGateResult = !normalizedBridgeUrl
+    ? { allowed: false, reason: configuredBridgeUrl ? "invalid_bridge_url" : "missing_bridge_url" }
+    : !health?.reachable
+      ? { allowed: false, reason: "bridge_unreachable", bridgeUrl: normalizedBridgeUrl }
+      : { allowed: true, bridgeUrl: normalizedBridgeUrl };
 
   const lines: string[] = ["Tmux bridge status:"];
 
@@ -585,9 +566,8 @@ async function handleTmuxStatusCommand(
   if (gate.allowed) {
     lines.push("- gate: pass");
   } else {
-    const reason = gate.reason ?? "bridge_unreachable";
-    lines.push(`- gate: blocked (${reason})`);
-    lines.push(`  hint: ${buildTmuxBridgeGateErrorMessage(reason)}`);
+    lines.push(`- gate: blocked (${gate.reason})`);
+    lines.push(`  hint: ${buildTmuxBridgeGateErrorMessage(gate.reason)}`);
   }
 
   if (!health) {

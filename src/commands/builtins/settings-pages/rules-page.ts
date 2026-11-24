@@ -1,9 +1,4 @@
-/**
- * Rules page — user rules, workbook rules, and format conventions,
- * edited as drafts with an explicit Save/Cancel footer and an
- * unsaved-changes guard on navigation.
- */
-
+import { createAsyncCoalescer } from "../../../utils/concurrency.js";
 import { getAppStorage } from "../../../storage/local/app-storage.js";
 
 import {
@@ -254,8 +249,8 @@ function createHeaderPreview(
     text.setAttribute("x", String(x + 8));
     text.setAttribute("fill", normalizedFont);
     text.setAttribute("font-size", "12");
-    text.setAttribute("font-family", "DM Sans, sans-serif");
-    text.setAttribute("font-weight", bold ? "700" : "400");
+    text.setAttribute("font-family", "IBM Plex Sans, sans-serif");
+    text.setAttribute("font-weight", bold ? "600" : "400");
 
     if (wrapText && label === "Cost of Goods Sold") {
       text.setAttribute("y", "20");
@@ -302,11 +297,12 @@ function createPresetPreview(presetName: string, preset: StoredFormatPreset): { 
 
   const symbol = params.currencySymbol ?? (presetName === "currency" ? DEFAULT_CURRENCY_SYMBOL : "");
   const suffix = presetName === "percent" ? "%" : presetName === "ratio" ? "x" : "";
+  const sample = formatter.format(presetName === "percent" ? 0.125 * 100 : 1234.5);
 
-  const positiveCore = `${symbol}${formatter.format(1234.5)}${suffix}`;
+  const positiveCore = `${symbol}${sample}${suffix}`;
   const negativeCore = params.negativeStyle === "minus"
-    ? `${symbol}-${formatter.format(1234.5)}${suffix}`
-    : `${symbol}(${formatter.format(1234.5)}${suffix})`;
+    ? `${symbol}-${sample}${suffix}`
+    : `${symbol}(${sample}${suffix})`;
 
   let zeroCore = `${symbol}0${suffix}`;
   if (params.zeroStyle === "dash") {
@@ -872,21 +868,24 @@ export function createRulesPage(): SettingsShellPage {
     title: () => t("rules.title"),
     subtitle: () => t("rules.subtitle"),
     render: async (ctx) => {
+      let disposed = false;
+      ctx.addCleanup(() => { disposed = true; });
       const storage = getAppStorage();
       const workbookContext = await getWorkbookContext();
-      const workbookId = workbookContext.workbookId;
+      let workbookId = workbookContext.workbookId;
       const workbookLabel = formatWorkbookLabel(workbookContext);
 
-      const initialUserDraft = (await getUserRules(storage.settings)) ?? "";
-      const initialWorkbookDraft = (await getWorkbookRules(storage.settings, workbookId)) ?? "";
+      let initialUserDraft = (await getUserRules(storage.settings)) ?? "";
+      let initialWorkbookDraft = (await getWorkbookRules(storage.settings, workbookId)) ?? "";
       const storedConventions = await getStoredConventions(storage.settings);
-      const initialConventionsJson = serializeConventionsForDirtyCheck(storedConventions);
+      let initialConventionsJson = serializeConventionsForDirtyCheck(storedConventions);
 
+      if (disposed) return;
       let userDraft = initialUserDraft;
       let workbookDraft = initialWorkbookDraft;
       const conventionsDraft = cloneStoredConventions(storedConventions);
       let activeTab: RulesTab = "user";
-      let saved = false;
+      let saveState: "idle" | "saving" = "idle";
 
       const segmented = createSegmentedControl({
         segments: [
@@ -902,6 +901,7 @@ export function createRulesPage(): SettingsShellPage {
             activeTab = id;
             refreshTabUi();
           }
+          if (id === "workbook") void refreshWorkbookIdentity();
         },
       });
 
@@ -920,7 +920,36 @@ export function createRulesPage(): SettingsShellPage {
 
       ctx.body.append(segmented.root, workbookTag, hint, textarea, conventionsContainer);
 
-      // ── Footer: counter + Cancel/Save ──
+      const refreshWorkbookIdentity = createAsyncCoalescer(async (): Promise<void> => {
+        try {
+          if (workbookId) return;
+          const nextContext = await getWorkbookContext().catch(() => null);
+          if (!nextContext?.workbookId || workbookId) return;
+
+          const nextDraft = (await getWorkbookRules(storage.settings, nextContext.workbookId)) ?? "";
+          if (disposed) return;
+          workbookId = nextContext.workbookId;
+          initialWorkbookDraft = nextDraft;
+          workbookDraft = nextDraft;
+          workbookTag.textContent = t("rules.workbook_tag", { label: formatWorkbookLabel(nextContext) });
+          refreshTabUi();
+        } catch (error) {
+          if (!disposed) showToast(t("ext-hub-extension-connections.toast.saveFailed", { error: error instanceof Error ? error.message : String(error) }));
+        }
+      });
+      const onFocus = (): void => {
+        void refreshWorkbookIdentity();
+      };
+      const onVisibilityChange = (): void => {
+        if (document.visibilityState === "visible") void refreshWorkbookIdentity();
+      };
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      ctx.addCleanup(() => {
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      });
+
       const footer = document.createElement("div");
       footer.className = "pi-overlay-footer pi-rules-page__footer";
 
@@ -957,6 +986,7 @@ export function createRulesPage(): SettingsShellPage {
         counter.hidden = isConventionsTab;
 
         if (activeTab === "user") {
+          textarea.disabled = false;
           textarea.value = userDraft;
           textarea.placeholder = t("rules.placeholder.user");
 
@@ -971,7 +1001,8 @@ export function createRulesPage(): SettingsShellPage {
 
         if (activeTab === "workbook") {
           textarea.value = workbookDraft;
-          textarea.placeholder = t("rules.placeholder.workbook");
+          textarea.disabled = !workbookId;
+          textarea.placeholder = workbookId ? t("rules.placeholder.workbook") : "";
 
           const count = workbookDraft.length;
           counter.textContent = formatCounterLabel(count, WORKBOOK_RULES_SOFT_LIMIT);
@@ -1010,9 +1041,9 @@ export function createRulesPage(): SettingsShellPage {
         );
       };
 
-      // Guard back/close/navigate while there are unsaved edits.
       ctx.setBeforeLeave(async () => {
-        if (saved || !isDirty()) return true;
+        if (saveState === "saving") return false;
+        if (!isDirty()) return true;
         return requestConfirmationDialog({
           title: t("rules.discard.title"),
           message: t("rules.discard.message"),
@@ -1029,22 +1060,66 @@ export function createRulesPage(): SettingsShellPage {
       });
 
       cancelBtn.addEventListener("click", () => {
-        ctx.back();
+        ctx.close();
       });
 
       saveBtn.addEventListener("click", () => {
+        if (saveState === "saving" || disposed) return;
+        saveState = "saving";
+        saveBtn.disabled = true;
+        cancelBtn.disabled = true;
+        saveActiveDraft();
+        const savingUserDraft = userDraft;
+        const savingConventions = cloneStoredConventions(conventionsDraft);
+        const savingConventionsJson = serializeConventionsForDirtyCheck(savingConventions);
         void (async () => {
-          saveActiveDraft();
+          await refreshWorkbookIdentity();
+          if (disposed) return;
+          const savingWorkbookId = workbookId;
+          const savingWorkbookDraft = workbookDraft;
+          const userChanged = savingUserDraft !== initialUserDraft;
+          const workbookChanged = workbookId !== null && workbookDraft !== initialWorkbookDraft;
+          const conventionsChanged = savingConventionsJson !== initialConventionsJson;
 
-          await setUserRules(storage.settings, userDraft);
-          if (workbookId) {
-            await setWorkbookRules(storage.settings, workbookId, workbookDraft);
+          const changedUnderneath = (userChanged
+            && ((await getUserRules(storage.settings)) ?? "") !== initialUserDraft)
+            || (workbookChanged
+              && ((await getWorkbookRules(storage.settings, workbookId)) ?? "") !== initialWorkbookDraft)
+            || (conventionsChanged
+              && serializeConventionsForDirtyCheck(await getStoredConventions(storage.settings)) !== initialConventionsJson);
+
+          if (disposed) return;
+          if (changedUnderneath) {
+            const replace = await requestConfirmationDialog({
+              title: t("rules.conflict.title"),
+              message: t("rules.conflict.message"),
+              confirmLabel: t("rules.conflict.replace"),
+              cancelLabel: t("rules.discard.keep_editing"),
+              confirmButtonTone: "danger",
+              restoreFocusOnClose: false,
+            });
+            if (!replace || disposed) return;
           }
 
-          await setStoredConventions(storage.settings, conventionsDraft);
+          if (userChanged) {
+            await setUserRules(storage.settings, savingUserDraft);
+            initialUserDraft = savingUserDraft;
+          }
+          if (savingWorkbookId && workbookChanged) {
+            await setWorkbookRules(storage.settings, savingWorkbookId, savingWorkbookDraft);
+            initialWorkbookDraft = savingWorkbookDraft;
+          }
+          if (conventionsChanged) {
+            await setStoredConventions(storage.settings, savingConventions);
+            initialConventionsJson = savingConventionsJson;
+          }
 
-          document.dispatchEvent(new CustomEvent("pi:rules-updated"));
-          document.dispatchEvent(new CustomEvent("pi:conventions-updated"));
+          if (userChanged || workbookChanged) {
+            document.dispatchEvent(new CustomEvent("pi:rules-updated"));
+          }
+          if (conventionsChanged) {
+            document.dispatchEvent(new CustomEvent("pi:conventions-updated"));
+          }
           document.dispatchEvent(new CustomEvent("pi:status-update"));
 
           const onRulesSaved = getSettingsPagesDependencies().onRulesSaved;
@@ -1052,10 +1127,17 @@ export function createRulesPage(): SettingsShellPage {
             await onRulesSaved();
           }
 
-          saved = true;
-          showToast(t("rules.toast.saved"));
-          ctx.back();
-        })();
+          if (disposed) return;
+          showToast(t(userChanged || workbookChanged || conventionsChanged ? "rules.toast.saved" : "rules.toast.noChanges"));
+          saveState = "idle";
+          if (!isDirty()) ctx.close();
+        })().catch((error: unknown) => {
+          if (!disposed) showToast(t("ext-hub-extension-connections.toast.saveFailed", { error: error instanceof Error ? error.message : String(error) }));
+        }).finally(() => {
+          saveState = "idle";
+          saveBtn.disabled = false;
+          cancelBtn.disabled = false;
+        });
       });
 
       refreshTabUi();

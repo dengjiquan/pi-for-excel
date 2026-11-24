@@ -1,15 +1,5 @@
-/**
- * Provider connect dialog — first-party replacement for pi-web-ui's
- * `ApiKeyPromptDialog` (docs/ui-ownership.md step 6).
- *
- * Shown when a request needs credentials for a provider that has none.
- * Reuses the welcome-overlay provider row, so OAuth logins work here too
- * (upstream only supported raw API keys).
- *
- * Resolves `true` once the provider is connected, `false` if dismissed.
- */
-
 import { t } from "../language/index.js";
+import { showToast } from "./toast.js";
 import { API_KEY_OVERLAY_ID } from "./overlay-ids.js";
 import {
   closeOverlayById,
@@ -20,7 +10,7 @@ import { ALL_PROVIDERS, buildProviderRow, type ProviderDef } from "./provider-lo
 
 function resolveProviderDef(provider: string): ProviderDef {
   return (
-    ALL_PROVIDERS.find((def) => def.id === provider) ?? { id: provider, label: provider }
+    ALL_PROVIDERS.find((def) => def.id === provider) ?? { id: provider, brand: provider }
   );
 }
 
@@ -44,12 +34,14 @@ export function promptForProviderConnection(provider: string): Promise<boolean> 
       restoreFocusOnClose: true,
     });
 
+    const lifetime = new AbortController();
     dialog.addCleanup(() => {
+      lifetime.abort();
       settle(false);
     });
 
     const { header } = createOverlayHeader({
-      title: t("apiKeyDialog.title", { label: def.label }),
+      title: t("apiKeyDialog.title", { label: def.brand }),
       subtitle: t("apiKeyDialog.subtitle"),
       onClose: dialog.close,
       closeLabel: t("dialog.close"),
@@ -58,17 +50,18 @@ export function promptForProviderConnection(provider: string): Promise<boolean> 
     const expandedRef: { current: HTMLElement | null } = { current: null };
     const row = buildProviderRow(def, {
       isActive: false,
+      signal: lifetime.signal,
       expandedRef,
-      onConnected: () => {
+      onConnected: (_row, _id, label) => {
         settle(true);
         dialog.close();
+        showToast(t("welcome.toast.connected", { label }), 3200);
       },
     });
 
     dialog.card.append(header, row);
     dialog.mount();
 
-    // Single-provider dialog: open the connect detail immediately.
     row.querySelector<HTMLButtonElement>(".pi-login-trigger")?.click();
   });
 }

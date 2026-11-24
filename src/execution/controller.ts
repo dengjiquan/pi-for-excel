@@ -1,50 +1,62 @@
-/** Runtime controller for persisted execution mode state. */
-
-import { t } from "../language/index.js";
+import { createConcurrencyLimit } from "../utils/concurrency.js";
 import {
   dispatchExecutionModeChanged,
-  formatExecutionModeLabel,
   getStoredExecutionMode,
   setStoredExecutionMode,
-  toggleExecutionMode,
   type ExecutionMode,
   type ExecutionModeStore,
 } from "./mode.js";
 
 export interface ExecutionModeController {
   getMode: () => ExecutionMode;
+  readMode: () => Promise<ExecutionMode>;
   setMode: (mode: ExecutionMode) => Promise<void>;
-  toggleFromUi: () => Promise<void>;
 }
 
 export interface CreateExecutionModeControllerOptions {
   settings: ExecutionModeStore;
-  showToast?: (message: string) => void;
+  channel?: Pick<BroadcastChannel, "postMessage" | "addEventListener"> | null;
 }
+
+const EXECUTION_MODE_CHANNEL = "pi-execution-mode";
 
 export async function createExecutionModeController(
   options: CreateExecutionModeControllerOptions,
 ): Promise<ExecutionModeController> {
   let mode = await getStoredExecutionMode(options.settings);
+  const channel = options.channel === undefined && typeof BroadcastChannel !== "undefined"
+    ? new BroadcastChannel(EXECUTION_MODE_CHANNEL)
+    : options.channel;
 
-  const applyMode = async (nextMode: ExecutionMode): Promise<void> => {
-    if (mode === nextMode) {
-      return;
-    }
+  const serialize = createConcurrencyLimit(1);
+  let generation = 0;
 
-    mode = await setStoredExecutionMode(options.settings, nextMode);
-    dispatchExecutionModeChanged(mode);
+  const readMode = (): Promise<ExecutionMode> => {
+    const currentGeneration = ++generation;
+    return serialize(async () => {
+      const stored = await getStoredExecutionMode(options.settings);
+      if (currentGeneration === generation && stored !== mode) {
+        mode = stored;
+        dispatchExecutionModeChanged(mode);
+      }
+      return mode;
+    });
   };
+
+  channel?.addEventListener("message", () => {
+    void readMode().catch(() => {});
+  });
 
   return {
     getMode: () => mode,
-    setMode: async (nextMode: ExecutionMode) => {
-      await applyMode(nextMode);
-    },
-    toggleFromUi: async () => {
-      const nextMode = toggleExecutionMode(mode);
-      await applyMode(nextMode);
-      options.showToast?.(t("status.mode.toast", { mode: formatExecutionModeLabel(nextMode) }));
+    readMode,
+    setMode: (nextMode) => {
+      generation += 1;
+      return serialize(async () => {
+        mode = await setStoredExecutionMode(options.settings, nextMode);
+        dispatchExecutionModeChanged(mode);
+        channel?.postMessage(mode);
+      });
     },
   };
 }

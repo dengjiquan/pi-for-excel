@@ -1,17 +1,3 @@
-/**
- * Model selector dialog — first-party replacement for pi-web-ui's
- * `ModelSelector` (docs/ui-ownership.md step 6).
- *
- * Differences from upstream (intentional):
- * - No Thinking/Vision filter pills, capability icons, or cost column — the
- *   previous theme already hid all three; they are simply not rendered.
- * - Provider catalogues come from the browser-native Pi AI Models runtime.
- *   Cached dynamic models render immediately and background refreshes update
- *   an already-open selector.
- * - Provider filtering (active credentials) and featured-model ordering are
- *   built in rather than monkey-patched (src/models/featured-models.ts).
- */
-
 import {
   modelsAreEqual,
   type Api,
@@ -60,18 +46,15 @@ export function openModelSelectorDialog(options: ModelSelectorDialogOptions): vo
 
   const dialog = createOverlayDialog({
     overlayId: MODEL_SELECTOR_OVERLAY_ID,
-    cardClassName: "pi-model-selector-card",
+    cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-model-selector-card",
     restoreFocusOnClose: true,
   });
 
   let allItems = collectModelItems(options.models);
   let searchQuery = "";
   let selectedIndex = 0;
-  // Selection follows the mouse only after real pointer movement, so
-  // keyboard-triggered scrolling doesn't hand selection to whatever lands
-  // under the cursor.
-  let navigationMode: "keyboard" | "mouse" = "mouse";
-  let lastMouse = { x: 0, y: 0 };
+  let navigationMode: "keyboard" | "mouse" = "keyboard";
+  let lastMouse: { x: number; y: number } | null = null;
 
   const { header } = createOverlayHeader({
     title: t("modelSelector.title"),
@@ -112,7 +95,6 @@ export function openModelSelectorDialog(options: ModelSelectorDialogOptions): vo
       }
       scored.sort((a, b) => b.score - a.score);
 
-      // Preserve score order, but float the current model to the top.
       const current = options.currentModel;
       const items = scored.map((entry) => entry.item);
       if (current) {
@@ -215,8 +197,9 @@ export function openModelSelectorDialog(options: ModelSelectorDialogOptions): vo
   });
 
   dialog.overlay.addEventListener("mousemove", (event) => {
-    if (event.clientX === lastMouse.x && event.clientY === lastMouse.y) return;
+    const previous = lastMouse;
     lastMouse = { x: event.clientX, y: event.clientY };
+    if (!previous || (event.clientX === previous.x && event.clientY === previous.y)) return;
     navigationMode = "mouse";
   });
 

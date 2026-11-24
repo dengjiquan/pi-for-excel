@@ -38,3 +38,6 @@ manifest.dev.xml
 
 # Session exports
 pi-session-*
+
+# Amp orb portal state (generated)
+.amp/portals/

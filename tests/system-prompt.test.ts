@@ -26,8 +26,8 @@ void test("system prompt renders Confirm execution mode guidance", () => {
   const prompt = buildSystemPrompt({ executionMode: "safe" });
 
   assert.match(prompt, /Current mode:\s*\*\*Confirm\*\*/);
-  assert.match(prompt, /explicit user confirmation before mutating workbook tools/i);
-  assert.match(prompt, /destructive structure operations as high-risk/i);
+  assert.match(prompt, /tool approval dialog is the confirmation/i);
+  assert.doesNotMatch(prompt, /Ask for explicit user confirmation before mutating|reconfirm before proceeding/i);
 });
 
 void test("system prompt embeds provided user and workbook instructions", () => {
@@ -104,7 +104,6 @@ void test("system prompt documents Python tools and Pyodide default (bridge awar
   assert.match(prompt, /\*\*python_transform_range\*\*/);
   assert.match(prompt, /Pyodide/);
   assert.match(prompt, /no setup required/i);
-  // Bridge-awareness content moved to dynamic ## Local Services section
   assert.ok(!prompt.includes("native Python bridge"), "TOOLS section should not contain bridge-awareness content");
 });
 
@@ -283,10 +282,6 @@ void test("system prompt keeps setup hints capability-linked for proactive conne
     assert.match(prompt, new RegExp(`Setup: ${expectation.setupHint}\\.`));
   }
 });
-
-// ---------------------------------------------------------------------------
-// ## Local Services section
-// ---------------------------------------------------------------------------
 
 void test("system prompt omits Local Services when no entries provided", () => {
   const prompt = buildSystemPrompt();

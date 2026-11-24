@@ -1,14 +1,14 @@
 export const TMUX_TOOL_NAME = "tmux";
+export const FILES_TOOL_NAME = "files";
+export const EXTENSIONS_MANAGER_TOOL_NAME = "extensions_manager";
 export const EXECUTE_OFFICE_JS_TOOL_NAME = "execute_office_js";
 export const EXECUTE_WPS_JS_TOOL_NAME = "execute_wps_js";
 
-/** Python tools that can run without a native bridge (via Pyodide fallback). */
 export const PYTHON_FALLBACK_TOOL_NAMES = new Set<string>([
   "python_run",
   "python_transform_range",
 ]);
 
-/** Python tools that strictly require the native bridge. */
 export const PYTHON_BRIDGE_ONLY_TOOL_NAMES = new Set<string>([
   "libreoffice_convert",
 ]);
@@ -25,11 +25,9 @@ export type TmuxBridgeGateReason =
   | "invalid_bridge_url"
   | "bridge_unreachable";
 
-export interface TmuxBridgeGateResult {
-  allowed: boolean;
-  bridgeUrl?: string;
-  reason?: TmuxBridgeGateReason;
-}
+export type TmuxBridgeGateResult =
+  | { allowed: true; bridgeUrl: string }
+  | { allowed: false; reason: TmuxBridgeGateReason; bridgeUrl?: string };
 
 export interface TmuxBridgeGateDependencies {
   getTmuxBridgeUrl?: () => Promise<string | undefined>;
@@ -42,11 +40,9 @@ export type PythonBridgeGateReason =
   | "invalid_bridge_url"
   | "bridge_unreachable";
 
-export interface PythonBridgeGateResult {
-  allowed: boolean;
-  bridgeUrl?: string;
-  reason?: PythonBridgeGateReason;
-}
+export type PythonBridgeGateResult =
+  | { allowed: true; bridgeUrl: string }
+  | { allowed: false; reason: PythonBridgeGateReason; bridgeUrl?: string };
 
 export interface PythonBridgeGateDependencies {
   getPythonBridgeUrl?: () => Promise<string | undefined>;
@@ -58,18 +54,32 @@ export interface PythonBridgeApprovalRequest {
   toolName: string;
   bridgeUrl: string;
   params: unknown;
+  signal?: AbortSignal;
 }
 
 export interface OfficeJsExecuteApprovalRequest {
+  toolCallId: string;
   explanation: string;
   code: string;
   apiName?: "Office.js" | "WPS JSAPI";
-  /**
-   * Ambient-authority identifiers detected by the static risk lint
-   * (`office-js-risk.ts`). When present, approval is requested even in Auto
-   * mode and the approval message includes an explicit warning.
-   */
   riskIdentifiers?: string[];
+  destructive?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface FilesGateFileInfo {
+  size: number;
+  readOnly: boolean;
+  nativeFolderName?: string;
+}
+
+export interface LocalChangeApprovalRequest {
+  toolName: string;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  destructive: boolean;
+  signal?: AbortSignal;
 }
 
 export interface ExperimentalToolGateDependencies extends
@@ -79,6 +89,9 @@ export interface ExperimentalToolGateDependencies extends
   getApprovedPythonBridgeUrl?: () => Promise<string | undefined>;
   setApprovedPythonBridgeUrl?: (bridgeUrl: string) => Promise<void>;
   requestOfficeJsExecuteApproval?: (request: OfficeJsExecuteApprovalRequest) => Promise<boolean>;
-  /** When provided, Auto mode skips the Office.js approval prompt. */
   getExecutionMode?: () => Promise<"yolo" | "safe">;
+  requestLocalChangeApproval?: (request: LocalChangeApprovalRequest) => Promise<boolean>;
+  inspectWorkspaceFile?: (path: string) => Promise<FilesGateFileInfo | null>;
+  assistantCreatedFiles?: Set<string>;
+  listExtensions?: () => ReadonlyArray<{ id: string; name: string; grantedCapabilities: readonly string[] }>;
 }

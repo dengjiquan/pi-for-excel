@@ -4,7 +4,6 @@ import {
   createOverlayDialog,
   createOverlayHeader,
   createOverlayInput,
-  NESTED_OVERLAY_Z_INDEX,
 } from "./overlay-dialog.js";
 import { TEXT_INPUT_DIALOG_OVERLAY_ID } from "./overlay-ids.js";
 import { t } from "../language/index.js";
@@ -33,9 +32,7 @@ function canRenderTextInputDialog(): boolean {
   return document.body instanceof HTMLElement;
 }
 
-export function requestTextInputDialog(
-  options: TextInputDialogOptions,
-): Promise<string | null> {
+export function requestTextInputDialog(options: TextInputDialogOptions): Promise<string | null> {
   if (!canRenderTextInputDialog()) {
     return Promise.reject(new Error(getTextInputUiUnavailableError()));
   }
@@ -46,13 +43,8 @@ export function requestTextInputDialog(
   return new Promise((resolve) => {
     const dialog = createOverlayDialog({
       overlayId,
-      cardClassName:
-        options.cardClassName ??
-        "pi-welcome-card pi-overlay-card pi-overlay-card--s",
-      ...(options.restoreFocusOnClose !== undefined
-        ? { restoreFocusOnClose: options.restoreFocusOnClose }
-        : {}),
-      zIndex: NESTED_OVERLAY_Z_INDEX,
+      cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
+      ...(options.restoreFocusOnClose !== undefined ? { restoreFocusOnClose: options.restoreFocusOnClose } : {}),
     });
 
     let settled = false;
@@ -135,21 +127,6 @@ export function requestTextInputDialog(
     actions.append(cancelButton, confirmButton);
     dialog.card.append(header, body, actions);
     dialog.mount();
-
-    const focusInput = (): void => {
-      if (typeof input.focus === "function") {
-        input.focus();
-      }
-
-      if (typeof input.select === "function") {
-        input.select();
-      }
-    };
-
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(focusInput);
-    } else {
-      focusInput();
-    }
+    input.select();
   });
 }

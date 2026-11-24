@@ -1,6 +1,8 @@
+import { authDeferred } from "./fixtures/auth-deferred.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { isCorsError } from "../src/auth/cors-error.ts";
 
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 
@@ -173,7 +175,6 @@ void test("OpenAI Codex browser OAuth accepts pi-sourced credentials with connec
   const provider = getOAuthProvider("openai-codex");
   assert.ok(provider);
 
-  // Shaped like pi's auth.json entries: no codexOAuthVersion/scopes markers.
   const scopedAccessToken = fakeJwt({
     scp: ["openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"],
     "https://api.openai.com/auth": {
@@ -243,7 +244,6 @@ void test("OpenAI Codex browser OAuth rejects JWT credentials missing connector 
   const provider = getOAuthProvider("openai-codex");
   assert.ok(provider);
 
-  // Basic scopes only — e.g. a pi login from before the connector-scope upgrade.
   const basicAccessToken = fakeJwt({
     scp: ["openid", "profile", "email", "offline_access"],
     "https://api.openai.com/auth": {
@@ -327,3 +327,104 @@ void test("OpenAI Codex browser OAuth requires account ID on the access token", 
     /access token is missing ChatGPT account ID/,
   );
 });
+
+void test("a login flow whose code cannot load is not reported as a CORS problem", () => {
+  const moduleFailure = new TypeError(
+    "Failed to fetch dynamically imported module: https://localhost:3141/node_modules/.vite/deps/github-copilot.js",
+  );
+  assert.equal(isCorsError(moduleFailure), false);
+  assert.equal(isCorsError(new TypeError("Failed to fetch")), true);
+});
+
+for (const providerId of ["anthropic", "openai-codex", "google-gemini-cli", "google-antigravity"]) {
+  for (const cancelAt of ["prompt", "token", "before-exchange"] as const) {
+    void test(`${providerId} cancellation at ${cancelAt} never returns credentials`, async (t) => {
+      const provider = getOAuthProvider(providerId);
+      assert.ok(provider);
+      const abort = new AbortController();
+      const originalFetch = globalThis.fetch;
+      let requests = 0;
+      globalThis.fetch = () => {
+        requests += 1;
+        abort.abort();
+        return Promise.resolve(Response.json({
+          access_token: fakeJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } }),
+          refresh_token: "fixture-refresh",
+          expires_in: 3600,
+        }));
+      };
+      t.after(() => { globalThis.fetch = originalFetch; });
+      await assert.rejects(provider.login({
+        signal: abort.signal,
+        onAuth: () => {},
+        onPrompt: () => {
+          if (cancelAt === "prompt") abort.abort();
+          return Promise.resolve("fixture-code");
+        },
+        onProgress: (message) => {
+          if (cancelAt === "before-exchange" && /Exchanging/.test(message)) abort.abort();
+        },
+      }), { name: "AbortError" });
+      assert.equal(requests, cancelAt === "token" ? 1 : 0);
+    });
+  }
+}
+
+void test("Google cancellation during account fetch never starts project discovery", async (t) => {
+  const abort = new AbortController();
+  const provider = getOAuthProvider("google-gemini-cli");
+  assert.ok(provider);
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (input) => {
+    const url = requestUrlToString(input);
+    requests.push(url);
+    if (url.includes("userinfo")) abort.abort();
+    return Promise.resolve(Response.json(url.includes("userinfo") ? { email: "fixture@example.test" } : {
+      access_token: "fixture-access", refresh_token: "fixture-refresh", expires_in: 3600,
+    }));
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  await assert.rejects(provider.login({
+    signal: abort.signal, onAuth: () => {}, onPrompt: () => Promise.resolve("fixture-code"),
+  }), { name: "AbortError" });
+  assert.equal(requests.length, 2);
+});
+
+for (const cancel of [false, true]) {
+  void test(`Google project provisioning ${cancel ? "cancellation" : "deadline"} aborts a pending poll`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const abort = new AbortController();
+    const provider = getOAuthProvider("google-gemini-cli");
+    assert.ok(provider);
+    const originalFetch = globalThis.fetch;
+    const polling = authDeferred<void>();
+    let pollAborted = false;
+    globalThis.fetch = (input, init) => {
+      const url = requestUrlToString(input);
+      if (url.endsWith("/operations/fixture")) {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => { pollAborted = true; }, { once: true });
+        polling.resolve();
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted")), { once: true });
+        });
+      }
+      return Promise.resolve(Response.json(url.includes("/token")
+        ? { access_token: "fixture-access", refresh_token: "fixture-refresh", expires_in: 3600 }
+        : url.includes("loadCodeAssist")
+          ? { allowedTiers: [{ id: "free-tier", isDefault: true }] }
+          : url.includes("onboardUser") ? { name: "operations/fixture", done: false } : {}));
+    };
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const login = provider.login({
+      signal: abort.signal, onAuth: () => {}, onPrompt: () => Promise.resolve("fixture-code"),
+    });
+    const rejected = assert.rejects(login, cancel ? { name: "AbortError" } : /provisioning timed out/);
+    await polling.promise;
+    if (cancel) abort.abort();
+    else t.mock.timers.tick(2 * 60_000);
+    assert.equal(pollAborted, true, "project provisioning must abort the in-flight poll");
+    await rejected;
+  });
+}

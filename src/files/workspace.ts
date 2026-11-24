@@ -1,18 +1,11 @@
-/**
- * Files workspace manager.
- *
- * Backend selection strategy:
- * 1) persisted native directory handle (when permission is still granted)
- * 2) OPFS
- * 3) in-memory fallback (non-browser/test environments)
- */
-
+import { createConcurrencyLimit, mapWithConcurrency } from "../utils/concurrency.js";
 import { t } from "../language/index.js";
 import { formatWorkbookLabel, getWorkbookContext } from "../workbook/context.js";
 import { base64ToBytes, bytesToBase64, encodeTextUtf8, truncateBase64, truncateText } from "./encoding.js";
 import { MemoryBackend, NativeDirectoryBackend, OpfsBackend, type WorkspaceBackend } from "./backend.js";
 import { getBuiltinWorkspaceDoc, isBuiltinWorkspacePath, listBuiltinWorkspaceDocs } from "./builtin-docs.js";
 import { resolveSafeBlobUrlMimeType } from "./blob-url-safety.js";
+import { saveBlobAsFile } from "../utils/download.js";
 import { inferMimeType, isTextMimeType } from "./mime.js";
 import { getWorkspaceBaseName, normalizeWorkspacePath } from "./path.js";
 import {
@@ -38,7 +31,9 @@ import {
   type WorkspaceFileWorkbookTag,
   type WorkspaceSnapshot,
 } from "./types.js";
-import type { SettingsAccess } from "../storage/local/settings-store.js";
+import type { SettingsAccess, SettingsUpdater } from "../storage/local/settings-store.js";
+
+type WorkspaceSettings = SettingsAccess & SettingsUpdater;
 import { Value } from "typebox/value";
 
 const NATIVE_HANDLE_SETTING_KEY = "files.workspace.nativeHandle.v1";
@@ -74,6 +69,24 @@ export interface WorkspaceMutationOptions {
   locationKind?: WorkspaceFileLocationKind;
 }
 
+export interface ImportFilesResult {
+  imported: number;
+  paths: string[];
+  renamed: Array<{ from: string; to: string }>;
+}
+
+export function describeImportRenames(result: ImportFilesResult): string {
+  const [first] = result.renamed;
+  if (!first) return "";
+  if (result.renamed.length === 1) {
+    return " " + t("files-workspace.import.renamedOne", {
+      name: getWorkspaceBaseName(first.from),
+      newName: getWorkspaceBaseName(first.to),
+    });
+  }
+  return " " + t("files-workspace.import.renamedMany", { count: result.renamed.length });
+}
+
 interface DirectoryPickerHost {
   showDirectoryPicker: () => Promise<FileSystemDirectoryHandle>;
 }
@@ -86,6 +99,15 @@ interface DirectoryPermissionHandle {
 function isDirectoryPickerHost(value: unknown): value is DirectoryPickerHost {
   return typeof value === "object" && value !== null
     && "showDirectoryPicker" in value && typeof value.showDirectoryPicker === "function";
+}
+
+function isCrossOriginSubframe(win: Window): boolean {
+  if (win.top === null || win.top === win.self) return false;
+  try {
+    return win.top.location.origin !== win.location.origin;
+  } catch {
+    return true;
+  }
 }
 
 function isDirectoryHandle(value: unknown): value is FileSystemDirectoryHandle {
@@ -110,31 +132,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const out = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(out).set(bytes);
   return out;
-}
-
-function closeWindowSafely(windowHandle: Window | null): void {
-  if (!windowHandle || windowHandle.closed) {
-    return;
-  }
-
-  try {
-    windowHandle.close();
-  } catch {
-    // ignore close errors
-  }
-}
-
-function tryOpenDownloadWindow(url: string, pendingWindow: Window | null): boolean {
-  if (pendingWindow && !pendingWindow.closed) {
-    try {
-      pendingWindow.location.replace(url);
-      return true;
-    } catch {
-      closeWindowSafely(pendingWindow);
-    }
-  }
-
-  return window.open(url, "_blank") !== null;
 }
 
 function isMissingWorkspaceFileError(error: unknown): boolean {
@@ -190,8 +187,6 @@ function parsePersistedAuditTrail(value: unknown): FilesWorkspaceAuditEntry[] {
   const entries: FilesWorkspaceAuditEntry[] = [];
   for (const entry of value.entries) {
     if (!Value.Check(FilesWorkspaceAuditEntrySchema, entry)) continue;
-    // Clean only removes properties the schema does not declare, so a value
-    // that passed the check is still an entry afterwards.
     entries.push(Value.Clean(FilesWorkspaceAuditEntrySchema, entry) as FilesWorkspaceAuditEntry);
   }
 
@@ -213,7 +208,15 @@ function createAuditEntryId(): string {
   return `audit_${Date.now().toString(36)}_${randomChunk}`;
 }
 
-async function getSettingsStore(): Promise<SettingsAccess | null> {
+async function retryOnce(run: () => Promise<void>): Promise<void> {
+  try {
+    await run();
+  } catch {
+    await run();
+  }
+}
+
+async function getSettingsStore(): Promise<WorkspaceSettings | null> {
   try {
     const storageModule = await import("../storage/local/app-storage.js");
     return storageModule.getAppStorage().settings;
@@ -245,7 +248,6 @@ async function persistNativeHandle(handle: FileSystemDirectoryHandle | null): Pr
       await settings.delete(NATIVE_HANDLE_SETTING_KEY);
     }
   } catch {
-    // ignore persistence failures; fallback still works for the current session.
   }
 }
 
@@ -366,19 +368,17 @@ export function buildWorkspaceContextSummary(args: WorkspaceContextSummaryArgs):
 
   const importFiles = sortFilesByPath(workspaceFiles.filter((file) => file.path.startsWith(IMPORTS_PREFIX)));
 
-  const currentWorkbookFiles = args.currentWorkbookId
-    ? sortFilesByPath(workspaceFiles.filter((file) => {
-      if (file.workbookTag?.workbookId !== args.currentWorkbookId) {
-        return false;
-      }
+  const currentWorkbookFiles = sortFilesByPath(workspaceFiles.filter((file) => {
+    if (file.workbookTag?.workbookId !== (args.currentWorkbookId ?? undefined)) {
+      return false;
+    }
 
-      if (file.path.startsWith(NOTES_PREFIX)) return false;
-      if (file.path.startsWith(IMPORTS_PREFIX)) return false;
-      if (file.path.startsWith(SCRATCH_PREFIX)) return false;
-      if (file.path.startsWith(ASSISTANT_DOCS_PREFIX)) return false;
-      return true;
-    }))
-    : [];
+    if (file.path.startsWith(NOTES_PREFIX)) return false;
+    if (file.path.startsWith(IMPORTS_PREFIX)) return false;
+    if (file.path.startsWith(SCRATCH_PREFIX)) return false;
+    if (file.path.startsWith(ASSISTANT_DOCS_PREFIX)) return false;
+    return true;
+  }));
 
   const hasRelevantFiles =
     notesFiles.length > 0 ||
@@ -406,9 +406,8 @@ export function buildWorkspaceContextSummary(args: WorkspaceContextSummaryArgs):
 
   if (currentWorkbookFiles.length > 0) {
     const noun = currentWorkbookFiles.length === 1 ? "file" : "files";
-    lines.push(
-      `- Current workbook artifacts: ${currentWorkbookFiles.length} ${noun}${formatPathPreview(currentWorkbookFiles, previewLimit)}.`,
-    );
+    const label = args.currentWorkbookId ? "Current workbook artifacts" : "Files (not tied to a saved workbook)";
+    lines.push(`- ${label}: ${currentWorkbookFiles.length} ${noun}${formatPathPreview(currentWorkbookFiles, previewLimit)}.`);
   }
 
   if (importFiles.length > 0) {
@@ -429,105 +428,78 @@ export function buildWorkspaceContextSummary(args: WorkspaceContextSummaryArgs):
   };
 }
 
+export interface PendingWorkspaceDownload {
+  download: (path: string) => Promise<void>;
+  cancel: () => void;
+}
+
 export interface FilesWorkspaceOptions {
   initialBackend?: WorkspaceBackend;
   initialWorkspaceBackend?: WorkspaceBackend;
-  settings?: SettingsAccess | null;
+  settings?: WorkspaceSettings | null;
 }
 
+type WorkspaceBackendState =
+  | { kind: "uninitialized"; workspaceBackend: WorkspaceBackend | null }
+  | {
+    kind: "ready";
+    backend: WorkspaceBackend;
+    nativeDirectoryName?: string;
+    workspaceBackend: WorkspaceBackend | null;
+  };
+
+type ReadyWorkspaceBackendState = Extract<WorkspaceBackendState, { kind: "ready" }>;
+
 export class FilesWorkspace {
-  private backend: WorkspaceBackend | null = null;
-  private backendPromise: Promise<WorkspaceBackend> | null = null;
-  private nativeHandle: FileSystemDirectoryHandle | null = null;
+  private backendState: WorkspaceBackendState;
+  private readonly backendOperations = createConcurrencyLimit(1);
 
-  private workspaceStorageBackend: WorkspaceBackend | null = null;
-  private workspaceStorageBackendPromise: Promise<WorkspaceBackend> | null = null;
-
-  private metadataLoaded = false;
   private readonly metadataByPath = new Map<string, WorkspaceFileWorkbookTag>();
-
-  private auditLoaded = false;
   private auditEntries: FilesWorkspaceAuditEntry[] = [];
 
-  private readonly settings: SettingsAccess | null | undefined;
+  private readonly settings: WorkspaceSettings | null | undefined;
   private readonly scratchCleanupByBackend = new WeakMap<WorkspaceBackend, Promise<void>>();
 
   constructor(options: FilesWorkspaceOptions = {}) {
     this.settings = options.settings;
-    if (options.initialBackend) {
-      this.backend = options.initialBackend;
-      if (options.initialBackend.kind !== "native-directory") {
-        this.workspaceStorageBackend = options.initialBackend;
-      }
-    }
-
-    if (options.initialWorkspaceBackend) {
-      this.workspaceStorageBackend = options.initialWorkspaceBackend;
-    }
+    const workspaceBackend = options.initialWorkspaceBackend
+      ?? (options.initialBackend?.kind !== "native-directory" ? options.initialBackend : null)
+      ?? null;
+    this.backendState = options.initialBackend
+      ? { kind: "ready", backend: options.initialBackend, workspaceBackend }
+      : { kind: "uninitialized", workspaceBackend };
   }
 
-  private async initializeBackend(): Promise<WorkspaceBackend> {
-    const persistedNative = await readPersistedNativeHandle();
-    if (persistedNative) {
-      const permission = await queryReadWritePermission(persistedNative);
-      if (permission === "granted") {
-        this.nativeHandle = persistedNative;
-        return new NativeDirectoryBackend(persistedNative);
-      }
-    }
+  private async initializeBackend(): Promise<ReadyWorkspaceBackendState> {
+    if (this.backendState.kind === "ready") return this.backendState;
 
+    const persistedNative = await readPersistedNativeHandle();
+    const permission = persistedNative ? await queryReadWritePermission(persistedNative) : null;
+    const backend = persistedNative && permission === "granted"
+      ? new NativeDirectoryBackend(persistedNative)
+      : this.initializeWorkspaceStorageBackend();
+    const state: ReadyWorkspaceBackendState = {
+      kind: "ready",
+      backend,
+      ...(persistedNative && permission === "granted" ? { nativeDirectoryName: persistedNative.name } : {}),
+      workspaceBackend: this.backendState.workspaceBackend ?? (backend.kind !== "native-directory" ? backend : null),
+    };
+    this.backendState = state;
+    return state;
+  }
+
+  private initializeWorkspaceStorageBackend(): WorkspaceBackend {
     if (typeof navigator !== "undefined" && navigator.storage && typeof navigator.storage.getDirectory === "function") {
       return new OpfsBackend();
     }
-
     return new MemoryBackend();
   }
 
-  private initializeWorkspaceStorageBackend(): Promise<WorkspaceBackend> {
-    if (typeof navigator !== "undefined" && navigator.storage && typeof navigator.storage.getDirectory === "function") {
-      return Promise.resolve(new OpfsBackend());
-    }
-
-    return Promise.resolve(new MemoryBackend());
-  }
-
-  private async getWorkspaceStorageBackend(activeBackend?: WorkspaceBackend): Promise<WorkspaceBackend> {
-    if (this.workspaceStorageBackend) {
-      await this.ensureScratchCleanupAttempted(this.workspaceStorageBackend);
-      return this.workspaceStorageBackend;
-    }
-
-    const backend = activeBackend ?? await this.getBackend();
-    if (backend.kind !== "native-directory") {
-      this.workspaceStorageBackend = backend;
-      await this.ensureScratchCleanupAttempted(backend);
-      return backend;
-    }
-
-    if (!this.workspaceStorageBackendPromise) {
-      this.workspaceStorageBackendPromise = this.initializeWorkspaceStorageBackend();
-    }
-
-    const workspaceBackend = await this.workspaceStorageBackendPromise;
-    this.workspaceStorageBackendPromise = null;
-    this.workspaceStorageBackend = workspaceBackend;
+  private async getWorkspaceStorageBackend(state: ReadyWorkspaceBackendState): Promise<WorkspaceBackend> {
+    const workspaceBackend = state.workspaceBackend ?? this.initializeWorkspaceStorageBackend();
+    this.backendState = { ...state, workspaceBackend };
     await this.ensureScratchCleanupAttempted(workspaceBackend);
     return workspaceBackend;
-  }
-
-  private async removeWorkbookTags(paths: readonly string[]): Promise<void> {
-    if (!await this.ensureMetadataLoaded()) return;
-
-    let changed = false;
-    for (const path of paths) {
-      if (this.metadataByPath.delete(path)) {
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      await this.persistMetadata();
-    }
   }
 
   private async cleanupExpiredScratchFiles(backend: WorkspaceBackend): Promise<void> {
@@ -542,22 +514,16 @@ export class FilesWorkspace {
       return;
     }
 
-    const deletedPaths: string[] = [];
-
-    for (const path of staleScratchPaths) {
-      try {
-        await backend.deleteFile(path);
-        deletedPaths.push(path);
-      } catch {
-        // best-effort cleanup: ignore per-file delete failures
-      }
-    }
+    const deleted = await mapWithConcurrency(staleScratchPaths, 8, (path) => backend.deleteFile(path).then(() => true, () => false));
+    const deletedPaths = staleScratchPaths.filter((_, index) => deleted[index]);
 
     if (deletedPaths.length === 0) {
       return;
     }
 
-    await this.removeWorkbookTags(deletedPaths);
+    await this.updateMetadata((byPath) => {
+      for (const path of deletedPaths) byPath.delete(path);
+    });
     dispatchWorkspaceChanged({ reason: "delete" });
   }
 
@@ -566,7 +532,6 @@ export class FilesWorkspace {
 
     if (!cleanupPromise) {
       cleanupPromise = this.cleanupExpiredScratchFiles(backend).catch(() => {
-        // best-effort cleanup: fail open on startup/first interaction
       });
       this.scratchCleanupByBackend.set(backend, cleanupPromise);
     }
@@ -574,120 +539,79 @@ export class FilesWorkspace {
     await cleanupPromise;
   }
 
-  private async getBackend(): Promise<WorkspaceBackend> {
-    if (this.backend) {
-      await this.ensureScratchCleanupAttempted(this.backend);
-      if (this.backend.kind !== "native-directory" && !this.workspaceStorageBackend) {
-        this.workspaceStorageBackend = this.backend;
-      }
-      return this.backend;
-    }
-
-    if (!this.backendPromise) {
-      this.backendPromise = this.initializeBackend();
-    }
-
-    const backend = await this.backendPromise;
-    this.backend = backend;
-    this.backendPromise = null;
-
-    await this.ensureScratchCleanupAttempted(backend);
-    if (backend.kind !== "native-directory") {
-      this.workspaceStorageBackend = backend;
-    }
-    return backend;
-  }
-
-  private replaceBackend(nextBackend: WorkspaceBackend): void {
-    this.backend = nextBackend;
-    this.backendPromise = null;
-    if (nextBackend.kind !== "native-directory") {
-      this.workspaceStorageBackend = nextBackend;
-      this.workspaceStorageBackendPromise = null;
-    }
-    dispatchWorkspaceChanged({ reason: "backend" });
-  }
-
-  private resolveSettings(): Promise<SettingsAccess | null> {
+  private resolveSettings(): Promise<WorkspaceSettings | null> {
     return this.settings === undefined ? getSettingsStore() : Promise.resolve(this.settings);
   }
 
-  private async ensureMetadataLoaded(): Promise<boolean> {
-    if (this.metadataLoaded) return true;
+  private replaceMetadataCache(byPath: ReadonlyMap<string, WorkspaceFileWorkbookTag>): void {
+    this.metadataByPath.clear();
+    for (const [path, tag] of byPath) {
+      this.metadataByPath.set(path, tag);
+    }
+  }
 
+  private async readMetadata(): Promise<ReadonlyMap<string, WorkspaceFileWorkbookTag>> {
+    const settings = await this.resolveSettings();
+    if (!settings) return this.metadataByPath;
+
+    try {
+      this.replaceMetadataCache(parsePersistedMetadata(await settings.get(METADATA_SETTING_KEY)));
+    } catch (error) {
+      console.warn("[pi] Files workspace tags could not be read; using the last known tags.", error);
+    }
+    return this.metadataByPath;
+  }
+
+  private async updateMetadata(change: (byPath: Map<string, WorkspaceFileWorkbookTag>) => void): Promise<void> {
     const settings = await this.resolveSettings();
     if (!settings) {
-      this.metadataLoaded = true;
-      return true;
+      change(this.metadataByPath);
+      return;
     }
 
     try {
-      const raw = await settings.get(METADATA_SETTING_KEY);
-      const parsed = parsePersistedMetadata(raw);
-      this.metadataByPath.clear();
-      for (const [path, tag] of parsed) {
-        this.metadataByPath.set(path, tag);
-      }
-      this.metadataLoaded = true;
-      return true;
-    } catch {
-      return false;
+      await retryOnce(() => settings.update(METADATA_SETTING_KEY, parsePersistedMetadata, (byPath): PersistedWorkspaceMetadata => {
+        change(byPath);
+        this.replaceMetadataCache(byPath);
+        const payload: PersistedWorkspaceMetadata = {
+          version: 1,
+          byPath: Object.fromEntries(byPath),
+        };
+        return payload;
+      }));
+    } catch (error) {
+      console.warn("[pi] Files workspace tags could not be saved.", error);
     }
   }
 
-  private async persistMetadata(): Promise<void> {
+  private async readAuditTrail(): Promise<FilesWorkspaceAuditEntry[]> {
     const settings = await this.resolveSettings();
-    if (!settings) return;
-
-    const byPath: Record<string, WorkspaceFileWorkbookTag> = {};
-    for (const [path, tag] of this.metadataByPath) {
-      byPath[path] = tag;
-    }
-
-    const payload: PersistedWorkspaceMetadata = {
-      version: 1,
-      byPath,
-    };
+    if (!settings) return this.auditEntries;
 
     try {
-      await settings.set(METADATA_SETTING_KEY, payload);
-    } catch {
-      // ignore persistence failures
+      return parsePersistedAuditTrail(await settings.get(AUDIT_TRAIL_SETTING_KEY));
+    } catch (error) {
+      console.warn("[pi] Files workspace audit trail could not be read.", error);
+      return [];
     }
   }
 
-  private async ensureAuditLoaded(): Promise<boolean> {
-    if (this.auditLoaded) return true;
-
+  private async updateAuditTrail(
+    change: (entries: FilesWorkspaceAuditEntry[]) => FilesWorkspaceAuditEntry[],
+  ): Promise<void> {
     const settings = await this.resolveSettings();
     if (!settings) {
-      this.auditLoaded = true;
-      return true;
+      this.auditEntries = change(this.auditEntries).slice(0, MAX_AUDIT_ENTRIES);
+      return;
     }
 
     try {
-      const raw = await settings.get(AUDIT_TRAIL_SETTING_KEY);
-      this.auditEntries = parsePersistedAuditTrail(raw);
-      this.auditLoaded = true;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async persistAuditTrail(): Promise<void> {
-    const settings = await this.resolveSettings();
-    if (!settings) return;
-
-    const payload: PersistedAuditTrail = {
-      version: 1,
-      entries: this.auditEntries,
-    };
-
-    try {
-      await settings.set(AUDIT_TRAIL_SETTING_KEY, payload);
-    } catch {
-      // ignore persistence failures
+      await retryOnce(() => settings.update(AUDIT_TRAIL_SETTING_KEY, parsePersistedAuditTrail, (entries): PersistedAuditTrail => ({
+        version: 1,
+        entries: change(entries).slice(0, MAX_AUDIT_ENTRIES),
+      })));
+    } catch (error) {
+      console.warn("[pi] Files workspace audit entry could not be saved.", error);
     }
   }
 
@@ -706,62 +630,50 @@ export class FilesWorkspace {
     }
   }
 
-  private async setWorkbookTagForPath(path: string, fallbackTag?: WorkspaceFileWorkbookTag): Promise<void> {
-    if (!await this.ensureMetadataLoaded()) return;
-
-    const resolvedTag = await this.resolveActiveWorkbookTag();
-    const nextTag = resolvedTag ?? fallbackTag;
+  private async setWorkbookTagForPath(path: string): Promise<void> {
+    const nextTag = await this.resolveActiveWorkbookTag();
     if (!nextTag) return;
 
-    this.metadataByPath.set(path, {
-      workbookId: nextTag.workbookId,
-      workbookLabel: nextTag.workbookLabel,
-      taggedAt: Date.now(),
+    await this.updateMetadata((byPath) => {
+      byPath.set(path, {
+        workbookId: nextTag.workbookId,
+        workbookLabel: nextTag.workbookLabel,
+        taggedAt: Date.now(),
+      });
     });
-
-    await this.persistMetadata();
-  }
-
-  private async removeWorkbookTag(path: string): Promise<void> {
-    if (!await this.ensureMetadataLoaded()) return;
-
-    if (!this.metadataByPath.delete(path)) {
-      return;
-    }
-
-    await this.persistMetadata();
   }
 
   private async moveWorkbookTag(oldPath: string, newPath: string): Promise<void> {
-    if (!await this.ensureMetadataLoaded()) return;
-
-    const previousTag = this.metadataByPath.get(oldPath);
-    this.metadataByPath.delete(oldPath);
-
-    await this.setWorkbookTagForPath(newPath, previousTag);
-    await this.persistMetadata();
+    const activeTag = await this.resolveActiveWorkbookTag();
+    await this.updateMetadata((byPath) => {
+      const previousTag = byPath.get(oldPath);
+      byPath.delete(oldPath);
+      const nextTag = activeTag ?? previousTag;
+      if (!nextTag) return;
+      byPath.set(newPath, {
+        workbookId: nextTag.workbookId,
+        workbookLabel: nextTag.workbookLabel,
+        taggedAt: Date.now(),
+      });
+    });
   }
 
   private async pruneStaleWorkbookTags(currentPaths: Set<string>): Promise<void> {
-    if (!await this.ensureMetadataLoaded()) return;
+    const stored = await this.readMetadata();
+    if ([...stored.keys()].every((path) => currentPaths.has(path))) return;
 
-    let changed = false;
-    for (const path of this.metadataByPath.keys()) {
-      if (currentPaths.has(path)) continue;
-      this.metadataByPath.delete(path);
-      changed = true;
-    }
-
-    if (changed) {
-      await this.persistMetadata();
-    }
+    await this.updateMetadata((byPath) => {
+      for (const path of [...byPath.keys()]) {
+        if (!currentPaths.has(path)) byPath.delete(path);
+      }
+    });
   }
 
   private async withWorkbookTags(entries: WorkspaceFileEntry[]): Promise<WorkspaceFileEntry[]> {
-    if (!await this.ensureMetadataLoaded()) return entries;
+    const tags = await this.readMetadata();
 
     return entries.map((entry) => {
-      const tag = this.metadataByPath.get(entry.path);
+      const tag = tags.get(entry.path);
       if (!tag) return entry;
 
       return {
@@ -796,8 +708,6 @@ export class FilesWorkspace {
     toPath?: string;
     bytes?: number;
   }): Promise<void> {
-    if (!await this.ensureAuditLoaded()) return;
-
     const workbookTag = await this.resolveActiveWorkbookTag();
     const entry: FilesWorkspaceAuditEntry = {
       id: createAuditEntryId(),
@@ -815,8 +725,7 @@ export class FilesWorkspace {
     if (workbookTag?.workbookId !== undefined) entry.workbookId = workbookTag.workbookId;
     if (workbookTag?.workbookLabel !== undefined) entry.workbookLabel = workbookTag.workbookLabel;
 
-    this.auditEntries = [entry, ...this.auditEntries].slice(0, MAX_AUDIT_ENTRIES);
-    await this.persistAuditTrail();
+    await this.updateAuditTrail((entries) => [entry, ...entries]);
   }
 
   private withLocationKind(
@@ -834,14 +743,16 @@ export class FilesWorkspace {
     workspaceBackend: WorkspaceBackend;
     nativeBackend: WorkspaceBackend | null;
   }> {
-    const activeBackend = await this.getBackend();
-    const workspaceBackend = await this.getWorkspaceStorageBackend(activeBackend);
-
-    return {
-      activeBackend,
-      workspaceBackend,
-      nativeBackend: activeBackend.kind === "native-directory" ? activeBackend : null,
-    };
+    return this.backendOperations(async () => {
+      const state = await this.initializeBackend();
+      const workspaceBackend = await this.getWorkspaceStorageBackend(state);
+      await this.ensureScratchCleanupAttempted(state.backend);
+      return {
+        activeBackend: state.backend,
+        workspaceBackend,
+        nativeBackend: state.backend.kind === "native-directory" ? state.backend : null,
+      };
+    });
   }
 
   private async resolveMutationTarget(args: {
@@ -1005,85 +916,92 @@ export class FilesWorkspace {
   }
 
   isNativeDirectoryPickerSupported(): boolean {
-    if (typeof window === "undefined") return false;
-    return isDirectoryPickerHost(window);
+    return this.getNativeDirectoryUnavailableReason() === null;
+  }
+
+  getNativeDirectoryUnavailableReason(): "unsupported" | "cross-origin-frame" | null {
+    if (typeof window === "undefined" || !isDirectoryPickerHost(window)) return "unsupported";
+    return isCrossOriginSubframe(window) ? "cross-origin-frame" : null;
   }
 
   async connectNativeDirectory(options: WorkspaceMutationOptions = {}): Promise<void> {
-    if (typeof window === "undefined" || !isDirectoryPickerHost(window)) {
+    if (typeof window === "undefined" || !isDirectoryPickerHost(window) || !this.isNativeDirectoryPickerSupported()) {
       throw new Error("Native directory picker is not supported in this environment.");
     }
 
-    const handle = await window.showDirectoryPicker();
-    const permission = await requestReadWritePermission(handle);
-    if (permission !== "granted") {
-      throw new Error("Permission to the selected folder was not granted.");
-    }
+    const selectedHandle = window.showDirectoryPicker();
+    void selectedHandle.catch(() => {});
+    await this.backendOperations(async () => {
+      const handle = await selectedHandle;
+      const permission = await requestReadWritePermission(handle);
+      if (permission !== "granted") {
+        throw new Error("Permission to the selected folder was not granted.");
+      }
 
-    const currentBackend = await this.getBackend();
-    if (currentBackend.kind !== "native-directory") {
-      this.workspaceStorageBackend = currentBackend;
-      this.workspaceStorageBackendPromise = null;
-    }
+      const state = await this.initializeBackend();
+      await persistNativeHandle(handle);
+      this.backendState = {
+        kind: "ready",
+        backend: new NativeDirectoryBackend(handle),
+        nativeDirectoryName: handle.name,
+        workspaceBackend: state.workspaceBackend,
+      };
+      dispatchWorkspaceChanged({ reason: "backend" });
 
-    this.nativeHandle = handle;
-    await persistNativeHandle(handle);
-
-    this.replaceBackend(new NativeDirectoryBackend(handle));
-
-    await this.appendAuditEntry({
-      action: "connect_native",
-      backend: "native-directory",
-      context: options.audit ?? DEFAULT_UI_AUDIT_CONTEXT,
+      await this.appendAuditEntry({
+        action: "connect_native",
+        backend: "native-directory",
+        context: options.audit ?? DEFAULT_UI_AUDIT_CONTEXT,
+      });
     });
   }
 
   async disconnectNativeDirectory(options: WorkspaceMutationOptions = {}): Promise<void> {
-    this.nativeHandle = null;
-    await persistNativeHandle(null);
+    await this.backendOperations(async () => {
+      const state = await this.initializeBackend();
+      const fallback = await this.getWorkspaceStorageBackend(state);
+      await persistNativeHandle(null);
+      this.backendState = { kind: "ready", backend: fallback, workspaceBackend: fallback };
+      dispatchWorkspaceChanged({ reason: "backend" });
 
-    const fallback = await this.getWorkspaceStorageBackend();
-
-    this.replaceBackend(fallback);
-
-    await this.appendAuditEntry({
-      action: "disconnect_native",
-      backend: fallback.kind,
-      context: options.audit ?? DEFAULT_UI_AUDIT_CONTEXT,
+      await this.appendAuditEntry({
+        action: "disconnect_native",
+        backend: fallback.kind,
+        context: options.audit ?? DEFAULT_UI_AUDIT_CONTEXT,
+      });
     });
   }
 
-  async getBackendStatus(): Promise<WorkspaceBackendStatus> {
-    const backend = await this.getBackend();
-    const nativeSupported = this.isNativeDirectoryPickerSupported();
-
-    const status: WorkspaceBackendStatus = {
-      kind: backend.kind,
-      label: backendLabel(backend.kind),
-      nativeSupported,
-      nativeConnected: backend.kind === "native-directory",
-    };
-
-    if (this.nativeHandle?.name !== undefined) {
-      status.nativeDirectoryName = this.nativeHandle.name;
-    }
-
-    return status;
+  getBackendStatus(): Promise<WorkspaceBackendStatus> {
+    return this.backendOperations(async () => {
+      const state = await this.initializeBackend();
+      await this.ensureScratchCleanupAttempted(state.backend);
+      const unavailableReason = this.getNativeDirectoryUnavailableReason();
+      return {
+        kind: state.backend.kind,
+        label: backendLabel(state.backend.kind),
+        nativeSupported: unavailableReason === null,
+        nativeConnected: state.backend.kind === "native-directory",
+        ...(unavailableReason === "cross-origin-frame" ? { nativeBlockedByFrame: true } : {}),
+        ...(state.nativeDirectoryName !== undefined ? { nativeDirectoryName: state.nativeDirectoryName } : {}),
+      };
+    });
   }
 
   async listFiles(options: WorkspaceListOptions = {}): Promise<WorkspaceFileEntry[]> {
     const { activeBackend, workspaceBackend, nativeBackend } = await this.resolveSourceBackends();
 
-    const workspaceFiles = await workspaceBackend.listFiles();
+    const [workspaceFiles, nativeFiles] = await Promise.all([
+      workspaceBackend.listFiles(),
+      nativeBackend ? nativeBackend.listFiles() : [],
+    ]);
     const taggedWorkspaceFiles = await this.withWorkbookTags(workspaceFiles);
     const workspaceEntries = this.withLocationKind(taggedWorkspaceFiles, "workspace");
 
     const currentPaths = new Set(taggedWorkspaceFiles.map((file) => file.path));
     await this.pruneStaleWorkbookTags(currentPaths);
 
-    const nativeEntries = nativeBackend
-      ? this.withLocationKind(await nativeBackend.listFiles(), "native-directory")
-      : [];
+    const nativeEntries = this.withLocationKind(nativeFiles, "native-directory");
 
     const occupiedPaths = new Set([
       ...workspaceEntries.map((file) => file.path),
@@ -1101,7 +1019,6 @@ export class FilesWorkspace {
         backend: activeBackend.kind,
         context: options.audit,
       });
-      dispatchWorkspaceChanged({ reason: "audit" });
     }
 
     return mergedFiles;
@@ -1205,7 +1122,6 @@ export class FilesWorkspace {
         path: normalizedPath,
         bytes: resolved.size,
       });
-      dispatchWorkspaceChanged({ reason: "audit" });
     }
 
     return resolved;
@@ -1314,7 +1230,9 @@ export class FilesWorkspace {
 
     await target.backend.deleteFile(normalizedPath);
     if (target.locationKind === "workspace") {
-      await this.removeWorkbookTag(normalizedPath);
+      await this.updateMetadata((byPath) => {
+        byPath.delete(normalizedPath);
+      });
     }
 
     await this.appendAuditEntry({
@@ -1368,11 +1286,17 @@ export class FilesWorkspace {
     dispatchWorkspaceChanged({ reason: "rename" });
   }
 
-  async importFiles(files: Iterable<File>, options: WorkspaceMutationOptions = {}): Promise<number> {
+  async importFiles(files: Iterable<File>, options: WorkspaceMutationOptions = {}): Promise<ImportFilesResult> {
     const target = await this.resolveMutationTarget({
       ...requestedLocationArgs(options.locationKind),
       defaultToWorkspace: true,
     });
+
+    const takenPaths = new Set(
+      (await target.backend.listFiles()).map((entry) => entry.path.toLowerCase()),
+    );
+    const renamed: ImportFilesResult["renamed"] = [];
+    const paths: string[] = [];
 
     let imported = 0;
     let importedBytes = 0;
@@ -1394,18 +1318,34 @@ export class FilesWorkspace {
         }
       }
 
+      let path = normalizedPath;
+      if (takenPaths.has(path.toLowerCase())) {
+        const dot = path.lastIndexOf(".");
+        const extensionStart = dot > path.lastIndexOf("/") + 1 ? dot : path.length;
+        const stem = path.slice(0, extensionStart);
+        const extension = path.slice(extensionStart);
+        for (let n = 2; takenPaths.has(path.toLowerCase()); n += 1) {
+          path = `${stem} (${n})${extension}`;
+        }
+      }
+      takenPaths.add(path.toLowerCase());
+      if (path !== normalizedPath) {
+        renamed.push({ from: normalizedPath, to: path });
+      }
+
       const bytes = new Uint8Array(await file.arrayBuffer());
       await target.backend.writeBytes(
-        normalizedPath,
+        path,
         bytes,
         inferMimeType(file.name, file.type),
       );
 
       if (target.locationKind === "workspace") {
-        await this.setWorkbookTagForPath(normalizedPath);
+        await this.setWorkbookTagForPath(path);
       }
 
       imported += 1;
+      paths.push(path);
       importedBytes += bytes.byteLength;
     }
 
@@ -1420,23 +1360,29 @@ export class FilesWorkspace {
       dispatchWorkspaceChanged({ reason: "import" });
     }
 
-    return imported;
+    return { imported, paths, renamed };
   }
 
   async listAuditEntries(limit = 40): Promise<FilesWorkspaceAuditEntry[]> {
-    if (!await this.ensureAuditLoaded()) return [];
-
     const safeLimit = Math.max(0, Math.min(limit, MAX_AUDIT_ENTRIES));
-    return this.auditEntries.slice(0, safeLimit);
+    return (await this.readAuditTrail()).slice(0, safeLimit);
   }
 
   async clearAuditTrail(_options: WorkspaceMutationOptions = {}): Promise<void> {
-    if (!await this.ensureAuditLoaded()) return;
-
-    this.auditEntries = [];
-    await this.persistAuditTrail();
+    await this.updateAuditTrail(() => []);
 
     dispatchWorkspaceChanged({ reason: "audit" });
+  }
+
+  beginDownload(): PendingWorkspaceDownload {
+    if (typeof document === "undefined") {
+      throw new Error("Downloads are not available in this environment.");
+    }
+
+    return {
+      download: (path) => this.downloadFile(path),
+      cancel: () => {},
+    };
   }
 
   async downloadFile(
@@ -1447,52 +1393,24 @@ export class FilesWorkspace {
       throw new Error("Downloads are not available in this environment.");
     }
 
-    const pendingWindow = window.open("", "_blank");
+    const normalizedPath = normalizeWorkspacePath(path);
+    const readResult = await this.readRawFile({
+      path: normalizedPath,
+      ...requestedLocationArgs(options.locationKind),
+    });
+    const result = readResult.result;
 
-    try {
-      const normalizedPath = normalizeWorkspacePath(path);
-      const readResult = await this.readRawFile({
-        path: normalizedPath,
-        ...requestedLocationArgs(options.locationKind),
-      });
-      const result = readResult.result;
+    const bytes = result.base64
+      ? base64ToBytes(result.base64)
+      : encodeTextUtf8(result.text ?? "");
 
-      const bytes = result.base64
-        ? base64ToBytes(result.base64)
-        : encodeTextUtf8(result.text ?? "");
+    const mimeType = result.mimeType && isTextMimeType(result.mimeType)
+      ? result.mimeType
+      : inferMimeType(result.name, result.mimeType);
 
-      const mimeType = result.mimeType && isTextMimeType(result.mimeType)
-        ? result.mimeType
-        : inferMimeType(result.name, result.mimeType);
+    const safeMimeType = resolveSafeBlobUrlMimeType(mimeType);
 
-      // Sanitize script-capable MIME types (HTML, SVG, JS) to prevent
-      // active-content execution at the app origin when opened via blob URL.
-      const safeMimeType = resolveSafeBlobUrlMimeType(mimeType);
-
-      const blob = new Blob([toArrayBuffer(bytes)], { type: safeMimeType });
-      const url = URL.createObjectURL(blob);
-
-      // Open a blank tab synchronously before async file IO (above) to keep
-      // user activation in Office WKWebView. Then navigate it to the blob URL.
-      // Fall back to <a download> when popups are blocked.
-      const openedInWindow = tryOpenDownloadWindow(url, pendingWindow);
-      if (!openedInWindow) {
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = result.name;
-        anchor.rel = "noopener";
-        anchor.style.display = "none";
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-      }
-
-      // Delay revocation so the opened window can finish loading the blob.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error) {
-      closeWindowSafely(pendingWindow);
-      throw error;
-    }
+    saveBlobAsFile(new Blob([toArrayBuffer(bytes)], { type: safeMimeType }), result.name);
   }
 
   async getContextSummary(currentWorkbookId: string | null): Promise<WorkspaceContextSummary> {

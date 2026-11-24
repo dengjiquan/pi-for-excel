@@ -10,6 +10,8 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 
+import { DEV_BASE_URL } from "../scripts/generate-dev-manifest.mjs";
+
 const TOKEN = "test-background-verify-token";
 const SCRIPT_PATH = "scripts/background-verify-bridge-server.mjs";
 const testCaByPort = new Map();
@@ -38,32 +40,23 @@ async function createTempCert() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-bg-verify-cert-"));
   const keyPath = path.join(dir, "key.pem");
   const certPath = path.join(dir, "cert.pem");
-  const result = spawnSync(
-    "openssl",
-    [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      keyPath,
-      "-out",
-      certPath,
-      "-subj",
-      "/CN=localhost",
-      "-addext",
-      "subjectAltName=DNS:localhost,IP:127.0.0.1",
-      "-days",
-      "1",
-      // Windows machines often carry a stale OPENSSL_CONF from other software;
-      // generate the cert without it.
-    ],
-    {
-      encoding: "utf8",
-      env: { ...process.env, OPENSSL_CONF: "" },
-    },
-  );
+  const result = spawnSync("openssl", [
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-keyout",
+    keyPath,
+    "-out",
+    certPath,
+    "-subj",
+    "/CN=localhost",
+    "-addext",
+    "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    "-days",
+    "1",
+  ], { encoding: "utf8", env: { ...process.env, OPENSSL_CONF: "" } });
 
   if (result.error) {
     await rm(dir, { recursive: true, force: true });
@@ -81,46 +74,35 @@ async function createTempCert() {
   };
 }
 
-function requestJson(
-  port,
-  requestPath,
-  body,
-  method = body === undefined ? "GET" : "POST",
-) {
+function requestJson(port, requestPath, body, method = body === undefined ? "GET" : "POST", origin) {
   const payload = body === undefined ? undefined : JSON.stringify(body);
   const ca = testCaByPort.get(port);
   assert.ok(ca, `missing test CA for port ${port}`);
   return new Promise((resolve, reject) => {
-    const req = https.request(
-      `https://127.0.0.1:${port}${requestPath}`,
-      {
-        method,
-        agent: new https.Agent({ ca }),
-        headers: payload
+    const req = https.request(`https://127.0.0.1:${port}${requestPath}`, {
+      method,
+      agent: new https.Agent({ ca }),
+      headers: {
+        ...(origin ? { origin } : {}),
+        ...(payload
           ? {
               "content-type": "application/json; charset=utf-8",
               "content-length": Buffer.byteLength(payload),
             }
-          : undefined,
+          : {}),
       },
-      (res) => {
-        let out = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => {
-          out += chunk;
-        });
-        res.on("end", () => {
-          try {
-            resolve({
-              statusCode: res.statusCode,
-              body: JSON.parse(out || "{}"),
-            });
-          } catch (error) {
-            reject(error);
-          }
-        });
-      },
-    );
+    }, (res) => {
+      let out = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { out += chunk; });
+      res.on("end", () => {
+        try {
+          resolve({ statusCode: res.statusCode, headers: res.headers, body: JSON.parse(out || "{}") });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
     req.on("error", reject);
     if (payload) req.end(payload);
     else req.end();
@@ -132,27 +114,23 @@ async function startBridge() {
   const cert = await createTempCert();
   testCaByPort.set(port, readFileSync(cert.certPath));
 
-  const child = spawn(
-    process.execPath,
-    [
-      SCRIPT_PATH,
-      "serve",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(port),
-      "--token",
-      TOKEN,
-      "--cert",
-      cert.certPath,
-      "--key",
-      cert.keyPath,
-    ],
-    {
-      cwd: process.cwd(),
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const child = spawn(process.execPath, [
+    SCRIPT_PATH,
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+    "--token",
+    TOKEN,
+    "--cert",
+    cert.certPath,
+    "--key",
+    cert.keyPath,
+  ], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let stdout = "";
   let stderr = "";
@@ -164,15 +142,11 @@ async function startBridge() {
       stdout += chunk;
       if (stdout.includes("background-verify] listening")) resolve(undefined);
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
   });
 
   const exitBeforeReady = once(child, "exit").then(([code, signal]) => {
-    throw new Error(
-      `bridge exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
-    );
+    throw new Error(`bridge exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`);
   });
 
   await Promise.race([
@@ -201,7 +175,7 @@ async function startBridge() {
 async function registerClient(port, label = "test-client") {
   const response = await requestJson(port, "/client/register", {
     token: TOKEN,
-    client: { href: `https://localhost:3000/${label}`, userAgent: "node-test" },
+    client: { href: `${DEV_BASE_URL}/${label}`, userAgent: "node-test" },
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.ok, true);
@@ -217,19 +191,11 @@ test("background verify bridge requires token and refuses commands without a tas
   assert.equal(health.statusCode, 200);
   assert.equal(health.body.ok, true);
 
-  const missingToken = await requestJson(bridge.port, "/command", {
-    type: "status",
-  });
+  const missingToken = await requestJson(bridge.port, "/command", { type: "status" });
   assert.equal(missingToken.statusCode, 400);
-  assert.match(
-    String(missingToken.body.error),
-    /Invalid background verification token/u,
-  );
+  assert.match(String(missingToken.body.error), /Invalid background verification token/u);
 
-  const noClient = await requestJson(bridge.port, "/command", {
-    token: TOKEN,
-    type: "status",
-  });
+  const noClient = await requestJson(bridge.port, "/command", { token: TOKEN, type: "status" });
   assert.equal(noClient.statusCode, 409);
   assert.match(String(noClient.body.error), /No taskpane client connected/u);
 });
@@ -239,10 +205,7 @@ test("background verify bridge rejects token-bearing GET poll requests", async (
   t.after(bridge.stop);
   const clientId = await registerClient(bridge.port);
 
-  const response = await requestJson(
-    bridge.port,
-    `/client/poll?token=${TOKEN}&clientId=${clientId}`,
-  );
+  const response = await requestJson(bridge.port, `/client/poll?token=${TOKEN}&clientId=${clientId}`);
   assert.equal(response.statusCode, 404);
   assert.match(String(response.body.error), /Not found/u);
 });
@@ -259,10 +222,7 @@ test("background verify bridge delivers a targeted command through poll and resu
     timeoutMs: 5000,
   });
 
-  const poll = await requestJson(bridge.port, "/client/poll", {
-    token: TOKEN,
-    clientId,
-  });
+  const poll = await requestJson(bridge.port, "/client/poll", { token: TOKEN, clientId });
   assert.equal(poll.statusCode, 200);
   assert.equal(poll.body.type, "status");
   assert.equal(typeof poll.body.id, "string");
@@ -288,15 +248,9 @@ test("background verify bridge rejects untargeted commands when multiple clients
   await registerClient(bridge.port, "one");
   await registerClient(bridge.port, "two");
 
-  const response = await requestJson(bridge.port, "/command", {
-    token: TOKEN,
-    type: "status",
-  });
+  const response = await requestJson(bridge.port, "/command", { token: TOKEN, type: "status" });
   assert.equal(response.statusCode, 409);
-  assert.match(
-    String(response.body.error),
-    /Multiple taskpane clients connected/u,
-  );
+  assert.match(String(response.body.error), /Multiple taskpane clients connected/u);
   assert.equal(response.body.clients.length, 2);
 });
 
@@ -305,11 +259,7 @@ test("background verify bridge removes stale poll waiters after timeout", async 
   t.after(bridge.stop);
   const clientId = await registerClient(bridge.port);
 
-  const poll = await requestJson(bridge.port, "/client/poll", {
-    token: TOKEN,
-    clientId,
-    timeoutMs: 10,
-  });
+  const poll = await requestJson(bridge.port, "/client/poll", { token: TOKEN, clientId, timeoutMs: 10 });
   assert.equal(poll.statusCode, 200);
   assert.equal(poll.body.type, "noop");
 
@@ -320,25 +270,23 @@ test("background verify bridge removes stale poll waiters after timeout", async 
 
 test("background verify bridge refuses valueless token flags", async () => {
   const port = await getFreePort();
-  const child = spawn(
-    process.execPath,
-    [SCRIPT_PATH, "serve", "--port", String(port), "--token"],
-    {
-      cwd: process.cwd(),
-      env: { ...process.env, PI_BACKGROUND_VERIFY_TOKEN: "" },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const child = spawn(process.execPath, [
+    SCRIPT_PATH,
+    "serve",
+    "--port",
+    String(port),
+    "--token",
+  ], {
+    cwd: process.cwd(),
+    env: { ...process.env, PI_BACKGROUND_VERIFY_TOKEN: "" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let output = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    output += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    output += chunk;
-  });
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
 
   const [code] = await Promise.race([
     once(child, "exit"),
@@ -354,33 +302,25 @@ test("background verify bridge refuses valueless token flags", async () => {
 
 test("background verify bridge refuses non-loopback bind hosts", async () => {
   const port = await getFreePort();
-  const child = spawn(
-    process.execPath,
-    [
-      SCRIPT_PATH,
-      "serve",
-      "--host",
-      "0.0.0.0",
-      "--port",
-      String(port),
-      "--token",
-      TOKEN,
-    ],
-    {
-      cwd: process.cwd(),
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const child = spawn(process.execPath, [
+    SCRIPT_PATH,
+    "serve",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    String(port),
+    "--token",
+    TOKEN,
+  ], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let output = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    output += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    output += chunk;
-  });
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
 
   const [code] = await Promise.race([
     once(child, "exit"),
@@ -392,4 +332,13 @@ test("background verify bridge refuses non-loopback bind hosts", async () => {
 
   assert.notEqual(code, 0);
   assert.match(output, /loopback only/u);
+});
+
+test("background verify bridge accepts the dev server origin", async (t) => {
+  const bridge = await startBridge();
+  t.after(bridge.stop);
+
+  const health = await requestJson(bridge.port, "/health", undefined, "GET", DEV_BASE_URL);
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.headers["access-control-allow-origin"], DEV_BASE_URL);
 });

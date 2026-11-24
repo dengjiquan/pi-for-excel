@@ -1,13 +1,6 @@
 /**
- * IndexedDB implementation of StorageBackend.
- * Provides multi-store key-value storage with transactions and quota management.
- *
  * Vendored from @earendil-works/pi-web-ui 0.75.3 (MIT, © Mario Zechner,
- * https://github.com/badlogic/pi-mono). See docs/ui-ownership.md.
- *
- * Schema compatibility invariant: this backend must open the existing
- * "pi-for-excel" database (same store names, key paths, and indices) so
- * pre-migration user data restores unchanged.
+ * https://github.com/badlogic/pi-mono).
  */
 
 import type { IndexedDBConfig, StorageTransaction } from "./types.js";
@@ -17,15 +10,25 @@ function toIdbError(error: DOMException | null): Error {
   return error ?? new Error("IndexedDB request failed");
 }
 
-/** All stores in this app use string (or numeric) keys; other key shapes are skipped. */
 function normalizeIdbKey(key: IDBValidKey): string[] {
   if (typeof key === "string") return [key];
   if (typeof key === "number") return [key.toString()];
   return [];
 }
 
+export const STORAGE_UPGRADE_BLOCKED_EVENT = "pi:storage-upgrade-blocked";
+export const STORAGE_VERSION_CHANGED_EVENT = "pi:storage-version-changed";
+
+function dispatchStorageEvent(type: string): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(type));
+}
+
 export class IndexedDBStorageBackend implements StorageBackend {
-  private dbPromise: Promise<IDBDatabase> | null = null;
+  private state:
+    | { kind: "unopened" }
+    | { kind: "opening"; promise: Promise<IDBDatabase> }
+    | { kind: "open"; db: IDBDatabase }
+    | { kind: "closed-for-upgrade" } = { kind: "unopened" };
   private readonly config: IndexedDBConfig;
 
   constructor(config: IndexedDBConfig) {
@@ -33,34 +36,51 @@ export class IndexedDBStorageBackend implements StorageBackend {
   }
 
   private async getDB(): Promise<IDBDatabase> {
-    if (!this.dbPromise) {
-      this.dbPromise = new Promise((resolve, reject) => {
-        const request = indexedDB.open(this.config.dbName, this.config.version);
-        request.onerror = () => reject(toIdbError(request.error));
-        request.onsuccess = () => resolve(request.result);
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          // Create object stores from config
-          for (const storeConfig of this.config.stores) {
-            if (db.objectStoreNames.contains(storeConfig.name)) continue;
+    if (this.state.kind === "closed-for-upgrade") throw new Error("Storage changed in another pane; reload required.");
+    if (this.state.kind === "open") return this.state.db;
+    if (this.state.kind === "opening") return this.state.promise;
 
-            const params: IDBObjectStoreParameters = {};
-            if (storeConfig.keyPath !== undefined) params.keyPath = storeConfig.keyPath;
-            if (storeConfig.autoIncrement !== undefined) {
-              params.autoIncrement = storeConfig.autoIncrement;
-            }
-            const store = db.createObjectStore(storeConfig.name, params);
-
-            for (const indexConfig of storeConfig.indices ?? []) {
-              const indexParams: IDBIndexParameters = {};
-              if (indexConfig.unique !== undefined) indexParams.unique = indexConfig.unique;
-              store.createIndex(indexConfig.name, indexConfig.keyPath, indexParams);
-            }
-          }
+    const promise = new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(this.config.dbName, this.config.version);
+      request.onerror = () => reject(toIdbError(request.error));
+      request.onblocked = () => dispatchStorageEvent(STORAGE_UPGRADE_BLOCKED_EVENT);
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => {
+          db.close();
+          this.state = { kind: "closed-for-upgrade" };
+          dispatchStorageEvent(STORAGE_VERSION_CHANGED_EVENT);
         };
-      });
-    }
-    return this.dbPromise;
+        resolve(db);
+      };
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        for (const storeConfig of this.config.stores) {
+          if (db.objectStoreNames.contains(storeConfig.name)) continue;
+
+          const params: IDBObjectStoreParameters = {};
+          if (storeConfig.keyPath !== undefined) params.keyPath = storeConfig.keyPath;
+          if (storeConfig.autoIncrement !== undefined) {
+            params.autoIncrement = storeConfig.autoIncrement;
+          }
+          const store = db.createObjectStore(storeConfig.name, params);
+
+          for (const indexConfig of storeConfig.indices ?? []) {
+            const indexParams: IDBIndexParameters = {};
+            if (indexConfig.unique !== undefined) indexParams.unique = indexConfig.unique;
+            store.createIndex(indexConfig.name, indexConfig.keyPath, indexParams);
+          }
+        }
+      };
+    }).then((db) => {
+      this.state = { kind: "open", db };
+      return db;
+    }, (error) => {
+      this.state = { kind: "unopened" };
+      throw error;
+    });
+    this.state = { kind: "opening", promise };
+    return promise;
   }
 
   private promisifyRequest<T>(request: IDBRequest<T>): Promise<T> {
@@ -70,7 +90,6 @@ export class IndexedDBStorageBackend implements StorageBackend {
     });
   }
 
-  /** Put honoring in-line (keyPath) vs out-of-line keys. */
   private putIntoStore(store: IDBObjectStore, key: string, value: unknown): Promise<IDBValidKey> {
     if (store.keyPath) {
       return this.promisifyRequest(store.put(value));
@@ -88,22 +107,21 @@ export class IndexedDBStorageBackend implements StorageBackend {
   }
 
   async set<T = unknown>(storeName: string, key: string, value: T): Promise<void> {
-    const db = await this.getDB();
-    const store = db.transaction(storeName, "readwrite").objectStore(storeName);
-    await this.putIntoStore(store, key, value);
+    await this.indexedTransaction([storeName], "readwrite", async (tx) => {
+      await this.putIntoStore(tx.objectStore(storeName), key, value);
+    });
   }
 
   async delete(storeName: string, key: string): Promise<void> {
-    const db = await this.getDB();
-    const store = db.transaction(storeName, "readwrite").objectStore(storeName);
-    await this.promisifyRequest(store.delete(key));
+    await this.indexedTransaction([storeName], "readwrite", async (tx) => {
+      await this.promisifyRequest(tx.objectStore(storeName).delete(key));
+    });
   }
 
   async keys(storeName: string, prefix?: string): Promise<string[]> {
     const db = await this.getDB();
     const store = db.transaction(storeName, "readonly").objectStore(storeName);
     if (prefix) {
-      // Use IDBKeyRange for efficient prefix filtering
       const range = IDBKeyRange.bound(prefix, `${prefix}\uffff`, false, false);
       const keys = await this.promisifyRequest(store.getAllKeys(range));
       return keys.flatMap(normalizeIdbKey);
@@ -137,9 +155,9 @@ export class IndexedDBStorageBackend implements StorageBackend {
   }
 
   async clear(storeName: string): Promise<void> {
-    const db = await this.getDB();
-    const store = db.transaction(storeName, "readwrite").objectStore(storeName);
-    await this.promisifyRequest(store.clear());
+    await this.indexedTransaction([storeName], "readwrite", async (tx) => {
+      await this.promisifyRequest(tx.objectStore(storeName).clear());
+    });
   }
 
   async has(storeName: string, key: string): Promise<boolean> {
@@ -154,26 +172,55 @@ export class IndexedDBStorageBackend implements StorageBackend {
     mode: "readonly" | "readwrite",
     operation: (tx: StorageTransaction) => Promise<T>,
   ): Promise<T> {
+    return this.indexedTransaction(storeNames, mode, async (idbTx) => {
+      const storageTx: StorageTransaction = {
+        get: async <V = unknown>(storeName: string, key: string): Promise<V | null> => {
+          const result = await this.promisifyRequest<V | undefined>(
+            idbTx.objectStore(storeName).get(key) as IDBRequest<V | undefined>,
+          );
+          return result ?? null;
+        },
+        set: async <V = unknown>(storeName: string, key: string, value: V): Promise<void> => {
+          await this.putIntoStore(idbTx.objectStore(storeName), key, value);
+        },
+        delete: async (storeName: string, key: string): Promise<void> => {
+          await this.promisifyRequest(idbTx.objectStore(storeName).delete(key));
+        },
+      };
+      return operation(storageTx);
+    });
+  }
+
+  async indexedTransaction<T>(
+    storeNames: string[],
+    mode: IDBTransactionMode,
+    operation: (tx: IDBTransaction) => Promise<T>,
+  ): Promise<T> {
     const db = await this.getDB();
     const idbTx = db.transaction(storeNames, mode);
-    const storageTx: StorageTransaction = {
-      get: async <V = unknown>(storeName: string, key: string): Promise<V | null> => {
-        const store = idbTx.objectStore(storeName);
-        const result = await this.promisifyRequest<V | undefined>(
-          store.get(key) as IDBRequest<V | undefined>,
-        );
-        return result ?? null;
-      },
-      set: async <V = unknown>(storeName: string, key: string, value: V): Promise<void> => {
-        const store = idbTx.objectStore(storeName);
-        await this.putIntoStore(store, key, value);
-      },
-      delete: async (storeName: string, key: string): Promise<void> => {
-        const store = idbTx.objectStore(storeName);
-        await this.promisifyRequest(store.delete(key));
-      },
-    };
-    return operation(storageTx);
+    const committed = new Promise<void>((resolve, reject) => {
+      idbTx.oncomplete = () => resolve();
+      idbTx.onabort = () => reject(toIdbError(idbTx.error));
+      idbTx.onerror = () => reject(toIdbError(idbTx.error));
+    });
+    void committed.catch(() => {});
+    let result: T;
+    try {
+      // A transaction can abort without delivering the pending request's
+      // error (Chromium's oversized structured-clone IPC is one example).
+      result = await Promise.race([
+        operation(idbTx),
+        committed.then(() => new Promise<never>(() => {})),
+      ]);
+    } catch (error) {
+      try {
+        idbTx.abort();
+      } catch {
+      }
+      throw error;
+    }
+    await committed;
+    return result;
   }
 
   async getQuotaInfo(): Promise<{ usage: number; quota: number; percent: number }> {

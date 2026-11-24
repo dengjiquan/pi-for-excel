@@ -2,7 +2,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 import { t } from "../language/index.js";
 
-export const THINKING_LEVEL_COLORS: Record<ThinkingLevel | "max", string> = {
+export const THINKING_LEVEL_COLORS: Record<ThinkingLevel, string> = {
   off: "#a0a0a0",
   minimal: "#767676",
   low: "#4488cc",
@@ -12,7 +12,7 @@ export const THINKING_LEVEL_COLORS: Record<ThinkingLevel | "max", string> = {
   max: "#af005f",
 };
 
-export function getThinkingLevelLabel(level: ThinkingLevel | "max"): string {
+export function getThinkingLevelLabel(level: ThinkingLevel): string {
   switch (level) {
     case "off":
       return t("status.thinking.off");
@@ -31,7 +31,7 @@ export function getThinkingLevelLabel(level: ThinkingLevel | "max"): string {
   }
 }
 
-export function getThinkingLevelHint(level: ThinkingLevel | "max"): string {
+export function getThinkingLevelHint(level: ThinkingLevel): string {
   switch (level) {
     case "off":
       return t("status.thinking.offHint");

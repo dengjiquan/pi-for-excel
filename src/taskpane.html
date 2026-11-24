@@ -1,11 +1,14 @@
 <!DOCTYPE html>
-<html lang="zh-CN" style="color-scheme: light dark">
+<html lang="en" style="color-scheme: light dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI for Excel</title>
   <meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#303040" media="(prefers-color-scheme: dark)" />
+
+  <!-- Office.js is vendored under /vendor: the hosted CDN stalls startup on flaky networks. -->
+  <script src="/vendor/office.js"></script>
 
   <style>
     /* Minimal structural reset — theme is in src/ui/theme.css */
@@ -45,8 +48,7 @@
     </div>
   </div>
 
-  <!-- Office.js — local dev cache avoids Office WebView startup stalls on flaky CDN/proxy paths. -->
-  <script src="/vendor/office.js"></script>
+  <script type="module" src="./boot.ts"></script>
   <script type="module" src="./taskpane.ts"></script>
 </body>
 </html>

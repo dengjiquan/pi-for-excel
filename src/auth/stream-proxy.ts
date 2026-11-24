@@ -1,18 +1,10 @@
-/**
- * Office taskpanes run in a browser webview.
- *
- * Many LLM providers (and especially subscription / OAuth-based flows) either:
- * - block browser requests via CORS, or
- * - require the "anthropic-dangerous-direct-browser-access" header, which some orgs disable.
- *
- * We route requests through a user-configured local CORS proxy when enabled.
- */
-
-import { uuidv7 } from "@earendil-works/pi-agent-core";
+import { t } from "../language/index.js";
 import {
+  createAssistantMessageEventStream,
   getCurrentSystemPrompt,
   getCurrentTools,
   hasApi,
+  uuidv7,
 } from "@earendil-works/pi-ai";
 import type {
   Api,
@@ -24,19 +16,14 @@ import type {
   TranscriptContext,
 } from "@earendil-works/pi-ai";
 
+import { AUTO_CONTEXT_PREFIX } from "../messages/auto-context.js";
+import { streamWithProviderFailure } from "./provider-failure.js";
 import { isDebugEnabled } from "../debug/debug.js";
-import {
-  selectToolBundle,
-  type ToolBundleId,
-} from "../context/tool-disclosure.js";
+import { selectToolBundle, type ToolBundleId } from "../context/tool-disclosure.js";
 import { modelRecencyScore } from "../models/model-ordering.js";
-import {
-  listOpenAiGatewayConfigs,
-  OPENAI_GATEWAY_PROVIDER_PREFIX,
-} from "./custom-gateways.js";
-import { getAppStorage } from "../storage/local/app-storage.js";
+import type { ProviderRoute } from "../models/browser-model-runtime.js";
+import { isPlainHttpRemoteEndpoint, OPENAI_GATEWAY_PROVIDER_PREFIX } from "./custom-gateways.js";
 import { rewriteDevProxyUrl } from "./dev-rewrites.js";
-import { isRecord } from "../utils/type-guards.js";
 import {
   createPrefixFingerprint,
   type PrefixChangeReason,
@@ -55,13 +42,16 @@ type OfficeStreamFn = (
   options?: StreamOptions,
 ) => Promise<AssistantMessageEventStream>;
 
+export type RuntimeProviderRoute = (providerId: string) => ProviderRoute | undefined;
+
 function shouldProxyProvider(
   provider: string,
   apiKey?: string,
-  isRuntimeProvider?: (providerId: string) => boolean,
+  runtimeProviderRoute?: RuntimeProviderRoute,
 ): boolean {
-  if (isRuntimeProvider?.(provider)) {
-    return true;
+  const route = runtimeProviderRoute?.(provider);
+  if (route !== undefined) {
+    return route === "proxy";
   }
 
   const p = provider.toLowerCase();
@@ -71,32 +61,36 @@ function shouldProxyProvider(
   }
 
   switch (p) {
-    // Known to require proxy in browser webviews (CORS blocked)
     case "openai-codex":
+    case "github-copilot":
       return true;
 
-    // DeepSeek's OpenAI-compatible endpoint does not reliably allow browser
-    // requests from Office webviews, so route through the configured proxy.
     case "deepseek":
       return true;
 
-    // Anthropic OAuth tokens are blocked by CORS; some orgs also block direct browser access.
-    // We proxy OAuth tokens (sk-ant-oat-*) unconditionally.
     case "anthropic":
       return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 
-    // Google Cloud Code Assist providers frequently require proxy in Office webviews.
     case "google-gemini-cli":
     case "google-antigravity":
       return true;
 
-    // Z-AI always requires proxy (matches pi-web-ui default)
     case "zai":
       return true;
 
     default:
       return false;
   }
+}
+
+/**
+ * Office serves the taskpane over HTTPS, so its webview blocks plain-http requests to other
+ * machines as mixed content and pi-ai only reports "Connection error.". Explain it instead.
+ */
+function assertDirectRequestAllowed(model: Model<Api>): void {
+  if (!isPlainHttpRemoteEndpoint(model.baseUrl)) return;
+
+  throw new Error(t("custom-gateway.error.plainHttpBlocked", { provider: model.provider, url: model.baseUrl }));
 }
 
 type OfficeProxyTransport = "codex-websocket";
@@ -111,16 +105,8 @@ function applyProxy(
 
   const normalizedProxy = normalizeProxyUrl(proxyUrl);
 
-  // Avoid double-proxying
   if (model.baseUrl.startsWith(`${normalizedProxy}/?`)) return model;
-
-  // ponytail: dev-mode Vite /api-proxy/ routes are same-origin on the taskpane
-  // and already handle CORS + forwarding; wrapping them through the cors-proxy
-  // makes node fetch a self-signed localhost cert (502). Let the browser hit Vite directly.
-  // import.meta.env only exists under Vite; node tests run without it.
-  if (import.meta.env?.DEV === true && model.baseUrl.includes("/api-proxy/")) {
-    return model;
-  }
+  if (import.meta.env?.DEV === true && model.baseUrl.includes("/api-proxy/")) return model;
 
   const transportQuery = transport ? `pi_transport=${transport}&` : "";
   return {
@@ -130,7 +116,6 @@ function applyProxy(
 }
 
 function applyDevProxy(model: Model<Api>): Model<Api> {
-  // ponytail: import.meta.env only exists under Vite; node tests run without it
   if (!import.meta.env?.DEV) return model;
   if (!model.baseUrl) return model;
   if (!/^https?:\/\//i.test(model.baseUrl)) return model;
@@ -140,26 +125,18 @@ function applyDevProxy(model: Model<Api>): Model<Api> {
   const rewritten = rewriteDevProxyUrl(`${baseUrl}/`);
   if (!rewritten) return model;
 
-  return {
-    ...model,
-    baseUrl: `${window.location.origin}${rewritten.replace(/\/+$/, "")}`,
-  };
+  return { ...model, baseUrl: `${window.location.origin}${rewritten.replace(/\/+$/, "")}` };
 }
 
-export function requiresCodexWebSocketBridge(
-  model: Pick<Model<Api>, "id" | "provider">,
-): boolean {
+export function requiresCodexWebSocketBridge(model: Pick<Model<Api>, "id" | "provider">): boolean {
   return model.provider === "openai-codex" && model.id === "gpt-5.6-luna";
 }
 
 type GoogleOAuthProvider = "google-gemini-cli" | "google-antigravity";
 
-const GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL =
-  "https://cloudcode-pa.googleapis.com";
+const GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL = "https://cloudcode-pa.googleapis.com";
 
-function isGoogleOAuthProvider(
-  provider: string,
-): provider is GoogleOAuthProvider {
+function isGoogleOAuthProvider(provider: string): provider is GoogleOAuthProvider {
   return provider === "google-gemini-cli" || provider === "google-antigravity";
 }
 
@@ -189,10 +166,7 @@ function pickPreferredGoogleOAuthModel(
   return geminiAny[geminiAny.length - 1] ?? null;
 }
 
-function normalizeGoogleOAuthModel(
-  modelsRuntime: Models,
-  model: Model<Api>,
-): Model<Api> {
+function normalizeGoogleOAuthModel(modelsRuntime: Models, model: Model<Api>): Model<Api> {
   const provider = model.provider;
   if (!isGoogleOAuthProvider(provider)) {
     return model;
@@ -201,10 +175,7 @@ function normalizeGoogleOAuthModel(
   let normalized: Model<Api> = model;
 
   if (/preview/i.test(normalized.id)) {
-    const fallbackModel = pickPreferredGoogleOAuthModel(
-      modelsRuntime,
-      provider,
-    );
+    const fallbackModel = pickPreferredGoogleOAuthModel(modelsRuntime, provider);
     if (fallbackModel) {
       normalized = fallbackModel;
     }
@@ -220,44 +191,27 @@ function normalizeGoogleOAuthModel(
   return normalized;
 }
 
-/**
- * Is this call a tool-result continuation?
- *
- * Used for debug/telemetry (payload snapshots and status pills), not for
- * capability gating. Continuations still receive a deterministic tool bundle
- * so the agent can complete multi-step tool loops in a single turn.
- */
 function isToolContinuation(messages: TranscriptContext["messages"]): boolean {
-  if (messages.length === 0) return false;
-  const last = messages[messages.length - 1];
-  if (!last) return false;
-  return last.role === "toolResult";
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message) return false;
+    const isAutoContext = message.role === "user" && typeof message.content !== "string"
+      && message.content[0]?.type === "text" && message.content[0].text.startsWith(AUTO_CONTEXT_PREFIX);
+    if (!isAutoContext) return message.role === "toolResult";
+  }
+  return false;
 }
 
-// ---------------------------------------------------------------------------
-// Payload stats — lightweight counters for debug pill in status bar.
-// ---------------------------------------------------------------------------
-
 export interface PayloadStats {
-  /** LLM calls since app start. */
   calls: number;
-  /** Chars of system prompt on last call. */
   systemChars: number;
-  /** Chars of tool schemas (compact JSON) on last call, 0 if no tools. */
   toolSchemaChars: number;
-  /** Number of tool definitions on last call, 0 if no tools. */
   toolCount: number;
-  /** Number of messages on last call. */
   messageCount: number;
-  /** Total chars of all messages (JSON-serialized) on last call. */
   messageChars: number;
-  /** Number of calls where cached prefix fingerprint changed within a session. */
   prefixChanges: number;
-  /** Prefix changes attributed to model identity changes. */
   prefixModelChanges: number;
-  /** Prefix changes attributed to system prompt changes. */
   prefixSystemPromptChanges: number;
-  /** Prefix changes attributed to tool schema changes. */
   prefixToolChanges: number;
 }
 
@@ -301,30 +255,12 @@ const stats: PayloadStats = {
   prefixToolChanges: 0,
 };
 
-/**
- * Debug retention limits.
- *
- * Why 24?
- * - Large enough to inspect recent multi-step tool loops in one session
- *   (typically several user turns with follow-up calls).
- * - Small enough to keep memory bounded in long-lived taskpane sessions.
- *
- * If we need deeper forensic traces, we can raise this temporarily,
- * but should keep it bounded to avoid silent memory growth.
- */
 const MAX_PAYLOAD_SNAPSHOTS = 24;
 
-/**
- * Number of session-scoped contexts kept for debug inspection.
- *
- * This is separate from the per-call ring buffer above and is capped for
- * the same reason: preserve useful visibility without unbounded retention.
- */
 const MAX_SESSION_CONTEXTS = 24;
 
 const payloadSnapshots: PayloadSnapshot[] = [];
 
-/** Snapshot of the last LLM context (only kept when debug is on). */
 let lastContext: Context | undefined;
 const lastContextBySession = new Map<string, Context>();
 const prefixChangeTracker = new PrefixChangeTracker({
@@ -353,20 +289,19 @@ function getSessionId(options: StreamOptions | undefined): string | undefined {
   return sessionId;
 }
 
-function isAuthStreamProxyPayloadShape(
-  value: unknown,
-): value is Record<string, unknown> {
+function isAuthStreamProxyPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeDeepSeekPayload(payload: unknown): unknown {
-  if (!isRecord(payload)) return payload;
-  if (!Array.isArray(payload.messages)) return payload;
+function normalizeDeepSeekPayload<TPayload>(payload: TPayload): TPayload {
+  if (!isAuthStreamProxyPayloadShape(payload)) return payload;
+  const rawMessages: unknown = payload.messages;
+  if (!Array.isArray(rawMessages)) return payload;
 
   let changed = false;
-  const sourceMessages: unknown[] = payload.messages;
+  const sourceMessages: ReadonlyArray<Record<string, unknown>> = rawMessages;
   const messages = sourceMessages.map((message) => {
-    if (!isRecord(message) || message.role !== "developer") {
+    if (message.role !== "developer") {
       return message;
     }
 
@@ -435,7 +370,6 @@ function pushSnapshot(snapshot: PayloadSnapshot): void {
 }
 
 function setSessionContext(sessionId: string, context: Context): void {
-  // Refresh insertion order to behave like an LRU cache.
   if (lastContextBySession.has(sessionId)) {
     lastContextBySession.delete(sessionId);
   }
@@ -498,10 +432,7 @@ function recordCall(
 
   const sessionId = getSessionId(options);
   const prefixFingerprint = createPrefixFingerprint(model, context);
-  const prefixChangeReasons = prefixChangeTracker.observe(
-    sessionId,
-    prefixFingerprint,
-  );
+  const prefixChangeReasons = prefixChangeTracker.observe(sessionId, prefixFingerprint);
   const prefixChanged = prefixChangeReasons.length > 0;
 
   if (prefixChanged) {
@@ -531,8 +462,7 @@ function recordCall(
       setSessionContext(sessionId, context);
     }
 
-    const totalChars =
-      stats.systemChars + stats.toolSchemaChars + stats.messageChars;
+    const totalChars = stats.systemChars + stats.toolSchemaChars + stats.messageChars;
     const snapshot: PayloadSnapshot = {
       call,
       timestamp: Date.now(),
@@ -568,49 +498,32 @@ function withPayloadHook(
 ): StreamOptions | undefined {
   const originalOnPayload = options?.onPayload;
   const normalizePayload = model.provider === "deepseek";
-  if (!captureSnapshot && !originalOnPayload && !normalizePayload)
-    return options;
+  if (!captureSnapshot && !originalOnPayload && !normalizePayload) return options;
 
-  const onPayload: NonNullable<StreamOptions["onPayload"]> = (
-    payload,
-    model,
-  ) => {
-    const effectivePayload = normalizePayload
-      ? normalizeDeepSeekPayload(payload)
-      : payload;
-
+  const onPayload: NonNullable<StreamOptions["onPayload"]> = (payload, callbackModel) => {
+    const effectivePayload = normalizePayload ? normalizeDeepSeekPayload(payload) : payload;
     if (captureSnapshot) {
       upsertPayloadShape(call, effectivePayload);
     }
-    return originalOnPayload?.(effectivePayload, model) ?? effectivePayload;
+    return originalOnPayload?.(effectivePayload, callbackModel) ?? effectivePayload;
   };
 
   if (options) return { ...options, onPayload };
   return { onPayload };
 }
 
-/**
- * Create a StreamFn compatible with Agent that proxies provider base URLs when needed.
- */
-interface CodexBridgeCapabilityCacheEntry {
-  checkedAt: number;
-  supported: boolean;
-}
+type CodexBridgeCapabilityCacheEntry =
+  | { kind: "probing" }
+  | { kind: "ready"; checkedAt: number; supported: boolean };
 
 const CODEX_BRIDGE_SUPPORTED_TTL_MS = 60_000;
 const CODEX_BRIDGE_UNAVAILABLE_TTL_MS = 3_000;
 const MAX_CODEX_BRIDGE_SESSION_IDS = 256;
-const UUID_V7_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const codexBridgeCapabilityCache = new Map<
-  string,
-  CodexBridgeCapabilityCacheEntry
->();
+const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const codexBridgeCapabilityCache = new Map<string, CodexBridgeCapabilityCacheEntry>();
 const codexBridgeSessionIds = new Map<string, string>();
 
-export function resolveCodexWebSocketBridgeSessionId(
-  sessionId?: string,
-): string {
+export function resolveCodexWebSocketBridgeSessionId(sessionId?: string): string {
   if (sessionId && UUID_V7_PATTERN.test(sessionId)) {
     return sessionId;
   }
@@ -636,83 +549,62 @@ export function resolveCodexWebSocketBridgeSessionId(
   return generated;
 }
 
-async function proxySupportsCodexWebSocketBridge(
-  proxyUrl: string,
-): Promise<boolean> {
+async function proxySupportsCodexWebSocketBridge(proxyUrl: string): Promise<boolean> {
   const normalized = normalizeProxyUrl(proxyUrl);
   const cached = codexBridgeCapabilityCache.get(normalized);
-  const cacheTtlMs = cached?.supported
-    ? CODEX_BRIDGE_SUPPORTED_TTL_MS
-    : CODEX_BRIDGE_UNAVAILABLE_TTL_MS;
-  if (cached && Date.now() - cached.checkedAt < cacheTtlMs) {
-    return cached.supported;
+  if (cached?.kind === "ready") {
+    const cacheTtlMs = cached.supported ? CODEX_BRIDGE_SUPPORTED_TTL_MS : CODEX_BRIDGE_UNAVAILABLE_TTL_MS;
+    if (Date.now() - cached.checkedAt < cacheTtlMs) return cached.supported;
   }
 
+  const probe: CodexBridgeCapabilityCacheEntry = { kind: "probing" };
+  codexBridgeCapabilityCache.set(normalized, probe);
   const supported = await probeCodexWebSocketBridge(normalized);
-  codexBridgeCapabilityCache.set(normalized, {
-    checkedAt: Date.now(),
-    supported,
-  });
+  if (codexBridgeCapabilityCache.get(normalized) === probe) {
+    codexBridgeCapabilityCache.set(normalized, { kind: "ready", checkedAt: Date.now(), supported });
+  }
   return supported;
 }
 
-/**
- * Gateway header injection: custom gateways may require provider-specific
- * headers (e.g. x-opencode-session for opencode Console Go routing) on every
- * request. The stored gateway record is the source of truth, so the headers
- * survive even when the in-memory model object was rebuilt from a dynamic
- * model refresh that drops them.
- */
-async function applyGatewayHeaders(
-  model: Model<Api>,
-  options: StreamOptions | undefined,
-): Promise<StreamOptions | undefined> {
-  if (
-    !model.provider
-      .toLowerCase()
-      .startsWith(OPENAI_GATEWAY_PROVIDER_PREFIX.toLowerCase())
-  ) {
-    return options;
-  }
-
-  // ponytail: per-stream IndexedDB read; cache if the gateway list grows
-  const gateways = await listOpenAiGatewayConfigs(
-    getAppStorage().customProviders,
-  );
-  const gateway = gateways.find(
-    (entry) => entry.providerName === model.provider,
-  );
-  if (!gateway?.headers) {
-    return options;
-  }
-
-  return {
-    ...options,
-    headers: { ...gateway.headers, ...options?.headers },
-  };
-}
-
 function normalizeOpenRouterModel(model: Model<Api>): Model<Api> {
-  if (model.provider !== "openrouter" || !hasApi(model, "anthropic-messages"))
-    return model;
+  if (model.provider !== "openrouter" || !hasApi(model, "anthropic-messages")) return model;
   if (!model.compat?.supportsMidConvoEffort) return model;
-  // OpenRouter rejects the configuration_update beta; ordinary adaptive effort works.
-  return {
-    ...model,
-    compat: { ...model.compat, supportsMidConvoEffort: false },
-  };
+  return { ...model, compat: { ...model.compat, supportsMidConvoEffort: false } };
 }
 
 export function createOfficeStreamFn(
   getProxyUrl: GetProxyUrl,
   modelsRuntime: Models,
-  isRuntimeProvider?: (providerId: string) => boolean,
+  runtimeProviderRoute?: RuntimeProviderRoute,
 ): OfficeStreamFn {
-  return async (
-    model: Model<Api>,
-    context: TranscriptContext,
-    options?: StreamOptions,
-  ) => {
+  return async (model: Model<Api>, context: TranscriptContext, options?: StreamOptions) => {
+    if (options?.signal?.aborted) {
+      const stream = createAssistantMessageEventStream();
+      stream.push({
+        type: "error",
+        reason: "aborted",
+        error: {
+          role: "assistant",
+          content: [],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "aborted",
+          errorMessage: "Request aborted",
+          timestamp: Date.now(),
+        },
+      });
+      return stream;
+    }
+
     const continuation = isToolContinuation(context.messages);
     const replayedContext: Context = {
       systemPrompt: getCurrentSystemPrompt(context.messages),
@@ -722,79 +614,51 @@ export function createOfficeStreamFn(
 
     const toolSelection = selectToolBundle(replayedContext);
 
-    const normalizedModel = applyDevProxy(
-      normalizeOpenRouterModel(normalizeGoogleOAuthModel(modelsRuntime, model)),
-    );
-
-    const optionsWithGatewayHeaders = await applyGatewayHeaders(
-      normalizedModel,
-      options,
-    );
+    const normalizedModel = applyDevProxy(normalizeOpenRouterModel(normalizeGoogleOAuthModel(modelsRuntime, model)));
 
     const callRecord = recordCall(
       normalizedModel,
       replayedContext,
-      optionsWithGatewayHeaders,
+      options,
       continuation,
       toolSelection.bundleId,
     );
-    const effectiveOptions = withPayloadHook(
-      optionsWithGatewayHeaders,
-      callRecord.call,
-      callRecord.captureSnapshot,
-      normalizedModel,
-    );
+    const effectiveOptions = withPayloadHook(options, callRecord.call, callRecord.captureSnapshot, normalizedModel);
 
     const proxyUrl = await getProxyUrl();
     const needsCodexBridge = requiresCodexWebSocketBridge(normalizedModel);
-    const needsOpenRouterProxy =
-      normalizedModel.provider === "openrouter" &&
-      normalizedModel.api === "anthropic-messages";
+    const needsOpenRouterProxy = normalizedModel.provider === "openrouter"
+      && normalizedModel.api === "anthropic-messages";
     if (!proxyUrl) {
       if (needsOpenRouterProxy) {
         throw new Error(
           "OpenRouter's native Anthropic transport requires the Pi for Excel proxy in this browser. " +
-            "Enable Proxy in Settings and run the latest pi-for-excel-proxy helper.",
+          "Enable Proxy in Settings and run the latest pi-for-excel-proxy helper.",
         );
       }
       if (needsCodexBridge) {
         throw new Error(
           "GPT-5.6 Luna currently requires the latest Pi for Excel proxy for ChatGPT WebSocket transport. " +
-            "Enable Proxy in Settings and run: npx -y pi-for-excel-proxy@latest",
+          "Enable Proxy in Settings and run: npx -y pi-for-excel-proxy@latest",
         );
       }
-      return modelsRuntime.streamSimple(
-        normalizedModel,
-        context,
-        effectiveOptions,
-      );
+      assertDirectRequestAllowed(normalizedModel);
+      return streamWithProviderFailure((requestOptions) => modelsRuntime.streamSimple(normalizedModel, context, requestOptions), effectiveOptions);
     }
 
-    if (
-      !needsOpenRouterProxy &&
-      !shouldProxyProvider(
-        normalizedModel.provider,
-        options?.apiKey,
-        isRuntimeProvider,
-      )
-    ) {
-      return modelsRuntime.streamSimple(
-        normalizedModel,
-        context,
-        effectiveOptions,
-      );
+    if (!needsOpenRouterProxy && !shouldProxyProvider(normalizedModel.provider, options?.apiKey, runtimeProviderRoute)) {
+      assertDirectRequestAllowed(normalizedModel);
+      return streamWithProviderFailure((requestOptions) => modelsRuntime.streamSimple(normalizedModel, context, requestOptions), effectiveOptions);
     }
 
-    // Guardrails: fail fast for known-bad proxy configs (e.g., HTTP proxy from HTTPS taskpane).
     const validated = validateOfficeProxyUrl(proxyUrl);
     let proxyTransport: OfficeProxyTransport | undefined;
     if (needsCodexBridge) {
-      const bridgeSupported =
-        await proxySupportsCodexWebSocketBridge(validated);
+      const bridgeSupported = await proxySupportsCodexWebSocketBridge(validated);
       if (!bridgeSupported) {
         throw new Error(
           "GPT-5.6 Luna requires a newer Pi for Excel proxy with ChatGPT WebSocket support. " +
-            "Restart with: npx -y pi-for-excel-proxy@latest (central deployments: ask your administrator to upgrade the proxy).",
+          "Restart with: npx -y pi-for-excel-proxy@latest (central deployments: ask your administrator to upgrade the proxy).",
         );
       }
       proxyTransport = "codex-websocket";
@@ -803,18 +667,14 @@ export function createOfficeStreamFn(
     const proxiedOptions: StreamOptions | undefined = proxyTransport
       ? {
           ...effectiveOptions,
-          // Native Pi sessions use UUIDv7. ChatGPT's Codex router can assign an
-          // unavailable Luna rollout alias to older UUIDv4 session identifiers.
-          sessionId: resolveCodexWebSocketBridgeSessionId(
-            effectiveOptions?.sessionId,
-          ),
+          sessionId: resolveCodexWebSocketBridgeSessionId(effectiveOptions?.sessionId),
           transport: "sse",
         }
       : effectiveOptions;
-    return modelsRuntime.streamSimple(
+    return streamWithProviderFailure((requestOptions) => modelsRuntime.streamSimple(
       applyProxy(normalizedModel, validated, proxyTransport),
       context,
-      proxiedOptions,
-    );
+      requestOptions,
+    ), proxiedOptions);
   };
 }

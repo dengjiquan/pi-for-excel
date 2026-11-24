@@ -1,96 +1,8 @@
-/* ── Tool group wrapper ───────────────────────────────── */
-
-.pi-tool-group {
-  display: flex;
-  flex-direction: column;
-  background: var(--pill-green-bg);
-  border: var(--pill-green-border);
-  border-radius: var(--pill-radius);
-}
-
-/* Breathing room under the last row when expanded (collapsed groups are
-   header-only and stay symmetric without it). */
-.pi-tool-group:not(.pi-tool-group--collapsed) {
-  padding-bottom: 4px;
-}
-
-/* Group header — collapsible summary */
-.pi-tool-group__header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  /* Horizontal padding matches standalone pill cards (--pill-padding-x). */
-  padding: 6px var(--pill-padding-x);
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
-  color: var(--muted-foreground);
-  text-align: left;
-  transition: color var(--duration-fast);
-}
-
-.pi-tool-group__header:hover {
-  color: var(--foreground);
-}
-
-.pi-tool-group__chevron {
-  font-size: var(--text-xs);
-  transition: transform var(--duration-fast);
-  flex-shrink: 0;
-}
-
-.pi-tool-group:not(.pi-tool-group--collapsed) .pi-tool-group__chevron {
-  transform: rotate(90deg);
-}
-
-.pi-tool-group__label {
-  font-weight: 500;
-}
-
-/* Collapsed — hide individual tool cards */
-.pi-tool-group--collapsed > tool-message {
-  display: none;
-}
-
-/* Rows inside group */
-.pi-tool-group > tool-message {
-  padding: 1px 6px;
-}
-
-/* Divider between rows */
-.pi-tool-group > tool-message + tool-message {
-  border-top: 1px solid oklch(0.45 0.12 160 / 0.07);
-}
-
-/* Fallback wrapper for tool messages that don't use custom renderers. */
-.pi-tool-card-fallback {
-  padding: 10px;
-  border: 1px solid var(--border);
-  background: var(--pi-inner-bg);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 1px 3px var(--alpha-4);
-}
-
-/* Default JSON tool renderer (no registered custom renderer) */
 .pi-tool-fallback {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
-
-.pi-tool-fallback__header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-sm);
-  color: var(--muted-foreground);
-}
-
-.pi-tool-fallback__header[data-state="complete"] svg { color: var(--pi-green-strong); }
-.pi-tool-fallback__header[data-state="error"] svg { color: var(--destructive); }
 
 .pi-tool-fallback__label {
   margin-bottom: 4px;
@@ -99,20 +11,14 @@
   color: var(--muted-foreground);
 }
 
-/* KaTeX defense — if math extensions somehow render despite the policy,
-   prevent the serif/italic font from leaking into the sidebar. This is
-   a CSS safety net that works regardless of which `marked` instance
-   produced the HTML. */
 markdown-block .katex,
 markdown-block .katex * {
   font-family: var(--font-sans) !important;
   font-style: normal !important;
 }
 
-/* Markdown — readable at sidebar width */
 markdown-block { line-height: 1.6; }
 
-/* Inner container rendered by <markdown-block> */
 .pi-markdown {
   color: var(--foreground);
   overflow-wrap: anywhere;
@@ -129,12 +35,10 @@ markdown-block { line-height: 1.6; }
   font-size: var(--text-sm);
 }
 
-/* Fenced code wrapper emitted by <markdown-block> */
 .pi-md-code {
   margin-top: 8px;
 }
 
-/* Table overflow wrapper emitted by <markdown-block> */
 .pi-md-table-wrap {
   overflow-x: auto;
   margin: 8px 0;
@@ -153,7 +57,6 @@ markdown-block code:not(.hljs) {
   border-radius: var(--radius-xs);
 }
 
-/* First-party markdown typography (previously app.css `.markdown-content`) */
 markdown-block a {
   color: var(--pi-green-strong);
   text-decoration: underline;
@@ -217,8 +120,6 @@ markdown-block pre {
   line-height: 1.5;
 }
 
-/* ── Code blocks (<code-block>) ────────────────────── */
-
 .pi-code {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -274,8 +175,6 @@ markdown-block pre {
   color: var(--foreground);
 }
 
-/* Minimal first-party highlight.js theme (sidebar-calm colors).
-   Owned here so syntax coloring survives dropping pi-web-ui's app.css. */
 .hljs { background: transparent; }
 .hljs-comment, .hljs-quote { color: var(--muted-foreground); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-type { color: oklch(0.45 0.16 280); }
@@ -286,9 +185,8 @@ markdown-block pre {
 .hljs-symbol, .hljs-bullet, .hljs-meta { color: oklch(0.5 0.1 320); }
 .hljs-deletion { color: var(--destructive); }
 .hljs-emphasis { font-style: italic; }
-.hljs-strong { font-weight: 700; }
+.hljs-strong { font-weight: 600; }
 
-/* Thinking blocks — green card matching tool cards, left-aligned */
 thinking-block {
   font-size: var(--text-base);
   font-family: var(--font-sans);
@@ -303,6 +201,10 @@ thinking-block .thinking-header {
   display: flex;
   align-items: center;
   gap: 8px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-family: inherit;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
@@ -327,11 +229,9 @@ thinking-block .thinking-header:hover {
   transform: rotate(90deg);
 }
 
-/* Move chevron to the right to match tool cards */
 thinking-block .thinking-header > span:first-child { order: 2; }
 thinking-block .thinking-header > span:last-child { order: 1; }
 
-/* Expanded body — white inner pill matching tool card __inner */
 thinking-block markdown-block {
   display: block;
   padding: 10px 14px 14px;
@@ -346,13 +246,11 @@ thinking-block markdown-block {
   overscroll-behavior: contain;
 }
 
-/* Compact heading scale for thinking blocks — override the global
-   markdown-block heading rules which are sized for the message body. */
 thinking-block markdown-block h1,
 thinking-block markdown-block h2,
 thinking-block markdown-block h3 {
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: 600;
   margin: 8px 0 4px;
 }
 thinking-block markdown-block h4,
@@ -363,7 +261,6 @@ thinking-block markdown-block h6 {
   margin: 6px 0 3px;
 }
 
-/* Shimmering "Thinking…" label while streaming (first-party shimmer). */
 .pi-thinking-label--streaming {
   background: linear-gradient(
     90deg,
@@ -383,7 +280,6 @@ thinking-block markdown-block h6 {
   to { background-position: -200% 0; }
 }
 
-/* Spinner on thinking header while streaming. */
 .pi-thinking-label--streaming::before {
   content: "";
   display: inline-block;
@@ -405,25 +301,12 @@ thinking-block markdown-block h6 {
 }
 
 
-/* Ctrl+O toggle — thinking blocks: strip card chrome like complete tool cards */
-.pi-hide-internals thinking-block .thinking-block {
-  border: none;
-  background: none;
-  border-radius: 0;
-}
-.pi-hide-internals thinking-block .thinking-header {
-  padding: 2px 4px;
-  opacity: 0.55;
+thinking-block .thinking-header:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: var(--pill-radius);
 }
 
-/* Ctrl+O toggle — tool cards: keep normal card styling.
-   (We collapse/expand the tool body by toggling max-h-* classes in JS.) */
-
-.pi-hide-internals .pi-assistant-body {
-  gap: 8px;
-}
-
-/* Abort message — clear separator + icon-labelled status */
 .pi-assistant-aborted {
   display: flex;
   align-items: center;
@@ -439,7 +322,6 @@ thinking-block markdown-block h6 {
   letter-spacing: 0.01em;
 }
 
-/* Filled stop square (universal "stop" symbol) */
 .pi-assistant-aborted::before {
   content: "";
   display: block;
@@ -454,7 +336,6 @@ thinking-block markdown-block h6 {
   opacity: 0.7;
 }
 
-/* Streaming cursor — hidden; the pi-working indicator already signals activity */
 .pi-streaming-cursor {
   display: none;
 }

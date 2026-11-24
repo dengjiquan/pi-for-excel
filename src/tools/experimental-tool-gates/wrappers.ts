@@ -2,6 +2,10 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
 import { assessOfficeJsCodeRisk } from "./office-js-risk.js";
 import {
+  wrapExtensionsManagerToolWithChangeGate,
+  wrapFilesToolWithChangeGate,
+} from "./local-change-gates.js";
+import {
   buildPythonBridgeGateErrorMessage,
   buildTmuxBridgeGateErrorMessage,
   defaultGetApprovedPythonBridgeUrl,
@@ -12,12 +16,13 @@ import {
 import {
   EXECUTE_OFFICE_JS_TOOL_NAME,
   EXECUTE_WPS_JS_TOOL_NAME,
+  EXTENSIONS_MANAGER_TOOL_NAME,
+  FILES_TOOL_NAME,
   PYTHON_BRIDGE_ONLY_TOOL_NAMES,
   PYTHON_FALLBACK_TOOL_NAMES,
   TMUX_TOOL_NAME,
   type ExperimentalToolGateDependencies,
   type OfficeJsExecuteApprovalRequest,
-  type PythonBridgeApprovalRequest,
   type PythonBridgeGateReason,
   type TmuxBridgeGateReason,
 } from "./types.js";
@@ -28,6 +33,7 @@ import type {
   TmuxBridgeDetails,
 } from "../tool-details.js";
 import { isUnsupportedHostTool } from "../unsupported-host-tool.js";
+import { ToolStoppedError } from "../tool-stopped.js";
 
 function isExperimentalGateParamsShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -43,7 +49,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
     return;
   }
 
-  throw new Error("Aborted");
+  throw new ToolStoppedError();
 }
 
 function getTmuxActionFromParams(params: unknown): string {
@@ -190,13 +196,6 @@ export function buildPythonBridgeApprovalMessage(
   return `${title}\n\nTool: ${toolName}\nBridge: ${bridgeUrl}`;
 }
 
-function defaultRequestPythonBridgeApproval(
-  _request: PythonBridgeApprovalRequest,
-): Promise<boolean> {
-  // Fails open when no UI approval handler is injected.
-  return Promise.resolve(true);
-}
-
 export function buildOfficeJsExecuteApprovalMessage(
   request: OfficeJsExecuteApprovalRequest,
 ): string {
@@ -240,11 +239,13 @@ function defaultRequestOfficeJsExecuteApproval(
 }
 
 function getDirectJsExecuteApprovalRequest(
+  toolCallId: string,
   params: unknown,
   apiName: "Office.js" | "WPS JSAPI",
 ): OfficeJsExecuteApprovalRequest {
   if (!isExperimentalGateParamsShape(params)) {
     return {
+      toolCallId,
       explanation: "",
       code: "",
       apiName,
@@ -260,6 +261,7 @@ function getDirectJsExecuteApprovalRequest(
     : "";
 
   return {
+    toolCallId,
     explanation,
     code,
     apiName,
@@ -277,9 +279,8 @@ function wrapTmuxToolWithHardGate(
 
       const gate = await evaluateTmuxBridgeGate(dependencies);
       if (!gate.allowed) {
-        const reason = gate.reason ?? "bridge_unreachable";
         return buildTmuxGateErrorResult({
-          reason,
+          reason: gate.reason,
           ...(gate.bridgeUrl !== undefined ? { bridgeUrl: gate.bridgeUrl } : {}),
           params,
         });
@@ -305,21 +306,18 @@ function wrapDirectWorkbookJsToolWithHardGate(
     execute: async (toolCallId, params, signal, onUpdate) => {
       throwIfAborted(signal);
 
-      const request = getDirectJsExecuteApprovalRequest(params, apiName);
+      const request = getDirectJsExecuteApprovalRequest(toolCallId, params, apiName);
       const risk = assessOfficeJsCodeRisk(request.code);
 
-      // Auto mode trusts pure host JSAPI code — skip the approval prompt.
-      // Code referencing ambient browser authority (network, storage, global
-      // handles, dynamic evaluation) requires approval in every mode: direct
-      // workbook JS runs in the taskpane page realm, and workbook content is
-      // untrusted input.
       const mode = await (dependencies.getExecutionMode?.() ?? Promise.resolve("safe" as const));
-      if (mode !== "yolo" || risk.flagged) {
-        const approved = await requestApproval(
-          risk.flagged
-            ? { ...request, riskIdentifiers: risk.identifiers }
-            : request,
-        );
+      if (mode !== "yolo" || risk.flagged || risk.destructive) {
+        const approved = await requestApproval({
+          ...request,
+          ...(risk.flagged ? { riskIdentifiers: risk.identifiers } : {}),
+          ...(risk.destructive ? { destructive: true } : {}),
+          ...(signal ? { signal } : {}),
+        });
+        throwIfAborted(signal);
         if (!approved) {
           throw new Error(`${apiName} execution cancelled by user.`);
         }
@@ -331,10 +329,12 @@ function wrapDirectWorkbookJsToolWithHardGate(
   };
 }
 
+const pendingBridgeApprovals = new Map<string, Promise<void>>();
+
 function createPythonBridgeApprover(
   dependencies: ExperimentalToolGateDependencies,
-): (toolName: string, bridgeUrl: string, params: unknown) => Promise<void> {
-  const requestApproval = dependencies.requestPythonBridgeApproval ?? defaultRequestPythonBridgeApproval;
+): (toolName: string, bridgeUrl: string, params: unknown, signal: AbortSignal | undefined) => Promise<void> {
+  const requestApproval = dependencies.requestPythonBridgeApproval ?? (() => Promise.resolve(false));
   const getApprovedBridgeUrl =
     dependencies.getApprovedPythonBridgeUrl
     ?? defaultGetApprovedPythonBridgeUrl;
@@ -342,35 +342,32 @@ function createPythonBridgeApprover(
     dependencies.setApprovedPythonBridgeUrl
     ?? defaultSetApprovedPythonBridgeUrl;
 
-  return async (toolName: string, bridgeUrl: string, params: unknown): Promise<void> => {
-    const cachedApprovalUrl = await getApprovedBridgeUrl();
-    if (cachedApprovalUrl === bridgeUrl) {
-      return;
-    }
+  return async (toolName: string, bridgeUrl: string, params: unknown, signal: AbortSignal | undefined): Promise<void> => {
+    let approval = pendingBridgeApprovals.get(bridgeUrl);
+    if (!approval) {
+      approval = (async (): Promise<void> => {
+        if (await getApprovedBridgeUrl() === bridgeUrl) return;
 
-    const approved = await requestApproval({
-      toolName,
-      bridgeUrl,
-      params,
-    });
-    if (!approved) {
-      throw new Error("Python/LibreOffice execution cancelled by user.");
-    }
+        const approved = await requestApproval({
+          toolName,
+          bridgeUrl,
+          params,
+          ...(signal ? { signal } : {}),
+        });
+        throwIfAborted(signal);
+        if (!approved) {
+          throw new Error("Python/LibreOffice execution cancelled by user.");
+        }
 
-    await setApprovedBridgeUrl(bridgeUrl);
+        await setApprovedBridgeUrl(bridgeUrl);
+      })().finally(() => { pendingBridgeApprovals.delete(bridgeUrl); });
+      pendingBridgeApprovals.set(bridgeUrl, approval);
+    }
+    await approval;
+    throwIfAborted(signal);
   };
 }
 
-/**
- * Python tools with a built-in fallback (`python_run`, `python_transform_range`).
- *
- * Behavior:
- * - If bridge is configured + reachable, request approval once per bridge URL.
- * - If bridge URL is missing/invalid, allow tool execution so it can fall back
- *   to in-browser Pyodide.
- * - If bridge is configured but unreachable, keep blocking with an explicit
- *   reachability error.
- */
 function wrapPythonToolWithOptionalBridgeApproval(
   tool: AgentTool,
   dependencies: ExperimentalToolGateDependencies,
@@ -384,30 +381,26 @@ function wrapPythonToolWithOptionalBridgeApproval(
 
       const gate = await evaluatePythonBridgeGate(dependencies);
       if (gate.allowed) {
-        const bridgeUrl = gate.bridgeUrl;
-        if (!bridgeUrl) {
-          throw new Error("Python bridge gate did not return a bridge URL.");
-        }
-
         throwIfAborted(signal);
-        await approveBridgeUsage(tool.name, bridgeUrl, params);
+        await approveBridgeUsage(tool.name, gate.bridgeUrl, params, signal);
       } else {
-        const reason = gate.reason ?? "bridge_unreachable";
+        switch (gate.reason) {
+          case "missing_bridge_url":
+          case "invalid_bridge_url":
+            break;
+          case "bridge_unreachable":
+            if (tool.name === "python_transform_range") {
+              return buildPythonTransformRangeGateErrorResult({
+                reason: gate.reason,
+                ...(gate.bridgeUrl !== undefined ? { bridgeUrl: gate.bridgeUrl } : {}),
+              });
+            }
 
-        // Missing/invalid URL means the tool can still run via Pyodide fallback.
-        if (reason === "bridge_unreachable") {
-          if (tool.name === "python_transform_range") {
-            return buildPythonTransformRangeGateErrorResult({
-              reason,
+            return buildPythonGateErrorResult({
+              reason: gate.reason,
               ...(gate.bridgeUrl !== undefined ? { bridgeUrl: gate.bridgeUrl } : {}),
+              toolName: tool.name,
             });
-          }
-
-          return buildPythonGateErrorResult({
-            reason,
-            ...(gate.bridgeUrl !== undefined ? { bridgeUrl: gate.bridgeUrl } : {}),
-            toolName: tool.name,
-          });
         }
       }
 
@@ -417,9 +410,6 @@ function wrapPythonToolWithOptionalBridgeApproval(
   };
 }
 
-/**
- * Python tools that strictly require the native bridge (`libreoffice_convert`).
- */
 function wrapPythonBridgeOnlyToolWithApprovalGate(
   tool: AgentTool,
   dependencies: ExperimentalToolGateDependencies,
@@ -433,20 +423,14 @@ function wrapPythonBridgeOnlyToolWithApprovalGate(
 
       const gate = await evaluatePythonBridgeGate(dependencies);
       if (!gate.allowed) {
-        const reason = gate.reason ?? "bridge_unreachable";
         return buildLibreOfficeGateErrorResult({
-          reason,
+          reason: gate.reason,
           ...(gate.bridgeUrl !== undefined ? { bridgeUrl: gate.bridgeUrl } : {}),
         });
       }
 
-      const bridgeUrl = gate.bridgeUrl;
-      if (!bridgeUrl) {
-        throw new Error("Python bridge gate did not return a bridge URL.");
-      }
-
       throwIfAborted(signal);
-      await approveBridgeUsage(tool.name, bridgeUrl, params);
+      await approveBridgeUsage(tool.name, gate.bridgeUrl, params, signal);
 
       throwIfAborted(signal);
       return tool.execute(toolCallId, params, signal, onUpdate);
@@ -454,22 +438,6 @@ function wrapPythonBridgeOnlyToolWithApprovalGate(
   };
 }
 
-/**
- * Apply execution gates to tool calls.
- *
- * Current rules:
- * - `tmux` requires a healthy bridge URL (custom override or default localhost URL).
- * - `python_run` and `python_transform_range` can run with Pyodide fallback
- *   when bridge URL is missing/invalid; bridge approval is required when a
- *   reachable bridge is present.
- * - `libreoffice_convert` strictly requires a configured + reachable bridge and
- *   approval (no Pyodide fallback).
- * - `execute_office_js` and `execute_wps_js` prompt for confirmation on every
- *   call in Confirm mode. In Auto mode, pure host JSAPI code runs without a
- *   prompt, but code referencing ambient browser authority (network, storage,
- *   globals, dynamic evaluation) still requires per-call approval.
- * - `files` has no gate — read, write, and delete are always available.
- */
 export function applyExperimentalToolGates(
   tools: AgentTool[],
   dependencies: ExperimentalToolGateDependencies = {},
@@ -494,6 +462,16 @@ export function applyExperimentalToolGates(
 
     if (tool.name === EXECUTE_WPS_JS_TOOL_NAME) {
       gatedTools.push(wrapDirectWorkbookJsToolWithHardGate(tool, dependencies, "WPS JSAPI"));
+      continue;
+    }
+
+    if (tool.name === FILES_TOOL_NAME) {
+      gatedTools.push(wrapFilesToolWithChangeGate(tool, dependencies));
+      continue;
+    }
+
+    if (tool.name === EXTENSIONS_MANAGER_TOOL_NAME) {
+      gatedTools.push(wrapExtensionsManagerToolWithChangeGate(tool, dependencies));
       continue;
     }
 

@@ -1,8 +1,7 @@
+import { mapWithConcurrency } from "../../utils/concurrency.js";
 /**
- * Store for custom LLM providers (auto-discovery servers + manual providers).
- *
  * Vendored from @earendil-works/pi-web-ui 0.75.3 (MIT, © Mario Zechner,
- * https://github.com/badlogic/pi-mono). See docs/ui-ownership.md.
+ * https://github.com/badlogic/pi-mono).
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -25,11 +24,10 @@ export interface CustomProvider {
   type: CustomProviderType;
   baseUrl: string;
   apiKey?: string;
-  /** Extra HTTP headers sent with every request to this provider (e.g. x-opencode-session). */
   headers?: Record<string, string>;
-  /** Gateway protocol choice: "auto" resolves per model name, else a fixed GatewayApiType. */
   apiMode?: string;
   models?: Model<Api>[];
+  connectDirectly?: boolean;
 }
 
 export class CustomProvidersStore extends Store {
@@ -53,14 +51,8 @@ export class CustomProvidersStore extends Store {
 
   async getAll(): Promise<CustomProvider[]> {
     const keys = await this.getBackend().keys("custom-providers");
-    const providers: CustomProvider[] = [];
-    for (const key of keys) {
-      const provider = await this.get(key);
-      if (provider) {
-        providers.push(provider);
-      }
-    }
-    return providers;
+    const providers = await mapWithConcurrency(keys, 8, (key) => this.get(key));
+    return providers.filter((provider) => provider !== null);
   }
 
   async has(id: string): Promise<boolean> {

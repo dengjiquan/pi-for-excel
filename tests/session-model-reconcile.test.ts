@@ -135,8 +135,6 @@ void test("provider refresh applies metadata-only changes to a session on the sa
   const provider = customProvider();
   const catalogModel = provider.models[0];
   assert.ok(catalogModel);
-  // Same identity and token limits as the catalogue entry; everything else is
-  // what an older gateway save carried before the registry match succeeded.
   const staleModel = {
     ...catalogModel,
     reasoning: false,
@@ -164,4 +162,30 @@ void test("provider refresh applies metadata-only changes to a session on the sa
   await createOwner(keys, runtimes, [provider]).restoreCached();
 
   assert.deepEqual(selected, provider.models[0]);
+});
+
+void test("renaming a custom gateway keeps its tabs and saved sessions on that gateway", async () => {
+  const keys = new MemoryProviderKeys();
+  await keys.set("openai", "test-key");
+  const renamed = customProvider();
+  const catalogModel = renamed.models[0];
+  assert.ok(catalogModel);
+  const beforeRename = { ...catalogModel, provider: "Gateway · Old name" };
+  let selected = beforeRename;
+  const runtimes: ModelRefreshRuntime[] = [{
+    runtimeId: "session-a",
+    model: selected,
+    isBusy: false,
+    applyModel: (model) => {
+      selected = model;
+      runtimes[0].model = model;
+    },
+  }];
+
+  const owner = createOwner(keys, runtimes, [renamed]);
+  await owner.restoreCached();
+
+  assert.equal(selected.provider, "Gateway · Local provider");
+  assert.equal(selected.id, "plain-model");
+  assert.equal(owner.resolveModel(beforeRename)?.provider, "Gateway · Local provider");
 });

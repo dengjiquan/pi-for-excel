@@ -1,14 +1,8 @@
+import { defaultGetApprovedPythonBridgeUrl } from "./experimental-tool-gates/evaluation.js";
+
 function isToolsLibreofficeConvertPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-/**
- * libreoffice_convert — Experimental local LibreOffice bridge adapter.
- *
- * This tool stays registered for a stable tool list/prompt cache.
- * Execution requires a reachable bridge URL
- * (configured override or default https://localhost:3340).
- */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type TSchema } from "typebox";
@@ -21,6 +15,7 @@ import {
   tryParseBridgeJson,
 } from "./bridge-http-utils.js";
 import { getDefaultPythonBridgeConfig } from "./python-run.js";
+import { isStop, ToolStoppedError } from "./tool-stopped.js";
 
 const LIBREOFFICE_BRIDGE_API_PATH = "/v1/libreoffice-convert";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 45_000;
@@ -111,6 +106,7 @@ export interface LibreOfficeConvertToolDetails {
 }
 
 export interface LibreOfficeConvertToolDependencies {
+  getApprovedBridgeUrl?: () => Promise<string | undefined>;
   getBridgeConfig?: () => Promise<LibreOfficeBridgeConfig | null>;
   callBridge?: (
     request: LibreOfficeConvertRequest,
@@ -314,7 +310,7 @@ async function defaultCallBridge(
   } catch (error) {
     if (isAbortError(error)) {
       if (signal?.aborted) {
-        throw new Error("Aborted");
+        throw new ToolStoppedError();
       }
       throw new Error(`LibreOffice bridge request timed out after ${timeoutMs}ms.`);
     }
@@ -381,6 +377,7 @@ export function createLibreOfficeConvertTool(
   dependencies: LibreOfficeConvertToolDependencies = {},
 ): AgentTool<TSchema, LibreOfficeConvertToolDetails> {
   const getBridgeConfig = dependencies.getBridgeConfig ?? defaultGetBridgeConfig;
+  const getApprovedBridgeUrl = dependencies.getApprovedBridgeUrl ?? defaultGetApprovedPythonBridgeUrl;
   const callBridge = dependencies.callBridge ?? defaultCallBridge;
 
   return {
@@ -417,6 +414,9 @@ export function createLibreOfficeConvertTool(
           };
         }
 
+        if (await getApprovedBridgeUrl() !== bridgeConfig.url) {
+          throw new Error("Python bridge URL requires user approval before execution.");
+        }
         const request = toBridgeRequest(params);
         const response = await callBridge(request, bridgeConfig, signal);
 
@@ -439,6 +439,7 @@ export function createLibreOfficeConvertTool(
           },
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         const message = getErrorMessage(error);
         const skillHint = shouldAttachPythonBridgeSkillHint(message)
           ? "python-bridge"

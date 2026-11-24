@@ -2,12 +2,8 @@ function isTaskpaneTabLayoutPayloadShape(value: unknown): value is Record<string
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Persistence for open session tabs per workbook.
- *
- * Stores tab layout in SettingsStore so reloading the taskpane restores
- * the same set of session tabs and active tab.
- */
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 
 import type { SettingsStore } from "../storage/local/settings-store.js";
 
@@ -18,7 +14,12 @@ const GLOBAL_WORKBOOK_LAYOUT_KEY = "__global__";
 export interface WorkbookTabLayout {
   sessionIds: string[];
   activeSessionId: string | null;
+  tabNumbers?: Record<string, number>;
+  nextTabNumber?: number;
 }
+
+const tabNumbersSchema = Type.Record(Type.String(), Type.Integer({ minimum: 1 }));
+const tabNumberSchema = Type.Integer({ minimum: 1 });
 
 function normalizeSessionId(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -43,7 +44,7 @@ export function normalizeWorkbookTabLayout(layout: WorkbookTabLayout): WorkbookT
 
   for (const rawSessionId of layout.sessionIds) {
     const normalized = normalizeSessionId(rawSessionId);
-    if (!normalized) continue;
+    if (!normalized || sessionIds.includes(normalized)) continue;
     sessionIds.push(normalized);
   }
 
@@ -52,10 +53,25 @@ export function normalizeWorkbookTabLayout(layout: WorkbookTabLayout): WorkbookT
     ? normalizedActiveSessionId
     : (sessionIds[0] ?? null);
 
-  return {
-    sessionIds,
-    activeSessionId,
-  };
+  const normalized: WorkbookTabLayout = { sessionIds, activeSessionId };
+
+  if (layout.tabNumbers) {
+    const tabNumbers: Record<string, number> = {};
+    const usedNumbers = new Set<number>();
+    for (const sessionId of sessionIds) {
+      const tabNumber = layout.tabNumbers[sessionId];
+      if (tabNumber === undefined || usedNumbers.has(tabNumber)) continue;
+      usedNumbers.add(tabNumber);
+      tabNumbers[sessionId] = tabNumber;
+    }
+    normalized.tabNumbers = tabNumbers;
+  }
+
+  if (layout.nextTabNumber !== undefined) {
+    normalized.nextTabNumber = layout.nextTabNumber;
+  }
+
+  return normalized;
 }
 
 export function parseWorkbookTabLayout(value: unknown): WorkbookTabLayout | null {
@@ -70,6 +86,13 @@ export function parseWorkbookTabLayout(value: unknown): WorkbookTabLayout | null
       .filter((sessionId): sessionId is string => sessionId !== null),
     activeSessionId: normalizeSessionId(value.activeSessionId),
   };
+
+  if (Value.Check(tabNumbersSchema, value.tabNumbers)) {
+    parsed.tabNumbers = value.tabNumbers;
+  }
+  if (Value.Check(tabNumberSchema, value.nextTabNumber)) {
+    parsed.nextTabNumber = value.nextTabNumber;
+  }
 
   const normalized = normalizeWorkbookTabLayout(parsed);
   if (normalized.sessionIds.length === 0) return null;

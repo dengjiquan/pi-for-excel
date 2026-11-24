@@ -1,16 +1,3 @@
-/**
- * <code-block> — first-party highlighted code block with copy button.
- *
- * Replaces @mariozechner/mini-lit's CodeBlock (docs/ui-ownership.md), keeping
- * the same tag name and light DOM. Two input modes:
- * - `.code` property with raw text (tool renderers, Lit templates)
- * - `code` attribute with base64 + `encoding="base64"` (emitted by
- *   <markdown-block>, which must pass code through an HTML attribute)
- *
- * Highlighting uses highlight.js core with the same language set mini-lit
- * registered, so bundle size does not regress.
- */
-
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -28,6 +15,7 @@ import { Check, Copy } from "lucide";
 import { icon } from "../icons.js";
 import { t } from "../../language/index.js";
 import { decodeBase64Utf8 } from "../../utils/base64-text.js";
+import { copyText } from "../copy-text.js";
 
 hljs.registerLanguage("javascript", javascript);
 hljs.registerLanguage("typescript", typescript);
@@ -39,24 +27,6 @@ hljs.registerLanguage("json", json);
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("sql", sql);
 
-/** Legacy fallback for WebViews where the async clipboard API is rejected. */
-function copyViaHiddenTextarea(text: string): void {
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    if (!document.execCommand("copy")) {
-      throw new Error("execCommand copy failed");
-    }
-  } finally {
-    textarea.remove();
-  }
-}
-
 @customElement("code-block")
 export class CodeBlock extends LitElement {
   @property() code = "";
@@ -66,6 +36,7 @@ export class CodeBlock extends LitElement {
   @state() private _copied = false;
 
   private _copyResetTimer: number | undefined;
+  private _copyGeneration = 0;
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment {
     return this;
@@ -78,6 +49,8 @@ export class CodeBlock extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._copyGeneration += 1;
+    this._copied = false;
     if (this._copyResetTimer !== undefined) {
       window.clearTimeout(this._copyResetTimer);
       this._copyResetTimer = undefined;
@@ -94,11 +67,11 @@ export class CodeBlock extends LitElement {
   }
 
   private _copy(): void {
+    const generation = ++this._copyGeneration;
     const code = this._decodedCode();
-    void navigator.clipboard
-      .writeText(code)
-      .catch(() => copyViaHiddenTextarea(code))
-      .then(() => {
+    void copyText(code)
+      .then((outcome) => {
+        if (outcome !== "copied" || generation !== this._copyGeneration) return;
         this._copied = true;
         if (this._copyResetTimer !== undefined) {
           window.clearTimeout(this._copyResetTimer);
@@ -109,7 +82,6 @@ export class CodeBlock extends LitElement {
         }, 1500);
       })
       .catch(() => {
-        // Clipboard unavailable — leave the label unchanged.
       });
   }
 

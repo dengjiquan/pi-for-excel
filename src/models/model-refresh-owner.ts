@@ -1,6 +1,7 @@
 import type { Api, Model, MutableModels } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
+import { resolveCustomProviderModel } from "../auth/custom-gateways.js";
 import type { CustomProvider } from "../storage/local/custom-providers-store.js";
 import { pickDefaultModel } from "../taskpane/default-model.js";
 import { resolveRuntimeModelSwap } from "../taskpane/runtime-model-reconcile.js";
@@ -28,21 +29,22 @@ interface RefreshRequest {
   allowNetwork: boolean;
 }
 
-/**
- * Whole-model equality. Every field on a `Model` reaches the wire or the UI
- * (reasoning, thinking levels, input modalities, cost, headers, compat, ...),
- * so an active session must pick up any difference, not just identity and
- * token limits.
- */
+type RefreshState =
+  | { kind: "idle" }
+  | {
+    kind: "running";
+    promise: Promise<void>;
+    requested: RefreshRequest;
+    activeNetwork: boolean;
+    providerRevision: number;
+  };
+
 export function areRuntimeModelsEquivalent(left: RuntimeModelShape, right: RuntimeModelShape): boolean {
   return canonicalJson(toJsonValue(left)) === canonicalJson(toJsonValue(right));
 }
 
-// Structural identity floor for callers holding `Model<any>` (agent state); the
-// comparison itself covers every member of the object, not just these.
 type RuntimeModelShape = Pick<Model<Api>, "id" | "provider" | "api">;
 
-/** Owns provider catalogue refresh, publication, coalescing and runtime reconciliation. */
 export class ModelRefreshOwner {
   readonly models: MutableModels;
 
@@ -53,11 +55,8 @@ export class ModelRefreshOwner {
   private readonly warn: (message: string, error?: unknown) => void;
 
   private currentSnapshot: ModelRefreshSnapshot;
-  private refreshPromise: Promise<void> | null = null;
-  private requestedSync = false;
-  private requestedNetwork = false;
-  private activeSync = false;
-  private activeNetwork = false;
+  private customProviders: readonly CustomProvider[] = [];
+  private refreshState: RefreshState = { kind: "idle" };
 
   constructor(options: {
     modelRuntime: BrowserModelRuntime;
@@ -90,30 +89,31 @@ export class ModelRefreshOwner {
     };
   }
 
-  /** Restore configured providers and cached catalogues without touching the network. */
   restoreCached(): Promise<void> {
     return this.requestRefresh({ syncConfiguredProviders: true, allowNetwork: false });
   }
 
-  /** Re-read custom-provider configuration, then refresh its catalogues. */
   refreshConfiguredProviders(allowNetwork = true): Promise<void> {
     return this.requestRefresh({ syncConfiguredProviders: true, allowNetwork });
   }
 
-  /** Refresh all currently registered providers. Concurrent calls share one provider pass. */
   refresh(allowNetwork = true): Promise<void> {
     return this.requestRefresh({ syncConfiguredProviders: false, allowNetwork });
   }
 
-  /** Reconcile a runtime that was deliberately skipped while busy. */
+  resolveModel(persisted: Model<Api>): Model<Api> | undefined {
+    const direct = this.models.getModel(persisted.provider, persisted.id);
+    if (direct) return direct;
+
+    const custom = resolveCustomProviderModel([...this.customProviders], persisted);
+    if (!custom) return undefined;
+    return this.models.getModel(custom.provider, custom.id) ?? undefined;
+  }
+
   reconcileRuntimes(): void {
     this.reconcileRuntimeModels();
   }
 
-  /**
-   * Restore cached catalogues first, then perform discovery once credentials are ready.
-   * A restore that settles after the startup bound schedules exactly one post-restore pass.
-   */
   async startup(credentialRestore: Promise<void>, timeoutMs: number): Promise<void> {
     await this.restoreCached();
 
@@ -140,7 +140,9 @@ export class ModelRefreshOwner {
           (error: unknown) => {
             this.warn("[auth] Credential restore failed after timeout:", error);
           },
-        );
+        ).catch((error: unknown) => {
+          this.warn("[models] Late credential model refresh failed:", error);
+        });
       }
 
       void this.refresh(true).catch((error: unknown) => {
@@ -152,46 +154,52 @@ export class ModelRefreshOwner {
   }
 
   private requestRefresh(request: RefreshRequest): Promise<void> {
-    if (request.syncConfiguredProviders) {
-      this.requestedSync = true;
+    if (this.refreshState.kind === "running") {
+      const state = this.refreshState;
+      state.requested.syncConfiguredProviders ||= request.syncConfiguredProviders;
+      state.requested.allowNetwork ||= request.allowNetwork
+        && (!state.activeNetwork || state.requested.syncConfiguredProviders
+          || this.modelRuntime.providerRevision !== state.providerRevision);
+      return state.promise;
     }
-    if (request.allowNetwork && (!this.activeNetwork || this.requestedSync)) {
-      this.requestedNetwork = true;
-    }
 
-    if (this.refreshPromise) return this.refreshPromise;
+    const promise = Promise.resolve().then(async () => {
+      try {
+        do {
+          const { syncConfiguredProviders, allowNetwork } = state.requested;
+          state.requested = { syncConfiguredProviders: false, allowNetwork: false };
+          state.activeNetwork = allowNetwork;
 
-    this.refreshPromise = this.runRefreshes().finally(() => {
-      this.refreshPromise = null;
-      this.activeSync = false;
-      this.activeNetwork = false;
-    });
-    return this.refreshPromise;
-  }
+          if (syncConfiguredProviders) {
+            const customProviders = await this.loadCustomProviders();
+            await this.modelRuntime.syncCustomProviders(customProviders);
+            this.customProviders = customProviders;
+          }
+          state.providerRevision = this.modelRuntime.providerRevision;
 
-  private async runRefreshes(): Promise<void> {
-    do {
-      const syncConfiguredProviders = this.requestedSync;
-      const allowNetwork = this.requestedNetwork;
-      this.requestedSync = false;
-      this.requestedNetwork = false;
-      this.activeSync = syncConfiguredProviders;
-      this.activeNetwork = allowNetwork;
+          const cached = await this.modelRuntime.refresh({ allowNetwork: false });
+          await this.publish(Array.from(cached.errors.keys()).sort());
+          if (allowNetwork) {
+            const discovered = await this.modelRuntime.refresh({ allowNetwork: true, force: true });
+            await this.publish(Array.from(discovered.errors.keys()).sort());
+          }
 
-      if (syncConfiguredProviders) {
-        const customProviders = await this.loadCustomProviders();
-        await this.modelRuntime.syncCustomProviders(customProviders);
+          state.activeNetwork = false;
+        } while (state.requested.syncConfiguredProviders || state.requested.allowNetwork
+          || this.modelRuntime.providerRevision !== state.providerRevision);
+      } finally {
+        this.refreshState = { kind: "idle" };
       }
-
-      const result = await this.modelRuntime.refresh({
-        allowNetwork,
-        ...(allowNetwork ? { force: true } : {}),
-      });
-      await this.publish(Array.from(result.errors.keys()).sort());
-
-      this.activeSync = false;
-      this.activeNetwork = false;
-    } while (this.requestedSync || this.requestedNetwork);
+    });
+    const state: Extract<RefreshState, { kind: "running" }> = {
+      kind: "running",
+      promise,
+      requested: { ...request },
+      activeNetwork: false,
+      providerRevision: this.modelRuntime.providerRevision,
+    };
+    this.refreshState = state;
+    return promise;
   }
 
   private async publish(providerErrors: readonly string[]): Promise<void> {
@@ -220,7 +228,7 @@ export class ModelRefreshOwner {
     for (const runtime of this.getRuntimes()) {
       if (runtime.isBusy) continue;
 
-      const refreshedModel = this.models.getModel(runtime.model.provider, runtime.model.id);
+      const refreshedModel = this.resolveModel(runtime.model);
       if (refreshedModel && !areRuntimeModelsEquivalent(runtime.model, refreshedModel)) {
         runtime.applyModel(refreshedModel);
         continue;

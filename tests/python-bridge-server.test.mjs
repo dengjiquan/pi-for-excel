@@ -7,7 +7,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-const ORIGIN = "https://localhost:3000";
+import { DEV_BASE_URL } from "../scripts/generate-dev-manifest.mjs";
+
+const ORIGIN = DEV_BASE_URL;
 const BRIDGE_SCRIPT_PATH = fileURLToPath(new URL("../scripts/python-bridge-server.mjs", import.meta.url));
 
 async function getFreePort() {
@@ -231,6 +233,56 @@ test("stub mode libreoffice endpoint returns derived output path", async (t) => 
   assert.equal(payload.converter, "stub");
 });
 
+test("real mode returns a failed run's exit code, stdout and single traceback", async (t) => {
+  const bridge = await startBridge({ PYTHON_BRIDGE_MODE: "real" });
+  t.after(async () => {
+    await bridge.stop();
+  });
+
+  const health = await (await fetch(`http://127.0.0.1:${bridge.port}/health`, requestInit("GET"))).json();
+  if (!health.python?.available) {
+    t.skip("python3 is not installed");
+    return;
+  }
+
+  const response = await fetch(
+    `http://127.0.0.1:${bridge.port}/v1/python-run`,
+    requestInit("POST", { code: "print('before')\nimport notamodule_xyz" }),
+  );
+
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.equal(payload.ok, false);
+  assert.equal(payload.exit_code, 1);
+  assert.equal(payload.stdout, "before");
+  assert.match(payload.stderr, /ModuleNotFoundError: No module named 'notamodule_xyz'/u);
+  assert.equal(payload.stderr.match(/Traceback/gu)?.length, 1);
+  assert.match(payload.error, /ModuleNotFoundError/u);
+});
+
+test("real mode accepts input_json up to its documented limit", async (t) => {
+  const bridge = await startBridge({ PYTHON_BRIDGE_MODE: "real" });
+  t.after(async () => {
+    await bridge.stop();
+  });
+
+  const health = await (await fetch(`http://127.0.0.1:${bridge.port}/health`, requestInit("GET"))).json();
+  if (!health.python?.available) {
+    t.skip("python3 is not installed");
+    return;
+  }
+
+  const inputJson = JSON.stringify({ values: ["é".repeat(190_000)] });
+  const response = await fetch(
+    `http://127.0.0.1:${bridge.port}/v1/python-run`,
+    requestInit("POST", { code: "result = len(input_data['values'][0])", input_json: inputJson }),
+  );
+
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.result_json, "190000");
+});
+
 test("python bridge rejects invalid python payloads", async (t) => {
   const bridge = await startBridge();
   t.after(async () => {
@@ -268,4 +320,15 @@ test("python bridge rejects invalid libreoffice payloads", async (t) => {
   const payload = await response.json();
   assert.equal(payload.ok, false);
   assert.match(payload.error, /target_format must be one of/i);
+});
+
+test("default allowed origins include the dev server origin", async (t) => {
+  const bridge = await startBridge({ ALLOWED_ORIGINS: "" });
+  t.after(async () => {
+    await bridge.stop();
+  });
+
+  const response = await fetch(`http://127.0.0.1:${bridge.port}/health`, { headers: { Origin: DEV_BASE_URL } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), DEV_BASE_URL);
 });

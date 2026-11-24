@@ -1,3 +1,4 @@
+import { mapWithConcurrency } from "../utils/concurrency.js";
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   Api,
@@ -49,6 +50,8 @@ interface ImageNormalizationOptions {
   signal?: AbortSignal;
 }
 
+const IMAGE_CONCURRENCY = 2;
+
 function createAbortError(): DOMException {
   return new DOMException("Image processing aborted.", "AbortError");
 }
@@ -87,11 +90,14 @@ function runImageWorker(
     worker.onmessage = (event: MessageEvent<ImageWorkerResponse>) => finish(event.data);
     worker.onerror = () => finish({ ok: false, reason: "decode" });
     signal?.addEventListener("abort", abort, { once: true });
-    worker.postMessage(request);
+    try {
+      worker.postMessage(request);
+    } catch {
+      finish({ ok: false, reason: "decode" });
+    }
   });
 }
 
-/** Normalize one image before it is sent to the model or retained in replayable history. */
 export async function processImageInput(
   image: ImageContent,
   options: ImageProcessingOptions = {},
@@ -186,6 +192,16 @@ function processWithModel(
   });
 }
 
+function processContentImages(
+  content: readonly (TextContent | ImageContent)[],
+  model: ImageLimitModel,
+  options: ImageNormalizationOptions,
+): Promise<({ block: TextContent; processed: null } | { block: ImageContent; processed: ProcessedImageInput })[]> {
+  return mapWithConcurrency(content, IMAGE_CONCURRENCY, async (block) => block.type === "image"
+    ? { block, processed: await processWithModel(block, model, options) }
+    : { block, processed: null });
+}
+
 async function normalizePromptContent(
   content: string | (TextContent | ImageContent)[],
   model: ImageLimitModel,
@@ -196,13 +212,12 @@ async function normalizePromptContent(
   }
 
   const normalized: (TextContent | ImageContent)[] = [];
-  for (const block of content) {
-    if (block.type !== "image") {
+  for (const { block, processed } of await processContentImages(content, model, options)) {
+    if (!processed) {
       normalized.push(block);
       continue;
     }
 
-    const processed = await processWithModel(block, model, options);
     if (!processed.ok) {
       normalized.push({ type: "text", text: processed.message });
       continue;
@@ -230,17 +245,18 @@ async function normalizePromptMessage(
   const hints: string[] = [];
   if (message.attachments?.some((attachment) => attachment.type === "image")) {
     const attachments: Attachment[] = [];
-    for (const attachment of message.attachments) {
-      if (attachment.type !== "image") {
+    const processedAttachments = await mapWithConcurrency(message.attachments, IMAGE_CONCURRENCY, async (attachment) => ({
+      attachment,
+      processed: attachment.type === "image"
+        ? await processWithModel({ type: "image", data: attachment.content, mimeType: attachment.mimeType }, model, options)
+        : null,
+    }));
+    for (const { attachment, processed } of processedAttachments) {
+      if (!processed) {
         attachments.push(attachment);
         continue;
       }
 
-      const processed = await processWithModel({
-        type: "image",
-        data: attachment.content,
-        mimeType: attachment.mimeType,
-      }, model, options);
       if (!processed.ok) {
         hints.push(processed.message);
         continue;
@@ -275,13 +291,12 @@ export async function normalizeToolResultImages(
 
   const normalized: (TextContent | ImageContent)[] = [];
   let changed = false;
-  for (const block of content) {
-    if (block.type !== "image") {
+  for (const { block, processed } of await processContentImages(content, model, options)) {
+    if (!processed) {
       normalized.push(block);
       continue;
     }
 
-    const processed = await processWithModel(block, model, options);
     if (!processed.ok) {
       normalized.push(block);
       continue;
@@ -304,7 +319,6 @@ export async function normalizeToolResultImages(
   return changed ? normalized : content;
 }
 
-/** Install prompt and tool-result normalization at the low-level Agent ingress. */
 export function installImageInputNormalization(
   agent: Agent,
   options: Pick<ImageNormalizationOptions, "autoResizeImages" | "processor"> = {},
@@ -376,11 +390,13 @@ export function installImageInputNormalization(
   agent.afterToolCall = async (context, signal) => {
     const previousResult = await previousAfterToolCall?.(context, signal);
     const content = previousResult?.content ?? context.result.content;
-    const normalized = await normalizeToolResultImages(
-      content,
-      agent.state.model,
-      processingOptions(signal),
-    );
+    let normalized: typeof content;
+    try {
+      normalized = await normalizeToolResultImages(content, agent.state.model, processingOptions(signal));
+    } catch (error) {
+      if (signal?.aborted) return previousResult;
+      throw error;
+    }
     normalizedToolResultContent.add(normalized);
     return normalized === content ? previousResult : { ...previousResult, content: normalized };
   };

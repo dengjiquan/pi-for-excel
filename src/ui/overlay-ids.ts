@@ -1,7 +1,3 @@
-/**
- * Shared overlay DOM ids.
- */
-
 export const SETTINGS_OVERLAY_ID = "pi-settings-overlay";
 export const RESUME_OVERLAY_ID = "pi-resume-overlay";
 export const FILES_WORKSPACE_OVERLAY_ID = "pi-files-workspace-overlay";
@@ -15,3 +11,4 @@ export const EXTENSION_OVERLAY_ID = "pi-ext-overlay";
 export const PROXY_GATE_OVERLAY_ID = "pi-proxy-gate-overlay";
 export const MODEL_SELECTOR_OVERLAY_ID = "pi-model-selector-overlay";
 export const API_KEY_OVERLAY_ID = "pi-api-key-overlay";
+export const COPY_TEXT_OVERLAY_ID = "pi-copy-text-overlay";

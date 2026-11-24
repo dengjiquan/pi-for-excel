@@ -1,10 +1,3 @@
-/**
- * Tool execution policy.
- *
- * Classifies tool calls as read-only vs workbook-mutating,
- * and whether a successful mutation should refresh workbook structure context.
- */
-
 export type ToolExecutionMode = "read" | "mutate";
 export type ToolContextImpact = "none" | "content" | "structure";
 
@@ -14,19 +7,16 @@ const ALWAYS_READ_TOOLS = new Set<string>([
   "search_workbook",
   "trace_dependencies",
   "explain_formula",
-  // Instructions and conventions mutate local prompt/config state, not workbook cells/structure.
   "instructions",
   "conventions",
-  // External bridge traffic does not mutate workbook state directly.
+  "skills",
   "tmux",
   "python_run",
   "libreoffice_convert",
   "web_search",
   "fetch_page",
   "mcp",
-  // Workspace file operations do not mutate the workbook.
   "files",
-  // Extension registry operations mutate local settings/runtime, not workbook content.
   "extensions_manager",
 ]);
 
@@ -36,9 +26,7 @@ const ALWAYS_MUTATE_TOOLS = new Set<string>([
   "modify_structure",
   "format_cells",
   "conditional_format",
-  // Bridge-assisted transform writes values back into the workbook.
   "python_transform_range",
-  // Arbitrary host JSAPI can mutate workbook content and structure.
   "execute_office_js",
   "execute_wps_js",
 ]);
@@ -83,11 +71,6 @@ function isChartsStructureAction(params: unknown): boolean {
   return action === "create" || action === "delete";
 }
 
-/**
- * Return execution mode for a tool call.
- *
- * Unknown tools default to `mutate` as a safe fallback.
- */
 export function getToolExecutionMode(toolName: string, params: unknown): ToolExecutionMode {
   if (ALWAYS_READ_TOOLS.has(toolName)) return "read";
   if (ALWAYS_MUTATE_TOOLS.has(toolName)) return "mutate";
@@ -111,13 +94,25 @@ export function getToolExecutionMode(toolName: string, params: unknown): ToolExe
   return "mutate";
 }
 
-/**
- * Return context impact for a tool call.
- *
- * Lean default:
- * - only clearly structural mutations trigger workbook blueprint invalidation
- * - data/format/comment/view mutations are treated as content-only
- */
+export type ToolApprovalRequirement = "none" | "confirm_mode" | "always" | "irreversible";
+
+const TOOLS_WITH_OWN_APPROVAL_GATE = new Set<string>([
+  "execute_office_js",
+  "execute_wps_js",
+]);
+
+export function getToolApprovalRequirement(toolName: string, params: unknown): ToolApprovalRequirement {
+  if (toolName === "charts" && getActionParam(params) === "delete") return "irreversible";
+  if (toolName === "workbook_history") {
+    const action = getActionParam(params);
+    if (action === "delete" || action === "clear") return "always";
+  }
+
+  if (TOOLS_WITH_OWN_APPROVAL_GATE.has(toolName)) return "none";
+
+  return getToolExecutionMode(toolName, params) === "mutate" ? "confirm_mode" : "none";
+}
+
 export function getToolContextImpact(toolName: string, params: unknown): ToolContextImpact {
   const mode = getToolExecutionMode(toolName, params);
   if (mode === "read") return "none";

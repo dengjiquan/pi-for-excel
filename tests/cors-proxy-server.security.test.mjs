@@ -7,10 +7,12 @@ import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-const ORIGIN = "https://localhost:3141";
-const PROXY_SCRIPT_PATH = fileURLToPath(
-  new URL("../scripts/cors-proxy-server.mjs", import.meta.url),
-);
+import { DEV_BASE_URL } from "../scripts/generate-dev-manifest.mjs";
+import { evaluateTargetHostPolicy } from "../scripts/proxy-target-policy.mjs";
+
+const ORIGIN = DEV_BASE_URL;
+const PROXY_SCRIPT_PATH = fileURLToPath(new URL("../scripts/cors-proxy-server.mjs", import.meta.url));
+delete process.env.ALLOW_ALL_TARGET_HOSTS;
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -52,13 +54,9 @@ async function stopChild(child) {
 async function startProxy(extraEnv = {}) {
   const port = await getFreePort();
 
-  const env = { ...process.env };
-  // Local dev machines may keep permissive overrides in the user environment;
-  // security tests must exercise the strict defaults.
-  delete env.ALLOW_ALL_TARGET_HOSTS;
   const child = spawn(process.execPath, [PROXY_SCRIPT_PATH], {
     env: {
-      ...env,
+      ...process.env,
       HOST: "127.0.0.1",
       PORT: String(port),
       ALLOWED_ORIGINS: ORIGIN,
@@ -79,8 +77,8 @@ async function startProxy(extraEnv = {}) {
       stdout += chunk;
       const hasListeningLog = stdout.includes("CORS proxy listening on");
       const hasTargetPolicyLog =
-        stdout.includes("Allowed target hosts") ||
-        stdout.includes("target host allowlisting disabled");
+        stdout.includes("Allowed target hosts")
+        || stdout.includes("target host allowlisting disabled");
 
       if (hasListeningLog && hasTargetPolicyLog) {
         resolve(undefined);
@@ -92,11 +90,7 @@ async function startProxy(extraEnv = {}) {
     });
 
     child.once("exit", (code, signal) => {
-      reject(
-        new Error(
-          `proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
-        ),
-      );
+      reject(new Error(`proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
     });
   });
 
@@ -117,9 +111,6 @@ async function startProxy(extraEnv = {}) {
 async function startProxyOnDefaultPort(extraEnv = {}) {
   const env = { ...process.env };
   delete env.PORT;
-  // Local dev machines may keep permissive overrides in the user environment;
-  // security tests must exercise the strict defaults.
-  delete env.ALLOW_ALL_TARGET_HOSTS;
   Object.assign(env, {
     HOST: "127.0.0.1",
     ALLOWED_ORIGINS: ORIGIN,
@@ -143,8 +134,8 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
       stdout += chunk;
       const hasListeningLog = stdout.includes("CORS proxy listening on");
       const hasTargetPolicyLog =
-        stdout.includes("Allowed target hosts") ||
-        stdout.includes("target host allowlisting disabled");
+        stdout.includes("Allowed target hosts")
+        || stdout.includes("target host allowlisting disabled");
 
       if (hasListeningLog && hasTargetPolicyLog) {
         resolve(undefined);
@@ -156,11 +147,7 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
     });
 
     child.once("exit", (code, signal) => {
-      reject(
-        new Error(
-          `proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`,
-        ),
-      );
+      reject(new Error(`proxy exited before ready (code=${String(code)} signal=${String(signal)})\n${stdout}\n${stderr}`));
     });
   });
 
@@ -171,14 +158,10 @@ async function startProxyOnDefaultPort(extraEnv = {}) {
     }),
   ]);
 
-  const match = stdout.match(
-    /CORS proxy listening on http:\/\/127\.0\.0\.1:(\d+)/,
-  );
+  const match = stdout.match(/CORS proxy listening on http:\/\/127\.0\.0\.1:(\d+)/);
   if (!match) {
     await stopChild(child);
-    throw new Error(
-      `Could not parse proxy port from logs\n${stdout}\n${stderr}`,
-    );
+    throw new Error(`Could not parse proxy port from logs\n${stdout}\n${stderr}`);
   }
 
   return {
@@ -197,13 +180,27 @@ async function waitForHttpStatus(url, expectedStatus) {
         return;
       }
     } catch {
-      // Server may not be listening yet.
     }
 
     await delay(50);
   }
 
   throw new Error(`Timed out waiting for ${url} to return ${expectedStatus}`);
+}
+
+async function waitForPortClosed(port) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/not-found`);
+      await response.body?.cancel();
+    } catch {
+      return;
+    }
+
+    await delay(50);
+  }
+
+  throw new Error(`Timed out waiting for port ${port} to stop listening`);
 }
 
 async function startMockTarget(responseText = "ok", extraHeaders = {}) {
@@ -238,12 +235,9 @@ test("proxy blocks loopback targets by default", async (t) => {
   });
 
   const target = encodeURIComponent("http://127.0.0.1:59999/");
-  const response = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${target}`,
-    {
-      headers: { Origin: ORIGIN },
-    },
-  );
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: ORIGIN },
+  });
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -257,12 +251,9 @@ test("proxy blocks non-allowlisted hosts by default", async (t) => {
   });
 
   const target = encodeURIComponent("https://example.com/");
-  const response = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${target}`,
-    {
-      headers: { Origin: ORIGIN },
-    },
-  );
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: ORIGIN },
+  });
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -280,10 +271,7 @@ test("proxy default allowlist includes supported OAuth and web search providers"
     .split("\n")
     .find((line) => line.includes("Allowed target hosts"));
 
-  assert.ok(
-    allowlistLine,
-    "Expected startup logs to include default allowed target hosts",
-  );
+  assert.ok(allowlistLine, "Expected startup logs to include default allowed target hosts");
 
   const loggedHosts = new Set(
     allowlistLine
@@ -299,6 +287,9 @@ test("proxy default allowlist includes supported OAuth and web search providers"
     "platform.claude.com",
     "auth.openai.com",
     "openrouter.ai",
+    "api.individual.githubcopilot.com",
+    "api.business.githubcopilot.com",
+    "api.enterprise.githubcopilot.com",
     "s.jina.ai",
     "api.firecrawl.dev",
     "google.serper.dev",
@@ -307,10 +298,13 @@ test("proxy default allowlist includes supported OAuth and web search providers"
   ];
 
   for (const host of requiredHosts) {
-    assert.ok(
-      loggedHosts.has(host),
-      `Expected ${host} in default target allowlist log`,
-    );
+    assert.ok(loggedHosts.has(host), `Expected ${host} in default target allowlist log`);
+    assert.deepEqual(evaluateTargetHostPolicy({ hostname: host, allowedHosts: loggedHosts }), { allowed: true });
+  }
+  for (const host of ["api.individual.githubcopilot.com.example.com", "api.business.githubcopilot.com.example.com", "api.enterprise.githubcopilot.com.example.com", "api.other.githubcopilot.com", "proxy.individual.githubcopilot.com"]) {
+    const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${encodeURIComponent(`https://${host}/responses`)}`, { headers: { Origin: ORIGIN } });
+    assert.equal(response.status, 403);
+    assert.match(await response.text(), /blocked_target_not_allowlisted/);
   }
 });
 
@@ -320,15 +314,10 @@ test("proxy allows GitHub enterprise OAuth-style endpoints on custom domains by 
     await proxy.stop();
   });
 
-  const target = encodeURIComponent(
-    "https://ghe.example.invalid/login/device/code",
-  );
-  const response = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${target}`,
-    {
-      headers: { Origin: ORIGIN },
-    },
-  );
+  const target = encodeURIComponent("https://ghe.example.invalid/login/device/code");
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: ORIGIN },
+  });
 
   assert.equal(response.status, 502);
   const text = await response.text();
@@ -344,15 +333,10 @@ test("explicit ALLOWED_TARGET_HOSTS keeps enterprise-path host checks strict", a
     await proxy.stop();
   });
 
-  const target = encodeURIComponent(
-    "https://ghe.example.invalid/login/device/code",
-  );
-  const response = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${target}`,
-    {
-      headers: { Origin: ORIGIN },
-    },
-  );
+  const target = encodeURIComponent("https://ghe.example.invalid/login/device/code");
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: ORIGIN },
+  });
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -385,13 +369,11 @@ test("proxy can allow local targets with explicit overrides", async (t) => {
 
 test("proxy keeps its own CORS headers when upstream sends conflicting ones", async (t) => {
   const target = await startMockTarget("upstream-cors", {
-    // llama.cpp-style upstream: empty/incorrect CORS headers that would break
-    // the browser integration if forwarded verbatim.
     "Access-Control-Allow-Origin": "",
     "Access-Control-Allow-Methods": "GET",
     "Access-Control-Allow-Headers": "x-upstream-only",
     "Access-Control-Max-Age": "0",
-    Vary: "Accept-Encoding",
+    "Vary": "Accept-Encoding",
     "X-Upstream-Custom": "passthrough",
   });
   t.after(async () => {
@@ -414,7 +396,6 @@ test("proxy keeps its own CORS headers when upstream sends conflicting ones", as
   assert.equal(response.status, 200);
   assert.equal(await response.text(), "upstream-cors");
 
-  // Our CORS policy must win over upstream values.
   assert.equal(response.headers.get("access-control-allow-origin"), ORIGIN);
   assert.equal(
     response.headers.get("access-control-allow-methods"),
@@ -423,27 +404,21 @@ test("proxy keeps its own CORS headers when upstream sends conflicting ones", as
   assert.equal(response.headers.get("access-control-max-age"), "86400");
   assert.equal(response.headers.get("vary"), "Origin");
 
-  // Unrelated upstream headers still pass through.
   assert.equal(response.headers.get("x-upstream-custom"), "passthrough");
 });
 
 test("proxy cancels the upstream request when the client disconnects mid-stream", async (t) => {
   const port = await getFreePort();
   let upstreamClosed;
-  const upstreamClosedPromise = new Promise((resolve) => {
-    upstreamClosed = resolve;
-  });
+  const upstreamClosedPromise = new Promise((resolve) => { upstreamClosed = resolve; });
   let upstreamStarted;
-  const upstreamStartedPromise = new Promise((resolve) => {
-    upstreamStarted = resolve;
-  });
+  const upstreamStartedPromise = new Promise((resolve) => { upstreamStarted = resolve; });
   const server = http.createServer((req, res) => {
     upstreamStarted();
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/event-stream");
     res.write("data: first\n\n");
     const ticker = setInterval(() => res.write("data: tick\n\n"), 25);
-    // A generation that never finishes on its own; only a cancelled upstream request ends it.
     req.on("close", () => {
       clearInterval(ticker);
       upstreamClosed(Date.now());
@@ -487,37 +462,24 @@ test("proxy cancels the upstream request when the client disconnects mid-stream"
     upstreamClosedPromise,
     delay(3000).then(() => null),
   ]);
-  assert.notEqual(
-    closedAt,
-    null,
-    "upstream request kept running after the client disconnected",
-  );
+  assert.notEqual(closedAt, null, "upstream request kept running after the client disconnected");
   assert.ok(closedAt - abortedAt < 3000);
 
-  // The proxy must stay healthy and must not report the cancellation as an upstream error.
   await delay(100);
   const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
   assert.equal(health.status, 200);
   const { stdout, stderr } = proxy.getLogs();
-  assert.doesNotMatch(
-    `${stdout}\n${stderr}`,
-    /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u,
-  );
+  assert.doesNotMatch(`${stdout}\n${stderr}`, /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u);
 });
 
 test("proxy cancels an upstream request the client abandons before any response arrives", async (t) => {
   const port = await getFreePort();
   let upstreamClosed;
-  const upstreamClosedPromise = new Promise((resolve) => {
-    upstreamClosed = resolve;
-  });
+  const upstreamClosedPromise = new Promise((resolve) => { upstreamClosed = resolve; });
   let upstreamStarted;
-  const upstreamStartedPromise = new Promise((resolve) => {
-    upstreamStarted = resolve;
-  });
+  const upstreamStartedPromise = new Promise((resolve) => { upstreamStarted = resolve; });
   const server = http.createServer((req, res) => {
     upstreamStarted();
-    // Provider still "thinking": no headers yet. Only a cancelled request ends this.
     const pending = setTimeout(() => res.end("late"), 10_000);
     req.on("close", () => {
       clearTimeout(pending);
@@ -553,24 +515,14 @@ test("proxy cancels an upstream request the client abandons before any response 
   client.abort();
   await assert.rejects(request, { name: "AbortError" });
 
-  const closed = await Promise.race([
-    upstreamClosedPromise,
-    delay(3000).then(() => false),
-  ]);
-  assert.equal(
-    closed,
-    true,
-    "upstream request kept running after the client disconnected",
-  );
+  const closed = await Promise.race([upstreamClosedPromise, delay(3000).then(() => false)]);
+  assert.equal(closed, true, "upstream request kept running after the client disconnected");
 
   await delay(100);
   const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
   assert.equal(health.status, 200);
   const { stdout, stderr } = proxy.getLogs();
-  assert.doesNotMatch(
-    `${stdout}\n${stderr}`,
-    /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u,
-  );
+  assert.doesNotMatch(`${stdout}\n${stderr}`, /ERROR|Proxy error|ERR_HTTP_HEADERS_SENT|Unhandled/u);
   assert.match(stdout, /cancelled by client/u);
 });
 
@@ -583,12 +535,9 @@ test("proxy enforces ALLOWED_TARGET_HOSTS when configured", async (t) => {
   });
 
   const blocked = encodeURIComponent("https://example.com/");
-  const response = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${blocked}`,
-    {
-      headers: { Origin: ORIGIN },
-    },
-  );
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/?url=${blocked}`, {
+    headers: { Origin: ORIGIN },
+  });
 
   assert.equal(response.status, 403);
   const text = await response.text();
@@ -606,12 +555,9 @@ test("proxy blocks requests without an allowed Origin header", async (t) => {
   const noOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`);
   assert.equal(noOrigin.status, 403);
 
-  const badOrigin = await fetch(
-    `http://127.0.0.1:${proxy.port}/?url=${target}`,
-    {
-      headers: { Origin: "https://evil.example.com" },
-    },
-  );
+  const badOrigin = await fetch(`http://127.0.0.1:${proxy.port}/?url=${target}`, {
+    headers: { Origin: "https://evil.example.com" },
+  });
   assert.equal(badOrigin.status, 403);
 });
 
@@ -669,27 +615,24 @@ test("proxy captures OAuth callbacks for supported localhost providers", async (
     },
   ];
 
-  await Promise.all(
-    cases.map((entry) =>
-      waitForHttpStatus(`http://127.0.0.1:${entry.port}/not-found`, 404),
-    ),
-  );
+  for (const entry of cases) {
+    await assert.rejects(fetch(`http://127.0.0.1:${entry.port}/not-found`));
+  }
 
   for (const entry of cases) {
+    const pollUrl = `http://127.0.0.1:${proxy.port}/oauth/callback/${entry.id}?state=${encodeURIComponent(entry.state)}`;
+    const pendingResponse = await fetch(pollUrl, { headers: { Origin: ORIGIN } });
+    assert.deepEqual(await pendingResponse.json(), { status: "pending" });
+    await waitForHttpStatus(`http://127.0.0.1:${entry.port}/not-found`, 404);
+
     const callbackUrl =
       `http://127.0.0.1:${entry.port}${entry.path}?` +
       `code=${encodeURIComponent(entry.code)}&state=${encodeURIComponent(entry.state)}`;
     const callbackResponse = await fetch(callbackUrl);
     assert.equal(callbackResponse.status, 200);
-    assert.match(
-      await callbackResponse.text(),
-      new RegExp(`${entry.label} login captured`),
-    );
+    assert.match(await callbackResponse.text(), new RegExp(`${entry.label} login captured`));
 
-    const pollResponse = await fetch(
-      `http://127.0.0.1:${proxy.port}/oauth/callback/${entry.id}?state=${encodeURIComponent(entry.state)}`,
-      { headers: { Origin: ORIGIN } },
-    );
+    const pollResponse = await fetch(pollUrl, { headers: { Origin: ORIGIN } });
     assert.equal(pollResponse.status, 200);
 
     const payload = await pollResponse.json();
@@ -699,6 +642,8 @@ test("proxy captures OAuth callbacks for supported localhost providers", async (
     assert.equal(payload.state, entry.state);
     assert.equal(payload.url, callbackUrl);
     assert.equal(typeof payload.receivedAt, "number");
+
+    await waitForPortClosed(entry.port);
   }
 
   const noOrigin = await fetch(
@@ -713,6 +658,43 @@ test("proxy captures OAuth callbacks for supported localhost providers", async (
   assert.equal(unsupportedProvider.status, 404);
 });
 
+test("proxy releases an OAuth callback port once login polling stops", async (t) => {
+  const callbackPort = await getFreePort();
+  const proxy = await startProxy({
+    OAUTH_CALLBACK_SERVER: "1",
+    OAUTH_CALLBACK_HOST: "127.0.0.1",
+    OPENAI_OAUTH_CALLBACK_PORT: String(callbackPort),
+    OAUTH_CALLBACK_LISTENER_IDLE_MS: "600",
+  });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const poll = () => fetch(`http://127.0.0.1:${proxy.port}/oauth/callback/openai-codex?state=abandoned`, {
+    headers: { Origin: ORIGIN },
+  }).then((response) => response.json());
+
+  const badOrigin = await fetch(`http://127.0.0.1:${proxy.port}/oauth/callback/openai-codex?state=abandoned`, {
+    headers: { Origin: "https://evil.example.com" },
+  });
+  assert.equal(badOrigin.status, 403);
+  await delay(100);
+  await assert.rejects(fetch(`http://127.0.0.1:${callbackPort}/not-found`));
+
+  assert.deepEqual(await poll(), { status: "pending" });
+  await waitForHttpStatus(`http://127.0.0.1:${callbackPort}/not-found`, 404);
+
+  for (let i = 0; i < 4; i += 1) {
+    await delay(250);
+    assert.deepEqual(await poll(), { status: "pending" });
+  }
+  const stillBound = await fetch(`http://127.0.0.1:${callbackPort}/not-found`);
+  assert.equal(stillBound.status, 404);
+
+  await delay(600);
+  await waitForPortClosed(callbackPort);
+});
+
 test("proxy /healthz responds without an Origin header and never proxies", async (t) => {
   const proxy = await startProxy();
   t.after(async () => {
@@ -722,33 +704,21 @@ test("proxy /healthz responds without an Origin header and never proxies", async
   const health = await fetch(`http://127.0.0.1:${proxy.port}/healthz`);
   assert.equal(health.status, 200);
   assert.equal(health.headers.get("x-pi-for-excel-proxy"), "1");
-  assert.equal(
-    health.headers.get("x-pi-for-excel-codex-websocket-bridge"),
-    "1",
-  );
+  assert.equal(health.headers.get("x-pi-for-excel-codex-websocket-bridge"), "1");
   assert.equal(await health.text(), "ok");
 
   const browserHealth = await fetch(`http://127.0.0.1:${proxy.port}/healthz`, {
     headers: { Origin: ORIGIN },
   });
   assert.equal(browserHealth.status, 200);
-  assert.equal(
-    browserHealth.headers.get("access-control-allow-origin"),
-    ORIGIN,
-  );
-  const exposedHeaders =
-    browserHealth.headers.get("access-control-expose-headers")?.toLowerCase() ??
-    "";
+  assert.equal(browserHealth.headers.get("access-control-allow-origin"), ORIGIN);
+  const exposedHeaders = browserHealth.headers.get("access-control-expose-headers")?.toLowerCase() ?? "";
   assert.match(exposedHeaders, /x-pi-for-excel-proxy/);
   assert.match(exposedHeaders, /x-pi-for-excel-codex-websocket-bridge/);
   assert.equal(browserHealth.headers.get("x-pi-for-excel-proxy"), "1");
-  assert.equal(
-    browserHealth.headers.get("x-pi-for-excel-codex-websocket-bridge"),
-    "1",
-  );
+  assert.equal(browserHealth.headers.get("x-pi-for-excel-codex-websocket-bridge"), "1");
   assert.equal(await browserHealth.text(), "ok");
 
-  // Query strings (including ?url=) must not turn /healthz into a proxy path.
   const withUrl = await fetch(
     `http://127.0.0.1:${proxy.port}/healthz?url=${encodeURIComponent("https://api.openai.com/")}`,
   );
@@ -762,9 +732,7 @@ test("proxy restricts the Codex WebSocket bridge to the exact ChatGPT endpoint",
     await proxy.stop();
   });
 
-  const target = encodeURIComponent(
-    "https://chatgpt.com/backend-api/not-codex",
-  );
+  const target = encodeURIComponent("https://chatgpt.com/backend-api/not-codex");
   const response = await fetch(
     `http://127.0.0.1:${proxy.port}/?pi_transport=codex-websocket&url=${target}`,
     {
@@ -775,10 +743,7 @@ test("proxy restricts the Codex WebSocket bridge to the exact ChatGPT endpoint",
   );
 
   assert.equal(response.status, 400);
-  assert.match(
-    await response.text(),
-    /target must be https:\/\/chatgpt\.com\/backend-api\/codex\/responses/,
-  );
+  assert.match(await response.text(), /target must be https:\/\/chatgpt\.com\/backend-api\/codex\/responses/);
 });
 
 test("proxy rejects unknown internal transport modes", async (t) => {
@@ -787,9 +752,7 @@ test("proxy rejects unknown internal transport modes", async (t) => {
     await proxy.stop();
   });
 
-  const target = encodeURIComponent(
-    "https://chatgpt.com/backend-api/codex/responses",
-  );
+  const target = encodeURIComponent("https://chatgpt.com/backend-api/codex/responses");
   const response = await fetch(
     `http://127.0.0.1:${proxy.port}/?pi_transport=unknown&url=${target}`,
     { method: "POST", headers: { Origin: ORIGIN }, body: "{}" },
@@ -817,24 +780,13 @@ test("proxy auto-selects a random port when default 3003 is busy and PORT is not
   assert.equal(await health.text(), "ok");
 
   const { stdout, stderr } = second.getLogs();
-  const listeningLogCount =
-    stdout.match(/CORS proxy listening on/g)?.length ?? 0;
-  const settingsHintCount =
-    stdout.match(/Update Pi for Excel \/settings → Proxy URL/g)?.length ?? 0;
+  const listeningLogCount = stdout.match(/CORS proxy listening on/g)?.length ?? 0;
+  const settingsHintCount = stdout.match(/Update Pi for Excel \/settings → Proxy URL/g)?.length ?? 0;
   assert.equal(listeningLogCount, 1);
   assert.equal(settingsHintCount, 1);
-  assert.match(
-    stderr,
-    /Port 3003 is already in use; choosing a random available port instead\./,
-  );
-  assert.match(
-    stdout,
-    new RegExp(`CORS proxy listening on http://127\\.0\\.0\\.1:${second.port}`),
-  );
-  assert.match(
-    stdout,
-    /Update Pi for Excel \/settings → Proxy URL to http:\/\/127\.0\.0\.1:\d+/,
-  );
+  assert.match(stderr, /Port 3003 is already in use; choosing a random available port instead\./);
+  assert.match(stdout, new RegExp(`CORS proxy listening on http://127\\.0\\.0\\.1:${second.port}`));
+  assert.match(stdout, /Update Pi for Excel \/settings → Proxy URL to http:\/\/127\.0\.0\.1:\d+/);
 });
 
 test("proxy boots with ALLOWED_CLIENT_CIDRS, warns, and still serves loopback", async (t) => {
@@ -849,10 +801,7 @@ test("proxy boots with ALLOWED_CLIENT_CIDRS, warns, and still serves loopback", 
   assert.equal(health.status, 200);
 
   const { stdout } = proxy.getLogs();
-  assert.match(
-    stdout,
-    /WARNING: accepting non-loopback clients from: 10\.96\.0\.0\/13, 192\.168\.1\.5/,
-  );
+  assert.match(stdout, /WARNING: accepting non-loopback clients from: 10\.96\.0\.0\/13, 192\.168\.1\.5/);
 });
 
 test("proxy exits on invalid ALLOWED_CLIENT_CIDRS (fail closed)", async () => {
@@ -931,7 +880,6 @@ test("configured ALLOWED_TARGET_HOSTS is enforced even with loopback/private ove
     await target.stop();
   });
 
-  // Loopback target not in the configured allowlist → blocked despite override flags.
   const blocked = await fetch(
     `http://127.0.0.1:${proxy.port}/?url=${encodeURIComponent(`http://127.0.0.1:${target.port}/`)}`,
     { headers: { Origin: ORIGIN } },
@@ -987,8 +935,15 @@ test("proxy exits on explicit ALLOWED_TARGET_HOSTS with no valid entries (fail c
   ]);
 
   assert.equal(code, 1);
-  assert.match(
-    stderr,
-    /ALLOWED_TARGET_HOSTS was set but contained no valid host entries/,
-  );
+  assert.match(stderr, /ALLOWED_TARGET_HOSTS was set but contained no valid host entries/);
+});
+
+test("default allowed origins include the dev server origin", async (t) => {
+  const proxy = await startProxy({ ALLOWED_ORIGINS: "" });
+  t.after(async () => {
+    await proxy.stop();
+  });
+
+  const response = await fetch(`http://127.0.0.1:${proxy.port}/healthz`, { headers: { Origin: DEV_BASE_URL } });
+  assert.equal(response.headers.get("access-control-allow-origin"), DEV_BASE_URL);
 });

@@ -1,18 +1,20 @@
-/**
- * Tool wrapper that routes mutating tool calls through the workbook coordinator.
- */
+import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
+import type { Static, TSchema } from "typebox";
+import { Value } from "typebox/value";
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { TSchema } from "typebox";
-
-import {
-  formatExecutionModeLabel,
-  type ExecutionMode,
-} from "../execution/mode.js";
+import type { ExecutionMode } from "../execution/mode.js";
 import type { WorkbookCoordinator, WorkbookOperationContext } from "../workbook/coordinator.js";
+import { cancelCellEditWaits } from "../excel/helpers.js";
 import { getErrorMessage } from "../utils/errors.js";
-import { getToolContextImpact, getToolExecutionMode, type ToolContextImpact } from "./execution-policy.js";
+import { ToolStoppedError } from "./tool-stopped.js";
+import {
+  getToolApprovalRequirement,
+  getToolContextImpact,
+  getToolExecutionMode,
+  type ToolContextImpact,
+} from "./execution-policy.js";
 import { isUnsupportedHostTool } from "./unsupported-host-tool.js";
+import { mutationTargetSchema, requireExplicitMutationTarget } from "./mutation/target.js";
 
 export interface WorkbookCoordinatorContextProvider {
   getWorkbookId: () => Promise<string | null>;
@@ -27,24 +29,51 @@ export interface WorkbookMutationEvent {
   revision: number;
 }
 
+export interface WorkbookWriteWindow {
+  toolCallId: string;
+  toolName: string;
+  startedAt: number;
+  settledAt: number;
+}
+
 export interface WorkbookMutationObserver {
   onWriteCommitted?: (event: WorkbookMutationEvent) => void;
+  onWriteStarted?: (window: WorkbookWriteWindow) => void;
 }
 
-export interface MutationApprovalRequest {
+export interface ToolApprovalRequest {
+  toolCallId: string;
   executionMode: ExecutionMode;
+  reason: "confirm_mode" | "always" | "irreversible";
   toolName: string;
   params: unknown;
+  signal?: AbortSignal;
+  overwrites?: OverwrittenCells;
+  unbackableCellCount?: number;
 }
 
+export interface ApprovalPrecheck<TParameters extends TSchema, TDetails> {
+  alwaysCheckBeforeApproval?: boolean;
+  checkBeforeApproval?: (
+    toolCallId: string,
+    params: Static<TParameters>,
+  ) => Promise<ApprovalPrecheckResult<TDetails>>;
+}
+
+export interface OverwrittenCells {
+  count: number;
+  sample: Array<{ address: string; content: string }>;
+}
+
+export type ApprovalPrecheckResult<TDetails> =
+  | { refused: AgentToolResult<TDetails> }
+  | { overwrites: OverwrittenCells }
+  | { unbackableCellCount: number }
+  | null;
+
 export interface WorkbookExecutionPolicy {
-  /** Default: yolo */
   getExecutionMode?: () => Promise<ExecutionMode>;
-  /**
-   * Called for mutating tools when execution mode is "safe".
-   * Return `true` to proceed, `false` to block.
-   */
-  requestMutationApproval?: (request: MutationApprovalRequest) => Promise<boolean>;
+  requestToolApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
 }
 
 function makeContext(args: {
@@ -60,148 +89,190 @@ function makeContext(args: {
   };
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
+function throwIfAborted(signal: AbortSignal | undefined, mutation = false): void {
   if (!signal?.aborted) return;
 
-  // Keep message text compatible with existing abort handling paths.
-  throw new Error("Aborted");
+  throw new ToolStoppedError(mutation ? "Stopped before running; nothing changed in the workbook." : undefined);
 }
 
-function isWorkbookCoordinatorParamsShape(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export interface StopReporting {
+  reportsStop?: true;
 }
 
-function getActionParam(params: unknown): string | null {
-  if (!isWorkbookCoordinatorParamsShape(params)) return null;
+export const STOPPED_AFTER_CHANGE_NOTE =
+  "⏹ Stop was pressed while this ran; the change above was already applied and stands.";
 
-  const action = params.action;
-  return typeof action === "string" && action.trim().length > 0 ? action.trim() : null;
+function appendStopNote<TDetails>(result: AgentToolResult<TDetails>): AgentToolResult<TDetails> {
+  const [first, ...rest] = result.content;
+  if (!first || first.type !== "text") return result;
+  return { ...result, content: [{ ...first, text: `${first.text}\n\n${STOPPED_AFTER_CHANGE_NOTE}` }, ...rest] };
 }
 
-function getRangeParam(params: unknown): string | null {
-  if (!isWorkbookCoordinatorParamsShape(params)) return null;
+export const STOP_GRACE_MS: Readonly<Record<"read" | "write", number>> = { read: 500, write: 10_000 };
 
-  const range = params.range;
-  return typeof range === "string" && range.trim().length > 0 ? range.trim() : null;
-}
-
-export function buildMutationApprovalMessage(request: MutationApprovalRequest): string {
-  const modeLabel = formatExecutionModeLabel(request.executionMode);
-  const action = getActionParam(request.params);
-  const range = getRangeParam(request.params);
-
-  const toolLabel = action ? `${request.toolName}:${action}` : request.toolName;
-  const lines = [
-    `Allow workbook mutation in ${modeLabel} mode?`,
-    "",
-    `Tool: ${toolLabel}`,
-  ];
-
-  if (range) {
-    lines.push(`Range: ${range}`);
-  }
-
-  lines.push("", "Tip: run /yolo on to switch to Auto mode (no confirmations).");
-  return lines.join("\n");
-}
-
-function defaultGetExecutionMode(): Promise<ExecutionMode> {
-  return Promise.resolve("yolo");
-}
-
-function defaultRequestMutationApproval(_request: MutationApprovalRequest): Promise<boolean> {
-  return Promise.reject(new Error(
-    "Confirm mode requires explicit user approval, but confirmation UI is unavailable.",
-  ));
-}
-
-async function requireMutationApprovalIfNeeded(args: {
-  policy: WorkbookExecutionPolicy;
-  toolName: string;
-  params: unknown;
-}): Promise<void> {
-  const getExecutionMode = args.policy.getExecutionMode ?? defaultGetExecutionMode;
-  const executionMode = await getExecutionMode();
-
-  if (executionMode !== "safe") {
-    return;
-  }
-
-  const requestMutationApproval = args.policy.requestMutationApproval ?? defaultRequestMutationApproval;
-  const approved = await requestMutationApproval({
-    executionMode,
-    toolName: args.toolName,
-    params: args.params,
+function settleOnStop<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  mode: "read" | "write",
+): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      cancelCellEditWaits();
+      timer = setTimeout(() => {
+        work.catch(() => {});
+        reject(mode === "write"
+          ? Object.assign(new Error("Stopped by the user while Excel was still working on this change. The outcome is unknown: the change may still be applied. Read the affected range back before relying on it."), { outcomeUnknown: true })
+          : new ToolStoppedError("Stopped by the user before Excel answered."));
+      }, STOP_GRACE_MS[mode]);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    });
   });
-
-  if (!approved) {
-    throw new Error("Mutation cancelled by user (Confirm mode).");
-  }
 }
+
+type PendingMutations = Set<Promise<void>>;
 
 function wrapTool<TParameters extends TSchema, TDetails>(
-  tool: AgentTool<TParameters, TDetails>,
+  tool: AgentTool<TParameters, TDetails> & ApprovalPrecheck<TParameters, TDetails> & StopReporting,
   coordinator: WorkbookCoordinator,
   contextProvider: WorkbookCoordinatorContextProvider,
   mutationObserver: WorkbookMutationObserver | undefined,
   executionPolicy: WorkbookExecutionPolicy,
+  pendingMutations: PendingMutations,
 ): AgentTool<TParameters, TDetails> {
   return {
     ...tool,
-    execute: async (toolCallId, params, signal, onUpdate) => {
+    execute: (toolCallId, params, signal, onUpdate) => {
       const mode = getToolExecutionMode(tool.name, params);
-      const contextWorkbookId = await contextProvider.getWorkbookId();
-      const coordinatorWorkbookId = contextWorkbookId ?? "workbook:unknown";
-      const sessionId = contextProvider.getSessionId();
-      const context = makeContext({
-        workbookId: coordinatorWorkbookId,
-        sessionId,
-        toolName: tool.name,
-      });
-
-      throwIfAborted(signal);
-
       if (mode === "read") {
-        return coordinator.runRead(context, () => {
-          throwIfAborted(signal);
-          return tool.execute(toolCallId, params, signal, onUpdate);
-        });
+        const earlierMutations = [...pendingMutations];
+        if (earlierMutations.length === 0) return run(mode, toolCallId, params, signal, onUpdate);
+        return Promise.all(earlierMutations).then(() => run(mode, toolCallId, params, signal, onUpdate));
       }
 
-      await requireMutationApprovalIfNeeded({
-        policy: executionPolicy,
-        toolName: tool.name,
-        params,
-      });
-
-      throwIfAborted(signal);
-
-      const out = await coordinator.runWrite(
-        context,
-        () => {
-          throwIfAborted(signal);
-          return tool.execute(toolCallId, params, signal, onUpdate);
-        },
-      );
-
-      if (mutationObserver?.onWriteCommitted) {
-        const impact = getToolContextImpact(tool.name, params);
-        try {
-          mutationObserver.onWriteCommitted({
-            workbookId: contextWorkbookId,
-            sessionId,
-            toolName: tool.name,
-            impact,
-            revision: out.revision,
-          });
-        } catch (error) {
-          console.warn("[pi] Workbook mutation observer failed:", getErrorMessage(error));
-        }
-      }
-
-      return out.result;
+      const running = run(mode, toolCallId, params, signal, onUpdate);
+      const settled = running.then(() => undefined, () => undefined);
+      pendingMutations.add(settled);
+      void settled.then(() => pendingMutations.delete(settled));
+      return running;
     },
   };
+
+  async function run(
+    mode: ReturnType<typeof getToolExecutionMode>,
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal: AbortSignal | undefined,
+    onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
+  ): Promise<AgentToolResult<TDetails>> {
+    if (mode === "mutate" && Value.Check(mutationTargetSchema, params)) {
+      requireExplicitMutationTarget(tool.name, params);
+    }
+    const contextWorkbookId = await contextProvider.getWorkbookId();
+    const coordinatorWorkbookId = contextWorkbookId ?? "workbook:unknown";
+    const sessionId = contextProvider.getSessionId();
+    const context = makeContext({
+      workbookId: coordinatorWorkbookId,
+      sessionId,
+      toolName: tool.name,
+    });
+
+    throwIfAborted(signal, mode !== "read");
+
+    let requirement = getToolApprovalRequirement(tool.name, params);
+    const executionMode = requirement === "none"
+      ? "yolo"
+      : await executionPolicy.getExecutionMode?.() ?? "yolo";
+    if (tool.alwaysCheckBeforeApproval || requirement === "always" || requirement === "irreversible" || (requirement === "confirm_mode" && executionMode === "safe")) {
+      const { checkBeforeApproval } = tool;
+      const checked = checkBeforeApproval
+        ? await coordinator.runRead(
+          makeContext({ workbookId: coordinatorWorkbookId, sessionId, toolName: tool.name }),
+          () => checkBeforeApproval(toolCallId, params),
+        )
+        : null;
+      if (checked && "refused" in checked) return checked.refused;
+      if (checked && "unbackableCellCount" in checked) requirement = "irreversible";
+      if (requirement === "always" || requirement === "irreversible" || (requirement === "confirm_mode" && executionMode === "safe")) {
+        if (!executionPolicy.requestToolApproval) {
+          throw new Error("This action requires explicit user approval, but confirmation UI is unavailable.");
+        }
+        const approved = await executionPolicy.requestToolApproval({
+          toolCallId,
+          executionMode,
+          reason: requirement,
+          toolName: tool.name,
+          params,
+          ...(signal ? { signal } : {}),
+          ...(checked && "overwrites" in checked ? { overwrites: checked.overwrites } : {}),
+          ...(checked && "unbackableCellCount" in checked ? { unbackableCellCount: checked.unbackableCellCount } : {}),
+        });
+        throwIfAborted(signal);
+        if (!approved) throw new Error(requirement === "confirm_mode"
+          ? "The user declined this workbook change when asked (Confirm mode)."
+          : "The user declined this action when asked.");
+      }
+    }
+
+    if (mode === "read") {
+      return coordinator.runRead(context, () => {
+        throwIfAborted(signal);
+        return settleOnStop(tool.execute(toolCallId, params, signal, onUpdate), signal, "read");
+      });
+    }
+
+    throwIfAborted(signal, true);
+
+    const out = await coordinator.runWrite(
+      context,
+      async () => {
+        throwIfAborted(signal, true);
+        const window: WorkbookWriteWindow = {
+          toolCallId,
+          toolName: tool.name,
+          startedAt: Date.now(),
+          settledAt: Number.POSITIVE_INFINITY,
+        };
+        try {
+          mutationObserver?.onWriteStarted?.(window);
+        } catch (error) {
+          console.warn("[pi] Workbook write observer failed:", getErrorMessage(error));
+        }
+        try {
+          const work = tool.execute(toolCallId, params, signal, onUpdate);
+          return await (tool.reportsStop ? work : settleOnStop(work, signal, "write"));
+        } finally {
+          window.settledAt = Date.now();
+        }
+      },
+    );
+
+    if (mutationObserver?.onWriteCommitted) {
+      const impact = getToolContextImpact(tool.name, params);
+      try {
+        mutationObserver.onWriteCommitted({
+          workbookId: contextWorkbookId,
+          sessionId,
+          toolName: tool.name,
+          impact,
+          revision: out.revision,
+        });
+      } catch (error) {
+        console.warn("[pi] Workbook mutation observer failed:", getErrorMessage(error));
+      }
+    }
+
+    if (signal?.aborted && !tool.reportsStop && out.result.isError !== true) {
+      return appendStopNote(out.result);
+    }
+    return out.result;
+  }
 }
 
 export function withWorkbookCoordinator(
@@ -211,7 +282,8 @@ export function withWorkbookCoordinator(
   mutationObserver?: WorkbookMutationObserver,
   executionPolicy: WorkbookExecutionPolicy = {},
 ): AgentTool[] {
+  const pendingMutations: PendingMutations = new Set();
   return tools.map((tool) => isUnsupportedHostTool(tool)
     ? tool
-    : wrapTool(tool, coordinator, contextProvider, mutationObserver, executionPolicy));
+    : wrapTool(tool, coordinator, contextProvider, mutationObserver, executionPolicy, pendingMutations));
 }

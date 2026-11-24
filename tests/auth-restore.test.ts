@@ -29,7 +29,6 @@ class TestSettingsStore extends SettingsStore {
 
   override get<T = unknown>(key: string): Promise<T | null> {
     const value = this.values.get(key);
-    // Test fixtures control every stored value and callers validate OAuth payloads.
     return Promise.resolve(value === undefined ? null : value as T);
   }
 
@@ -47,7 +46,7 @@ class TestSettingsStore extends SettingsStore {
 const validBrowserGrant = {
   access: "browser-access-fixture",
   refresh: "browser-refresh-fixture",
-  expires: Date.now() + 60_000,
+  expires: Date.now() + 60 * 60_000,
 };
 
 async function restoreBrowserAfterDevPayload(

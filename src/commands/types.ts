@@ -1,26 +1,13 @@
-/**
- * Slash command system — types and registry.
- */
-
 export type CommandSource = "builtin" | "extension" | "integration" | "prompt";
 
 export interface SlashCommand {
-  /** Command name (without the leading `/`) */
   name: string;
-  /** Short description shown in the menu */
   description: string;
-  /** Source type for visual badge */
   source: CommandSource;
-  /** Execute the command. `args` is everything after the command name. */
+  menuVisibility?: "hidden" | "exact";
+  menuGroup?: "chat" | "workbook" | "setup";
   execute: (args: string) => void | Promise<void>;
-  /**
-   * Optional busy policy override.
-   *
-   * When true, command is allowed while the active runtime is busy.
-   * Extension commands default to busy-allowed unless explicitly set to false.
-   */
   busyAllowed?: boolean;
-  /** Optional: is this command available right now? */
   enabled?: () => boolean;
 }
 
@@ -39,18 +26,30 @@ class CommandRegistry {
     return this.commands.get(name);
   }
 
-  /** Get all commands, optionally filtered by prefix */
-  list(filter?: string): SlashCommand[] {
-    const all = Array.from(this.commands.values());
-    if (!filter) return all;
+  list(): SlashCommand[] {
+    return Array.from(this.commands.values());
+  }
+
+  hiddenAlias(typed: string): SlashCommand | undefined {
+    const command = this.commands.get(typed.toLowerCase());
+    return command?.menuVisibility === "hidden" ? command : undefined;
+  }
+
+  menu(filter: string): SlashCommand[] {
+    if (/\s/.test(filter)) return [];
     const q = filter.toLowerCase();
-    const matches = all.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q),
+    const matches = this.list().filter(
+      (c) => c.menuVisibility !== "hidden"
+        && (c.menuVisibility !== "exact" || c.name.toLowerCase() === q)
+        && (c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)),
     );
+    const rank = (command: SlashCommand): number => command.name.toLowerCase() === q ? 0
+      : command.name.toLowerCase().startsWith(q) ? 1
+      : command.name.toLowerCase().includes(q) ? 2 : 3;
+    const groups = { chat: 0, workbook: 1, setup: 2 };
     return matches.sort((left, right) => {
-      const leftExact = left.name.toLowerCase() === q ? 0 : 1;
-      const rightExact = right.name.toLowerCase() === q ? 0 : 1;
-      return leftExact - rightExact;
+      return rank(left) - rank(right)
+        || groups[left.menuGroup ?? "setup"] - groups[right.menuGroup ?? "setup"];
     });
   }
 }

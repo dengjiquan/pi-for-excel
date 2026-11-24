@@ -1,73 +1,59 @@
-function isToolsMcpPayloadShape(
-  value: unknown,
-): value is Record<string, unknown> {
+import { mapWithConcurrency } from "../utils/concurrency.js";
+function isToolsMcpPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * mcp — Model Context Protocol gateway for configured HTTP servers.
- */
-
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
+import { t } from "../language/index.js";
+import { getMcpToolGrants, setMcpToolGrant } from "./mcp-approvals.js";
+import type { ExecutionMode } from "../execution/mode.js";
 
 import { APP_NAME, APP_VERSION } from "../app/metadata.js";
 import { integrationsCommandHint } from "../integrations/naming.js";
 import { getErrorMessage } from "../utils/errors.js";
-import { getHttpErrorReason, runWithTimeoutAbort } from "../utils/network.js";
+import { parseJson, type JsonValue } from "../utils/json.js";
 import {
   buildProxyDownErrorMessage,
   getEnabledProxyBaseUrl,
   isLikelyProxyConnectionError,
-  resolveOutboundRequestUrl,
 } from "./external-fetch.js";
-import type {
-  SettingsReader,
-  SettingsWriter,
-} from "../storage/local/settings-store.js";
-import { loadMcpServers, type McpServerConfig } from "./mcp-config.js";
+import type { SettingsReader, SettingsWriter } from "../storage/local/settings-store.js";
 import {
-  MCP_HTTP_ACCEPT,
-  MCP_SESSION_HEADER,
-  parseMcpHttpResponseBody,
-} from "./mcp-http.js";
+  loadMcpServers,
+  type McpServerConfig,
+} from "./mcp-config.js";
+import {
+  MCP_PROTOCOL_VERSION,
+  postMcpJsonRpc,
+  type McpSession,
+} from "./mcp-transport.js";
+import { isStop, ToolStoppedError } from "./tool-stopped.js";
 
 const MCP_CLIENT_NAME = APP_NAME;
 const MCP_CLIENT_VERSION = APP_VERSION;
-const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MCP_TIMEOUT_MS = 15_000;
 
 const schema = Type.Object({
-  tool: Type.Optional(
-    Type.String({
-      description: "Tool name to call.",
-    }),
-  ),
-  args: Type.Optional(
-    Type.String({
-      description: "Tool arguments as a JSON string.",
-    }),
-  ),
-  connect: Type.Optional(
-    Type.String({
-      description: "Server name/id to connect and refresh.",
-    }),
-  ),
-  describe: Type.Optional(
-    Type.String({
-      description: "Tool name to describe.",
-    }),
-  ),
-  search: Type.Optional(
-    Type.String({
-      description: "Search query for MCP tools.",
-    }),
-  ),
-  server: Type.Optional(
-    Type.String({
-      description: "Optional server name/id filter.",
-    }),
-  ),
+  tool: Type.Optional(Type.String({
+    description: "Tool name to call.",
+  })),
+  args: Type.Optional(Type.String({
+    description: "Tool arguments as a JSON string.",
+  })),
+  connect: Type.Optional(Type.String({
+    description: "Server name/id to connect and refresh.",
+  })),
+  describe: Type.Optional(Type.String({
+    description: "Tool name to describe.",
+  })),
+  search: Type.Optional(Type.String({
+    description: "Search query for MCP tools.",
+  })),
+  server: Type.Optional(Type.String({
+    description: "Optional server name/id filter.",
+  })),
 });
 
 type Params = Static<typeof schema>;
@@ -79,6 +65,7 @@ interface McpToolDescriptor {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  readOnly: boolean;
 }
 
 interface ServerToolList {
@@ -86,13 +73,20 @@ interface ServerToolList {
   tools: McpToolDescriptor[];
   proxied: boolean;
   proxyBaseUrl?: string;
+  session: McpSession;
+  callJsonRpc: NonNullable<McpToolDependencies["callJsonRpc"]>;
+}
+
+interface PendingServerTools {
+  server: McpServerConfig;
+  proxyBaseUrl?: string;
+  promise: Promise<ServerToolList>;
 }
 
 interface RpcCallResult {
   result: unknown;
   proxied: boolean;
   proxyBaseUrl?: string;
-  sessionId?: string | undefined;
 }
 
 export interface McpGatewayDetails {
@@ -105,7 +99,6 @@ export interface McpGatewayDetails {
   proxyBaseUrl?: string;
   resultPreview?: string;
   error?: string;
-  /** `true` when the failure is due to the local CORS proxy being unreachable. */
   proxyDown?: boolean;
 }
 
@@ -115,15 +108,24 @@ export interface McpRuntimeConfig {
 }
 
 export interface McpToolDependencies {
+  getExecutionMode?: () => Promise<ExecutionMode>;
+  requestToolApproval?: (request: {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    signal?: AbortSignal;
+    secondaryApproval?: { label: string; onApprove: () => void | Promise<void> };
+  }) => Promise<boolean>;
+  getToolGrants?: (server: McpServerConfig) => Promise<string[]>;
+  grantTool?: (server: McpServerConfig, tool: string) => Promise<void>;
   getRuntimeConfig?: () => Promise<McpRuntimeConfig>;
   callJsonRpc?: (args: {
     server: McpServerConfig;
     method: string;
-    params?: unknown;
+    params?: JsonValue;
     signal: AbortSignal | undefined;
     proxyBaseUrl?: string;
     expectResponse?: boolean;
-    sessionId?: string | undefined;
   }) => Promise<RpcCallResult | null>;
 }
 
@@ -133,9 +135,7 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function proxyBaseUrlArg(proxyBaseUrl: string | undefined): {
-  proxyBaseUrl?: string;
-} {
+function proxyBaseUrlArg(proxyBaseUrl: string | undefined): { proxyBaseUrl?: string } {
   return proxyBaseUrl === undefined ? {} : { proxyBaseUrl };
 }
 
@@ -159,8 +159,7 @@ function createMcpGatewayDetails(args: {
   if (args.tool !== undefined) details.tool = args.tool;
   if (args.proxied !== undefined) details.proxied = args.proxied;
   if (args.proxyBaseUrl !== undefined) details.proxyBaseUrl = args.proxyBaseUrl;
-  if (args.resultPreview !== undefined)
-    details.resultPreview = args.resultPreview;
+  if (args.resultPreview !== undefined) details.resultPreview = args.resultPreview;
   if (args.error !== undefined) details.error = args.error;
   if (args.proxyDown !== undefined) details.proxyDown = args.proxyDown;
   return details;
@@ -198,10 +197,7 @@ function normalizeServerToken(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function findServerByToken(
-  servers: readonly McpServerConfig[],
-  token: string,
-): McpServerConfig | null {
+function findServerByToken(servers: readonly McpServerConfig[], token: string): McpServerConfig | null {
   const normalized = normalizeServerToken(token);
 
   for (const server of servers) {
@@ -220,10 +216,7 @@ function matchesServerToken(tool: McpToolDescriptor, token: string): boolean {
   );
 }
 
-function parseToolListResult(
-  server: McpServerConfig,
-  value: unknown,
-): McpToolDescriptor[] {
+function parseToolListResult(server: McpServerConfig, value: unknown): McpToolDescriptor[] {
   if (!isToolsMcpPayloadShape(value)) return [];
   if (!isToolsMcpPayloadShape(value.result)) return [];
   const result = value.result;
@@ -244,6 +237,7 @@ function parseToolListResult(
       serverName: server.name,
       serverUrl: server.url,
       name,
+      readOnly: Value.Check(Type.Object({ readOnlyHint: Type.Literal(true) }), item.annotations),
     };
     const description = normalizeOptionalString(item.description);
     if (description !== undefined) {
@@ -256,18 +250,6 @@ function parseToolListResult(
   }
 
   return out;
-}
-
-function parseJsonRpcError(value: unknown): string | null {
-  if (!isToolsMcpPayloadShape(value)) return null;
-
-  if (isToolsMcpPayloadShape(value.error)) {
-    const errorMessage = normalizeOptionalString(value.error.message);
-    if (errorMessage) return errorMessage;
-  }
-
-  const text = normalizeOptionalString(value.message);
-  return text ?? null;
 }
 
 function extractTextContentBlocks(value: unknown): string[] {
@@ -293,20 +275,17 @@ function formatJson(value: unknown): string {
   }
 }
 
-function parseCallArgs(rawArgs: string | undefined): unknown {
+function parseCallArgs(rawArgs: string | undefined): JsonValue {
   if (!rawArgs) return {};
 
   try {
-    return JSON.parse(rawArgs);
+    return parseJson(rawArgs);
   } catch {
     throw new Error("mcp.args must be valid JSON.");
   }
 }
 
-function buildServerStatusLine(
-  server: McpServerConfig,
-  tools: McpToolDescriptor[] | null,
-): string {
+function buildServerStatusLine(server: McpServerConfig, tools: McpToolDescriptor[] | null): string {
   if (!server.enabled) {
     return `- ${server.name} (${server.url}) — disabled`;
   }
@@ -318,10 +297,7 @@ function buildServerStatusLine(
   return `- ${server.name} (${server.url}) — enabled, ${tools.length} tool${tools.length === 1 ? "" : "s"}`;
 }
 
-function buildToolPreview(
-  tools: readonly McpToolDescriptor[],
-  max = 20,
-): string {
+function buildToolPreview(tools: readonly McpToolDescriptor[], max = 20): string {
   if (tools.length === 0) {
     return "No tools found.";
   }
@@ -379,134 +355,54 @@ async function defaultGetRuntimeConfig(): Promise<McpRuntimeConfig> {
   };
 }
 
-async function defaultCallJsonRpc(args: {
-  server: McpServerConfig;
-  method: string;
-  params?: unknown;
-  signal: AbortSignal | undefined;
-  proxyBaseUrl?: string;
-  expectResponse?: boolean;
-  sessionId?: string | undefined;
-}): Promise<RpcCallResult | null> {
-  const {
-    server,
-    method,
-    params,
-    signal,
-    proxyBaseUrl,
-    expectResponse = true,
-    sessionId,
-  } = args;
+function matchesConnection(
+  connection: { server: McpServerConfig; proxyBaseUrl?: string },
+  server: McpServerConfig,
+  proxyBaseUrl: string | undefined,
+): boolean {
+  return connection.server.url === server.url
+    && connection.server.token === server.token
+    && connection.server.name === server.name
+    && connection.proxyBaseUrl === proxyBaseUrl;
+}
 
-  const resolved = resolveOutboundRequestUrl({
-    targetUrl: server.url,
-    ...proxyBaseUrlArg(proxyBaseUrl),
+async function waitForServerTools(
+  promise: Promise<ServerToolList>,
+  signal: AbortSignal | undefined,
+): Promise<ServerToolList> {
+  signal?.throwIfAborted();
+  if (!signal) return promise;
+  let onAbort = (): void => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new ToolStoppedError());
+    signal.addEventListener("abort", onAbort, { once: true });
   });
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: MCP_HTTP_ACCEPT,
-  };
-
-  if (server.token) {
-    headers.Authorization = `Bearer ${server.token}`;
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
-
-  if (sessionId) {
-    headers[MCP_SESSION_HEADER] = sessionId;
-  }
-
-  const requestBody: Record<string, unknown> = {
-    jsonrpc: "2.0",
-    method,
-  };
-
-  const requestId = expectResponse ? crypto.randomUUID() : undefined;
-  if (requestId) requestBody.id = requestId;
-
-  if (params !== undefined) {
-    requestBody.params = params;
-  }
-
-  return runWithTimeoutAbort({
-    signal,
-    timeoutMs: MCP_TIMEOUT_MS,
-    timeoutErrorMessage: `MCP request timed out after ${MCP_TIMEOUT_MS}ms.`,
-    run: async (requestSignal) => {
-      const response = await fetch(resolved.requestUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(requestBody),
-        signal: requestSignal,
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        const reason = getHttpErrorReason(response.status, body);
-        throw new Error(`MCP request failed (${response.status}): ${reason}`);
-      }
-
-      if (!expectResponse) {
-        return {
-          result: null,
-          proxied: resolved.proxied,
-          ...proxyBaseUrlArg(resolved.proxyBaseUrl),
-          sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
-        };
-      }
-
-      const body = await response.text();
-      const payload: unknown = parseMcpHttpResponseBody({
-        text: body,
-        contentType: response.headers.get("Content-Type"),
-        requestId: requestId ?? "",
-      });
-
-      const rpcError = parseJsonRpcError(payload);
-      if (rpcError) {
-        throw new Error(rpcError);
-      }
-
-      if (!isToolsMcpPayloadShape(payload)) {
-        throw new Error("Invalid MCP JSON-RPC response.");
-      }
-
-      return {
-        result: payload,
-        proxied: resolved.proxied,
-        ...proxyBaseUrlArg(resolved.proxyBaseUrl),
-        sessionId: response.headers.get(MCP_SESSION_HEADER) ?? sessionId,
-      };
-    },
-  });
 }
 
 export function createMcpTool(
   dependencies: McpToolDependencies = {},
 ): AgentTool<TSchema, McpGatewayDetails> {
-  const getRuntimeConfig =
-    dependencies.getRuntimeConfig ?? defaultGetRuntimeConfig;
-  const callJsonRpc = dependencies.callJsonRpc ?? defaultCallJsonRpc;
-
+  const getRuntimeConfig = dependencies.getRuntimeConfig ?? defaultGetRuntimeConfig;
   const toolCache = new Map<string, ServerToolList>();
-  const sessionIds = new Map<string, string>();
+  const pendingTools = new Map<string, PendingServerTools>();
 
-  const ensureServerTools = async (args: {
-    server: McpServerConfig;
-    proxyBaseUrl?: string;
-    signal: AbortSignal | undefined;
-    refresh?: boolean;
-  }): Promise<ServerToolList> => {
-    const { server, proxyBaseUrl, signal, refresh = false } = args;
-
-    if (!refresh) {
-      const cached = toolCache.get(server.id);
-      if (cached) {
-        return cached;
-      }
-    }
-
-    const initializeResult = await callJsonRpc({
+  const discoverServerTools = async (
+    server: McpServerConfig,
+    proxyBaseUrl: string | undefined,
+  ): Promise<ServerToolList> => {
+    const session: McpSession = {};
+    const callJsonRpc = dependencies.callJsonRpc ?? ((args) => postMcpJsonRpc({
+      ...args,
+      session,
+      timeoutMs: MCP_TIMEOUT_MS,
+    }));
+    const signal = undefined;
+    await callJsonRpc({
       server,
       method: "initialize",
       params: {
@@ -521,21 +417,12 @@ export function createMcpTool(
       ...proxyBaseUrlArg(proxyBaseUrl),
     });
 
-    if (initializeResult?.sessionId) {
-      sessionIds.set(server.id, initializeResult.sessionId);
-    } else {
-      sessionIds.delete(server.id);
-    }
-
-    const sessionId = sessionIds.get(server.id);
-
     await callJsonRpc({
       server,
       method: "notifications/initialized",
       signal,
       ...proxyBaseUrlArg(proxyBaseUrl),
       expectResponse: false,
-      sessionId,
     });
 
     const listResult = await callJsonRpc({
@@ -544,7 +431,6 @@ export function createMcpTool(
       params: {},
       signal,
       ...proxyBaseUrlArg(proxyBaseUrl),
-      sessionId,
     });
 
     if (!listResult) {
@@ -557,31 +443,56 @@ export function createMcpTool(
       tools,
       proxied: listResult.proxied,
       ...proxyBaseUrlArg(listResult.proxyBaseUrl),
+      session,
+      callJsonRpc,
     };
-
-    toolCache.set(server.id, entry);
     return entry;
+  };
+
+  const ensureServerTools = async (args: {
+    server: McpServerConfig;
+    proxyBaseUrl?: string;
+    signal: AbortSignal | undefined;
+    refresh?: boolean;
+  }): Promise<ServerToolList> => {
+    const { server, proxyBaseUrl, signal, refresh = false } = args;
+    signal?.throwIfAborted();
+    const pending = pendingTools.get(server.id);
+    if (pending && matchesConnection(pending, server, proxyBaseUrl)) {
+      return waitForServerTools(pending.promise, signal);
+    }
+    const cached = toolCache.get(server.id);
+    if (!refresh && cached && !cached.session.expired && matchesConnection(cached, server, proxyBaseUrl)) {
+      return cached;
+    }
+    toolCache.delete(server.id);
+    const connectionServer = { ...server };
+    const request: PendingServerTools = {
+      server: connectionServer,
+      ...proxyBaseUrlArg(proxyBaseUrl),
+      promise: discoverServerTools(connectionServer, proxyBaseUrl),
+    };
+    pendingTools.set(server.id, request);
+    void request.promise.then((entry) => {
+      if (pendingTools.get(server.id) === request) {
+        toolCache.set(server.id, entry);
+        pendingTools.delete(server.id);
+      }
+    }, () => {
+      if (pendingTools.get(server.id) === request) pendingTools.delete(server.id);
+    });
+    return waitForServerTools(request.promise, signal);
   };
 
   const listToolsAcrossServers = async (args: {
     servers: readonly McpServerConfig[];
     proxyBaseUrl?: string;
     signal: AbortSignal | undefined;
-  }): Promise<ServerToolList[]> => {
-    const out: ServerToolList[] = [];
-
-    for (const server of args.servers) {
-      if (!server.enabled) continue;
-      const list = await ensureServerTools({
-        server,
-        ...proxyBaseUrlArg(args.proxyBaseUrl),
-        signal: args.signal,
-      });
-      out.push(list);
-    }
-
-    return out;
-  };
+  }): Promise<ServerToolList[]> => mapWithConcurrency(
+    args.servers.filter((server) => server.enabled),
+    4,
+    (server) => ensureServerTools({ server, ...proxyBaseUrlArg(args.proxyBaseUrl), signal: args.signal }),
+  );
 
   return {
     name: "mcp",
@@ -600,14 +511,10 @@ export function createMcpTool(
       try {
         const runtimeConfig = await getRuntimeConfig();
         usedProxyBaseUrl = runtimeConfig.proxyBaseUrl;
-        const enabledServers = runtimeConfig.servers.filter(
-          (server) => server.enabled,
-        );
+        const enabledServers = runtimeConfig.servers.filter((server) => server.enabled);
 
         if (runtimeConfig.servers.length === 0) {
-          throw new Error(
-            `No MCP servers configured. Open ${integrationsCommandHint()} to add one.`,
-          );
+          throw new Error(`No MCP servers configured. Open ${integrationsCommandHint()} to add one.`);
         }
 
         const resolveSingleServer = (token: string): McpServerConfig => {
@@ -653,18 +560,16 @@ export function createMcpTool(
 
         if (params.tool) {
           const candidateLists = params.server
-            ? [
-                await ensureServerTools({
-                  server: resolveSingleServer(params.server),
-                  ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
-                  signal,
-                }),
-              ]
+            ? [await ensureServerTools({
+              server: resolveSingleServer(params.server),
+              ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
+              signal,
+            })]
             : await listToolsAcrossServers({
-                servers: enabledServers,
-                ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
-                signal,
-              });
+              servers: enabledServers,
+              ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
+              signal,
+            });
 
           const allTools = candidateLists.flatMap((list) => list.tools);
           const matched = allTools.filter((tool) => tool.name === params.tool);
@@ -674,13 +579,9 @@ export function createMcpTool(
           }
 
           if (!params.server) {
-            const matchedServerIds = new Set(
-              matched.map((tool) => tool.serverId),
-            );
+            const matchedServerIds = new Set(matched.map((tool) => tool.serverId));
             if (matchedServerIds.size > 1) {
-              const serverNames = Array.from(
-                new Set(matched.map((tool) => tool.serverName)),
-              ).sort();
+              const serverNames = Array.from(new Set(matched.map((tool) => tool.serverName))).sort();
               throw new Error(
                 `MCP tool "${params.tool}" is available on multiple servers (${serverNames.join(", ")}). Specify the server parameter.`,
               );
@@ -691,19 +592,63 @@ export function createMcpTool(
           if (!targetTool) {
             throw new Error(`MCP tool not found: ${params.tool}`);
           }
-          const targetServer = resolveSingleServer(targetTool.serverId);
+          const targetList = candidateLists.find((list) => list.server.id === targetTool.serverId);
+          if (!targetList) throw new Error(`MCP server not found: ${targetTool.serverId}`);
+          const targetServer = targetList.server;
           const parsedArgs = parseCallArgs(params.args);
-
-          const callResult = await callJsonRpc({
-            server: targetServer,
+          signal?.throwIfAborted();
+          const mode = await dependencies.getExecutionMode?.() ?? "safe";
+          const grants = mode === "safe" || targetTool.readOnly ? [] : dependencies.getToolGrants
+            ? await dependencies.getToolGrants(targetServer)
+            : await getMcpToolGrants((await import("../storage/local/app-storage.js")).getAppStorage().settings, targetServer);
+          if (mode === "safe" || (!targetTool.readOnly && !grants.includes(targetTool.name))) {
+            if (!dependencies.requestToolApproval) throw new Error("MCP tool approval is unavailable.");
+            const approved = await dependencies.requestToolApproval({
+              title: t("mcp.approval.title"),
+              message: t("mcp.approval.message", { server: targetServer.name, url: targetServer.url, tool: targetTool.name, args: formatJson(parsedArgs) }),
+              confirmLabel: t("mcp.approval.once"),
+              ...(signal ? { signal } : {}),
+              ...(mode === "yolo" ? { secondaryApproval: {
+                label: t("mcp.approval.always"),
+                onApprove: async () => {
+                  signal?.throwIfAborted();
+                  if (dependencies.grantTool) await dependencies.grantTool(targetServer, targetTool.name);
+                  else await setMcpToolGrant((await import("../storage/local/app-storage.js")).getAppStorage().settings, targetServer, targetTool.name, true);
+                },
+              } } : {}),
+            });
+            signal?.throwIfAborted();
+            if (!approved) throw new Error("MCP tool call cancelled by the user.");
+          }
+          signal?.throwIfAborted();
+          const currentConfig = await getRuntimeConfig();
+          const currentServer = currentConfig.servers.find((server) => server.id === targetServer.id);
+          if (!currentServer?.enabled || !matchesConnection(targetList, currentServer, currentConfig.proxyBaseUrl)) {
+            throw new Error("MCP server configuration changed while awaiting approval. Retry the tool call.");
+          }
+          const currentList = await ensureServerTools({
+            server: currentServer,
+            ...proxyBaseUrlArg(currentConfig.proxyBaseUrl),
+            signal,
+          });
+          if (!currentList.tools.some((tool) => tool.name === targetTool.name)) {
+            throw new Error(`MCP tool not found: ${targetTool.name}`);
+          }
+          const dispatchConfig = await getRuntimeConfig();
+          const dispatchServer = dispatchConfig.servers.find((server) => server.id === targetServer.id);
+          if (!dispatchServer?.enabled || !matchesConnection(currentList, dispatchServer, dispatchConfig.proxyBaseUrl)) {
+            throw new Error("MCP server configuration changed while awaiting approval. Retry the tool call.");
+          }
+          signal?.throwIfAborted();
+          const callResult = await currentList.callJsonRpc({
+            server: dispatchServer,
             method: "tools/call",
             params: {
               name: targetTool.name,
               arguments: parsedArgs,
             },
             signal,
-            ...proxyBaseUrlArg(runtimeConfig.proxyBaseUrl),
-            sessionId: sessionIds.get(targetServer.id),
+            ...proxyBaseUrlArg(dispatchConfig.proxyBaseUrl),
           });
 
           if (!callResult) {
@@ -713,10 +658,7 @@ export function createMcpTool(
           const payload = callResult.result;
           let resultText = "";
 
-          if (
-            isToolsMcpPayloadShape(payload) &&
-            isToolsMcpPayloadShape(payload.result)
-          ) {
+          if (isToolsMcpPayloadShape(payload) && isToolsMcpPayloadShape(payload.result)) {
             const rpcResult = payload.result;
             const contentBlocks = extractTextContentBlocks(rpcResult.content);
             if (contentBlocks.length > 0) {
@@ -767,21 +709,17 @@ export function createMcpTool(
 
           const allTools = lists.flatMap((list) => list.tools);
           const candidates = params.server
-            ? allTools.filter((tool) =>
-                matchesServerToken(tool, params.server ?? ""),
-              )
+            ? allTools.filter((tool) => matchesServerToken(tool, params.server ?? ""))
             : allTools;
 
-          const target =
-            candidates.find((tool) => tool.name === params.describe) ?? null;
+          const target = candidates.find((tool) => tool.name === params.describe) ?? null;
           if (!target) {
             throw new Error(`MCP tool not found: ${params.describe}`);
           }
 
-          const schemaBlock =
-            target.inputSchema === undefined
-              ? "(no input schema provided)"
-              : `\`\`\`json\n${formatJson(target.inputSchema)}\n\`\`\``;
+          const schemaBlock = target.inputSchema === undefined
+            ? "(no input schema provided)"
+            : `\`\`\`json\n${formatJson(target.inputSchema)}\n\`\`\``;
 
           const description = target.description ?? "(no description provided)";
 
@@ -815,9 +753,7 @@ export function createMcpTool(
           });
 
           const allTools = lists.flatMap((list) => list.tools);
-          const matches = allTools.filter((tool) =>
-            matchesSearch(tool, params.search ?? ""),
-          );
+          const matches = allTools.filter((tool) => matchesSearch(tool, params.search ?? ""));
 
           const lines: string[] = [];
           lines.push(`MCP search \"${params.search}\"`);
@@ -882,13 +818,13 @@ export function createMcpTool(
 
         for (const server of runtimeConfig.servers) {
           const cached = toolCache.get(server.id);
-          lines.push(buildServerStatusLine(server, cached?.tools ?? null));
+          const tools = cached && !cached.session.expired
+            && matchesConnection(cached, server, runtimeConfig.proxyBaseUrl) ? cached.tools : null;
+          lines.push(buildServerStatusLine(server, tools));
         }
 
         lines.push("");
-        lines.push(
-          "Tip: use `connect`, `server`, `search`, `describe`, or `tool`.",
-        );
+        lines.push("Tip: use `connect`, `server`, `search`, `describe`, or `tool`.");
 
         const statusText = lines.join("\n");
 
@@ -902,11 +838,9 @@ export function createMcpTool(
           },
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         const message = getErrorMessage(error);
-        const proxyDown = isLikelyProxyConnectionError(
-          message,
-          usedProxyBaseUrl,
-        );
+        const proxyDown = isLikelyProxyConnectionError(message, usedProxyBaseUrl);
         const displayMessage = proxyDown
           ? buildProxyDownErrorMessage("MCP gateway", message)
           : `Error: ${message}`;

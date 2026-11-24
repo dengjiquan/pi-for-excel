@@ -1,33 +1,78 @@
-/**
- * Formatting utilities for LLM-facing output.
- * Converts Excel data into compact, token-efficient text.
- */
+import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
 
 import { colToLetter, parseCell } from "../excel/helpers.js";
 
-/**
- * Format a 2D array as a markdown table.
- * Uses the first row as header.
- */
+export const cellValueSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]);
+
+export type CellValue = Static<typeof cellValueSchema>;
+
+export const cellValueGridSchema = Type.Refine(
+  Type.Unsafe<CellValue[][]>({}),
+  (raw) => Array.isArray(raw) && raw.every((row) => Array.isArray(row) && row.every((cell) => Value.Check(cellValueSchema, cell))),
+  () => "cell values must be a grid of strings, numbers, booleans or nulls",
+);
+
+export const textGridSchema = Type.Refine(
+  Type.Unsafe<string[][]>({}),
+  (raw) => Array.isArray(raw) && raw.every((row) => Array.isArray(row) && row.every((cell) => typeof cell === "string")),
+  () => "cell text must be a grid of strings",
+);
+
+export function formatCellValue(v: CellValue | undefined): string {
+  if (v === null || v === undefined) return "";
+  return typeof v === "string" ? v : String(v);
+}
+
+export function escapeMarkdownCell(text: string): string {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\r\n|\r|\n/g, "\\n");
+}
+
+function displayDenotesValue(text: string, value: number): boolean {
+  let s = text.trim();
+  let sign = 1;
+  if (/^\(.*\)$/u.test(s)) {
+    sign = -1;
+    s = s.slice(1, -1);
+  }
+  const percent = s.endsWith("%");
+  const numeric = s.replace(/[^0-9.eE+-]/gu, "");
+  if (numeric === "" || !/\d/u.test(numeric)) return false;
+  const parsed = Number(numeric);
+  if (!Number.isFinite(parsed)) return false;
+  const shown = sign * (percent ? parsed / 100 : parsed);
+  return Math.abs(shown - value) <= 1e-9 * Math.max(1, Math.abs(value));
+}
+
+export function formatDisplayedCell(
+  value: CellValue | undefined,
+  text: string | undefined,
+  numberFormat: string | undefined,
+): { text: string; usedRaw: boolean } {
+  const raw = formatCellValue(value);
+  if (typeof value !== "number" || text === undefined || numberFormat === undefined || numberFormat === "" || numberFormat === "General") {
+    return { text: raw, usedRaw: false };
+  }
+  const shown = text.trim();
+  if (shown === "" || shown === raw || /^#+$/u.test(shown)) return { text: raw, usedRaw: false };
+  if (displayDenotesValue(shown, value)) return { text: shown, usedRaw: false };
+  return { text: `${shown} [${raw}]`, usedRaw: true };
+}
+
 export function formatAsMarkdownTable(values: unknown[][]): string {
   if (!values || values.length === 0) return "(empty)";
 
-  const stringify = (v: unknown): string => {
-    if (v === null || v === undefined || v === "") return "";
-    if (typeof v === "number") {
-      // Avoid scientific notation for readability
-      if (Math.abs(v) < 1e15 && Math.abs(v) > 1e-6) return String(v);
-      return v.toExponential(4);
-    }
-    if (typeof v === "string") return v;
-    if (typeof v === "boolean") return String(v);
-    return JSON.stringify(v);
-  };
-
-  const rows = values.map((row) => row.map(stringify));
+  const rows = values.map((row) => row.map((v) => {
+    const text = v === null || v === undefined ? ""
+      : typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? formatCellValue(v)
+        : JSON.stringify(v);
+    return escapeMarkdownCell(text);
+  }));
   const numCols = Math.max(...rows.map((r) => r.length));
 
-  // Pad rows to uniform width
   const padded = rows.map((r) => {
     while (r.length < numCols) r.push("");
     return r;
@@ -47,13 +92,6 @@ export function formatAsMarkdownTable(values: unknown[][]): string {
   return lines.join("\n");
 }
 
-/**
- * Extract formula cells from a 2D formulas array.
- * Returns a list of "CellAddr: =FORMULA" strings.
- *
- * @param formulas - 2D array from Range.formulas
- * @param startAddress - top-left cell of the range (e.g. "A1")
- */
 export function extractFormulas(formulas: unknown[][], startAddress: string): string[] {
   const result: string[] = [];
   const start = parseCell(startAddress);
@@ -72,10 +110,6 @@ export function extractFormulas(formulas: unknown[][], startAddress: string): st
   return result;
 }
 
-/**
- * Find error values in a 2D values array.
- * Returns cell addresses and error types.
- */
 export function findErrors(
   values: unknown[][],
   startAddress: string,
@@ -88,7 +122,7 @@ export function findErrors(
     if (row === undefined) continue;
     for (let c = 0; c < row.length; c++) {
       const v = row[c];
-      if (typeof v === "string" && v.startsWith("#")) {
+      if (isExcelError(v)) {
         errors.push({
           address: `${colToLetter(start.col + c)}${start.row + r}`,
           error: v,
@@ -99,9 +133,6 @@ export function findErrors(
   return errors;
 }
 
-/**
- * Count non-empty cells in a 2D array.
- */
 export function countNonEmpty(values: unknown[][]): number {
   let count = 0;
   for (const row of values) {
@@ -112,15 +143,16 @@ export function countNonEmpty(values: unknown[][]): number {
   return count;
 }
 
-/** True for Excel error values like #REF!, #VALUE!, #N/A, etc. */
+const EXCEL_ERROR_VALUES = new Set([
+  "#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A",
+  "#GETTING_DATA", "#SPILL!", "#CALC!", "#FIELD!", "#BLOCKED!", "#CONNECT!",
+  "#BUSY!", "#UNKNOWN!", "#EXTERNAL!", "#PYTHON!", "#TIMEOUT",
+]);
+
 export function isExcelError(value: unknown): value is string {
-  return typeof value === "string" && /^#\w+!?$/.test(value);
+  return typeof value === "string" && EXCEL_ERROR_VALUES.has(value);
 }
 
-/**
- * Truncate text to approximate token limit.
- * Rough heuristic: 1 token ≈ 4 characters.
- */
 export function truncateForTokens(text: string, maxTokens: number): string {
   const maxChars = maxTokens * 4;
   if (text.length <= maxChars) return text;

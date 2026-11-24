@@ -1,6 +1,8 @@
 import {
   DEFAULT_PROXY_URL,
+  isLoopbackProxyUrl,
   resolveRuntimeDefaultProxyUrl,
+  validateOfficeProxyUrl,
 } from "../auth/proxy-validation.js";
 import type { SpreadsheetHostKind } from "../host/index.js";
 import type { SupportedLanguage } from "../language/index.js";
@@ -16,16 +18,9 @@ export interface TaskpaneProxySettings {
 }
 
 function parseProxyEnabled(value: unknown): boolean {
-  // Preserve the legacy persisted contract: any truthy value enabled proxying.
   return Boolean(value);
 }
 
-/**
- * Reads the taskpane language preference.
- *
- * English is the documented default when the setting is absent, malformed, or
- * cannot be read. Persisted values retain their existing string format.
- */
 export async function readTaskpaneLanguage(
   settings: SettingsReader,
 ): Promise<SupportedLanguage> {
@@ -37,14 +32,6 @@ export async function readTaskpaneLanguage(
   }
 }
 
-/**
- * Reads the taskpane proxy preferences.
- *
- * Missing or malformed values use documented defaults. Storage read failures
- * propagate so callers cannot mistake an unknown URL for an absent URL before
- * writing a default. The enabled flag preserves legacy JavaScript truthiness
- * for persisted non-boolean values.
- */
 export async function readTaskpaneProxySettings(
   settings: SettingsReader,
 ): Promise<TaskpaneProxySettings> {
@@ -73,6 +60,16 @@ export async function ensureDefaultProxyUrl(
 
     await settings.set(TASKPANE_PROXY_URL_SETTING_KEY, runtimeDefaultProxyUrl);
   } catch {
-    // A failed read is unknown state, not permission to replace the stored URL.
   }
+}
+
+export async function saveTaskpaneProxyUrl(settings: SettingsWriter, rawUrl: string): Promise<string> {
+  const trimmed = rawUrl.trim();
+  const normalized = validateOfficeProxyUrl(trimmed.length > 0 ? trimmed : DEFAULT_PROXY_URL);
+  await settings.set(TASKPANE_PROXY_URL_SETTING_KEY, normalized);
+  return normalized;
+}
+
+export function needsRemoteProxyWarning(proxy: TaskpaneProxySettings): boolean {
+  return proxy.enabled && proxy.url !== null && proxy.url.length > 0 && !isLoopbackProxyUrl(proxy.url);
 }

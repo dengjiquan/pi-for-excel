@@ -1,5 +1,3 @@
-// Static contract: vercel.json must remain wired to the deploy-policy script;
-// script behavior alone cannot detect a missing or redirected configuration dependency.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -12,7 +10,7 @@ function isVercelIgnoreCommandTestPayloadShape(value) {
   return typeof value === "object" && value !== null;
 }
 
-async function readIgnoreCommand() {
+async function readVercelConfig() {
   const raw = await readFile(new URL("../vercel.json", import.meta.url), "utf8");
   const parsed = JSON.parse(raw);
 
@@ -20,12 +18,22 @@ async function readIgnoreCommand() {
     throw new Error("vercel.json is missing a string ignoreCommand");
   }
 
-  return parsed.ignoreCommand;
+  return parsed;
 }
 
 test("vercel.json wires ignoreCommand to the deploy policy script", async () => {
-  const ignoreCommand = await readIgnoreCommand();
-  assert.equal(ignoreCommand, EXPECTED_IGNORE_COMMAND);
+  const config = await readVercelConfig();
+  assert.equal(config.ignoreCommand, EXPECTED_IGNORE_COMMAND);
+});
+
+test("only main creates automatic deployments", async () => {
+  const config = await readVercelConfig();
+  assert.deepEqual(config.git, {
+    deploymentEnabled: {
+      "**": false,
+      main: true,
+    },
+  });
 });
 
 test("deployment policy maps each Vercel context to deploy or skip", () => {

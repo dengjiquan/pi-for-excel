@@ -15,16 +15,39 @@ function selectElementText(element: HTMLElement): void {
   selection.addRange(range);
 }
 
+function copyViaHiddenTextarea(text: string): boolean {
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+    previous?.focus({ preventScroll: true });
+  }
+}
+
 function copyToClipboard(text: string, onCopied: () => void, fallbackElement: HTMLElement): void {
+  const fallback = (): void => {
+    if (copyViaHiddenTextarea(text)) onCopied();
+    else selectElementText(fallbackElement);
+  };
+
   if (!navigator.clipboard?.writeText) {
-    selectElementText(fallbackElement);
+    fallback();
     return;
   }
 
-  void navigator.clipboard.writeText(text).then(onCopied, () => selectElementText(fallbackElement));
+  void navigator.clipboard.writeText(text).then(onCopied, fallback);
 }
 
-/** Create the shared command row used by inline setup cards. */
 export function createCopyableCommand(command: string): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "pi-command-copy";

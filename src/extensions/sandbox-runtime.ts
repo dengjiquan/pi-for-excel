@@ -2,14 +2,6 @@ function isExtensionsSandboxRuntimePayloadShape(value: unknown): value is Record
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Sandboxed extension runtime host (iframe + postMessage RPC).
- *
- * Scope: default runtime for untrusted extension execution (with rollback switch).
- * This bridge intentionally starts small and only forwards a constrained,
- * sanitized UI projection format (no raw HTML injection).
- */
-
 import type { AgentEvent, AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 
@@ -374,7 +366,7 @@ class SandboxRuntimeHost {
   private rejectReady: ((reason: unknown) => void) | null = null;
 
   private nextRequestId = 1;
-  private disposed = false;
+  private disposal: Promise<void> | null = null;
   private readonly widgetOwnerId: string;
   private readonly widgetApiV2Enabled: boolean;
   private port: MessagePort | null = null;
@@ -423,54 +415,51 @@ class SandboxRuntimeHost {
     }
   }
 
-  async dispose(gracefulDeactivate: boolean): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-
-    if (gracefulDeactivate) {
-      try {
-        await this.callSandbox("deactivate", {}, { allowWhenDisposed: true });
-      } catch (error) {
-        console.warn(`[pi] Sandbox deactivate failed: ${getErrorMessage(error)}`);
+  dispose(gracefulDeactivate: boolean): Promise<void> {
+    this.disposal ??= Promise.resolve().then(async () => {
+      if (gracefulDeactivate) {
+        try {
+          await this.callSandbox("deactivate", {}, { allowWhenDisposed: true });
+        } catch (error) {
+          console.warn(`[pi] Sandbox deactivate failed: ${getErrorMessage(error)}`);
+        }
       }
-    }
 
-    for (const unsubscribe of this.eventSubscriptions.values()) {
-      try {
-        unsubscribe();
-      } catch {
-        // ignore cleanup failures during shutdown
+      for (const unsubscribe of this.eventSubscriptions.values()) {
+        try {
+          unsubscribe();
+        } catch {
+        }
       }
-    }
-    this.eventSubscriptions.clear();
+      this.eventSubscriptions.clear();
 
-    for (const pending of this.pendingRequests.values()) {
-      clearTimeout(pending.timeoutId);
-      pending.reject(new Error("Sandbox runtime disposed before response."));
-    }
-    this.pendingRequests.clear();
+      for (const pending of this.pendingRequests.values()) {
+        clearTimeout(pending.timeoutId);
+        pending.reject(new Error("Sandbox runtime disposed before response."));
+      }
+      this.pendingRequests.clear();
 
-    this.overlayActionIds.clear();
-    this.widgetActionIdsByWidgetId.clear();
+      this.overlayActionIds.clear();
+      this.widgetActionIdsByWidgetId.clear();
 
-    dismissOverlay();
-    if (this.widgetApiV2Enabled) {
-      clearExtensionWidgets(this.widgetOwnerId);
-    } else {
-      dismissWidget();
-    }
+      dismissOverlay();
+      if (this.widgetApiV2Enabled) {
+        clearExtensionWidgets(this.widgetOwnerId);
+      } else {
+        dismissWidget();
+      }
 
-    this.port?.removeEventListener("message", this.onPortMessage);
-    this.port?.close();
-    this.port = null;
+      this.port?.removeEventListener("message", this.onPortMessage);
+      this.port?.close();
+      this.port = null;
 
-    this.iframe.remove();
+      this.iframe.remove();
+    });
+    return this.disposal;
   }
 
   private bootstrapSandboxPort(): void {
-    if (this.disposed || this.port) {
+    if (this.disposal || this.port) {
       return;
     }
 
@@ -496,9 +485,6 @@ class SandboxRuntimeHost {
     };
 
     try {
-      // Sandboxed srcdoc iframes have opaque origins, so the initial port transfer
-      // must use a wildcard target. All subsequent sandbox RPC stays on the
-      // dedicated MessagePort instead of window.postMessage.
       targetWindow.postMessage(bootstrap, "*", [channel.port2]);
     } catch (error) {
       port.removeEventListener("message", this.onPortMessage);
@@ -525,7 +511,7 @@ class SandboxRuntimeHost {
       allowWhenDisposed?: boolean;
     },
   ): Promise<unknown> {
-    if (this.disposed && !options?.allowWhenDisposed) {
+    if (this.disposal && !options?.allowWhenDisposed) {
       throw new Error("Sandbox runtime is already disposed.");
     }
 
@@ -554,7 +540,13 @@ class SandboxRuntimeHost {
         params,
       };
 
-      this.getSandboxPort().postMessage(envelope);
+      try {
+        this.getSandboxPort().postMessage(envelope);
+      } catch (error) {
+        this.pendingRequests.delete(requestId);
+        clearTimeout(timeoutId);
+        reject(new Error(getErrorMessage(error)));
+      }
     });
   }
 
@@ -586,7 +578,7 @@ class SandboxRuntimeHost {
   }
 
   private sendEvent(eventName: string, data: unknown): void {
-    if (!this.port) {
+    if (this.disposal || !this.port) {
       return;
     }
 
@@ -657,6 +649,11 @@ class SandboxRuntimeHost {
         pending.reject(new Error(typeof envelope.error === "string" ? envelope.error : "Sandbox request failed."));
       }
 
+      return;
+    }
+
+    if (this.disposal) {
+      if (envelope.kind === "request") this.sendResponse(envelope.requestId, false, "Sandbox runtime is already disposed.");
       return;
     }
 
@@ -1304,16 +1301,5 @@ export async function activateExtensionInSandbox(
     throw error;
   }
 
-  let deactivated = false;
-
-  return {
-    deactivate: async () => {
-      if (deactivated) {
-        return;
-      }
-
-      deactivated = true;
-      await host.dispose(true);
-    },
-  };
+  return { deactivate: () => host.dispose(true) };
 }

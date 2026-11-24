@@ -1,10 +1,3 @@
-/**
- * Extensions hub — Skills tab.
- *
- * Bundled skills (read-only cards), external skills (expandable with remove),
- * and install form for pasting SKILL.md content.
- */
-
 import { getFilesWorkspace } from "../../files/workspace.js";
 import { listAgentSkills, mergeAgentSkillDefinitions } from "../../skills/catalog.js";
 import {
@@ -14,12 +7,13 @@ import {
   type SkillActivationMutableSettingsStore,
 } from "../../skills/activation-store.js";
 import {
-  loadExternalAgentSkillsFromWorkspace,
+  loadDiscoverableAgentSkillsFromWorkspace,
   removeExternalAgentSkillFromWorkspace,
   upsertExternalAgentSkillInWorkspace,
 } from "../../skills/external-store.js";
 import { dispatchSkillsChanged } from "../../skills/events.js";
 import type { AgentSkillDefinition } from "../../skills/types.js";
+import { requestConfirmationDialog } from "../../ui/confirm-dialog.js";
 import { showToast } from "../../ui/toast.js";
 import {
   createSectionHeader,
@@ -35,8 +29,6 @@ import {
 import { lucide, ClipboardList } from "../../ui/lucide-icons.js";
 import { t } from "../../language/index.js";
 
-// ── Types ───────────────────────────────────────────
-
 interface SkillsSnapshot {
   bundled: AgentSkillDefinition[];
   external: AgentSkillDefinition[];
@@ -46,8 +38,6 @@ interface SkillsSnapshot {
   activationLoadError: string | null;
 }
 
-// ── Snapshot builder ────────────────────────────────
-
 async function buildSnapshot(settings: SkillActivationMutableSettingsStore): Promise<SkillsSnapshot> {
   const bundled = listAgentSkills();
   let external: AgentSkillDefinition[] = [];
@@ -56,7 +46,7 @@ async function buildSnapshot(settings: SkillActivationMutableSettingsStore): Pro
   let activationLoadError: string | null = null;
 
   try {
-    external = await loadExternalAgentSkillsFromWorkspace(getFilesWorkspace());
+    external = await loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
   } catch (err) {
     externalLoadError = err instanceof Error ? err.message : "Unknown error";
   }
@@ -76,8 +66,6 @@ async function buildSnapshot(settings: SkillActivationMutableSettingsStore): Pro
 function normalizeSkillName(name: string): string {
   return name.trim().toLowerCase();
 }
-
-// ── Main render ─────────────────────────────────────
 
 export async function renderSkillsTab(args: {
   container: HTMLElement;
@@ -118,7 +106,7 @@ export async function renderSkillsTab(args: {
       if (result.changed) {
         dispatchSkillsChanged({ reason: "activation" });
       }
-    }, "toggle", `${enabled ? "Enabled" : "Disabled"} skill: ${skillName}`);
+    }, "toggle", t(enabled ? "ext-hub-skills.toast.enabled" : "ext-hub-skills.toast.disabled", { name: skillName }));
   };
 
   container.replaceChildren();
@@ -128,7 +116,6 @@ export async function renderSkillsTab(args: {
   statusLine.textContent = t("ext-hub-skills.statusLine", { active: snapshot.active.length, bundled: activeBundledCount, external: activeExternalCount });
   container.appendChild(statusLine);
 
-  // ── Bundled section ───────────────────────────
   container.appendChild(createSectionHeader({
     label: t("extensions-hub-skills.bundledSection"),
     count: snapshot.bundled.length,
@@ -153,7 +140,6 @@ export async function renderSkillsTab(args: {
     container.appendChild(list);
   }
 
-  // ── External section ──────────────────────────
   container.appendChild(createSectionHeader({
     label: t("extensions-hub-skills.externalSection"),
     count: snapshot.external.length,
@@ -177,24 +163,35 @@ export async function renderSkillsTab(args: {
         },
         onRemove: () => {
           if (isBusy()) return;
-          void runMutation(async () => {
-            const removed = await removeExternalAgentSkillFromWorkspace({
-              workspace: getFilesWorkspace(),
-              name: skill.name,
+          void (async () => {
+            const confirmed = await requestConfirmationDialog({
+              title: t("ext-hub-skills.confirmRemoveTitle", { name: skill.name }),
+              message: t("ext-hub-skills.confirmRemoveMessage"),
+              confirmLabel: t("ext-hub-skills.remove"),
+              cancelLabel: t("confirm.cancel"),
+              confirmButtonTone: "danger",
+              restoreFocusOnClose: false,
             });
-            if (removed) {
-              dispatchSkillsChanged({ reason: "catalog" });
-            } else {
-              throw new Error(`External skill not found: ${skill.name}`);
-            }
-          }, "config", `Removed external skill: ${skill.name}`);
+            if (!confirmed || isBusy()) return;
+
+            await runMutation(async () => {
+              const workspace = getFilesWorkspace();
+              const removed = skill.location.startsWith("skills/external/")
+                ? await removeExternalAgentSkillFromWorkspace({ workspace, name: skill.name })
+                : await workspace.deleteFile(skill.location).then(() => true);
+              if (removed) {
+                dispatchSkillsChanged({ reason: "catalog" });
+              } else {
+                throw new Error(`External skill not found: ${skill.name}`);
+              }
+            }, "config", t("ext-hub-skills.toast.removed", { name: skill.name }));
+          })();
         },
       }));
     }
     container.appendChild(list);
   }
 
-  // Warnings
   if (snapshot.externalLoadError) {
     const warn = document.createElement("p");
     warn.className = "pi-overlay-hint pi-hub-warn-text";
@@ -209,7 +206,6 @@ export async function renderSkillsTab(args: {
     container.appendChild(warn);
   }
 
-  // ── Install section ───────────────────────────
   container.appendChild(createSectionHeader({ label: t("extensions-hub-skills.installSection") }));
 
   const installForm = createAddForm();
@@ -248,14 +244,11 @@ export async function renderSkillsTab(args: {
   installForm.appendChild(installActions);
   container.appendChild(installForm);
 
-  // Footer hint
   const footer = document.createElement("p");
   footer.className = "pi-overlay-hint";
   footer.textContent = t("extensions-hub-skills.footer-hint");
   container.appendChild(footer);
 }
-
-// ── Bundled skill card ──────────────────────────────
 
 function renderBundledSkillCard(args: {
   skill: AgentSkillDefinition;
@@ -281,8 +274,6 @@ function renderBundledSkillCard(args: {
 
   return card.root;
 }
-
-// ── External skill card (expandable) ────────────────
 
 function renderExternalSkillCard(args: {
   skill: AgentSkillDefinition;
@@ -316,10 +307,8 @@ function renderExternalSkillCard(args: {
     rightContent: toggle.root,
   });
 
-  // Location
   card.body.appendChild(createConfigRow(t("ext-hub-skills.location"), createConfigValue(args.skill.location)));
 
-  // Remove button
   card.body.appendChild(createActionsRow(
     createButton(t("ext-hub-skills.remove"), {
       danger: true,

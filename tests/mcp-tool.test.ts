@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createMcpTool } from "../src/tools/mcp.ts";
+import { createMcpTool, type McpToolDependencies } from "../src/tools/mcp.ts";
 
 const TEST_SERVER = {
   id: "srv.local",
@@ -14,6 +14,7 @@ function createMockMcpTool() {
   const calls: Array<{ method: string; params?: unknown }> = [];
 
   const tool = createMcpTool({
+    requestToolApproval: () => Promise.resolve(true),
     getRuntimeConfig: () => Promise.resolve({
       servers: [TEST_SERVER],
       proxyBaseUrl: undefined,
@@ -228,4 +229,161 @@ void test("mcp does not flag proxyDown for upstream JSON-RPC errors containing f
   const details = result.details as { ok?: boolean; proxyDown?: boolean };
   assert.equal(details.ok, false);
   assert.equal(details.proxyDown, false);
+});
+
+void test("MCP consent is per server/tool, once or remembered in Auto, and per call in Confirm", async () => {
+  let mode: "yolo" | "safe" = "yolo";
+  let remember = false;
+  let allow = true;
+  const grants = new Map<string, string[]>();
+  const asked: string[] = [];
+  const sent: string[] = [];
+  const serverB = { ...TEST_SERVER, id: "other", name: "other", url: "https://localhost:4011/mcp" };
+  const dependencies: McpToolDependencies = {
+    getExecutionMode: () => Promise.resolve(mode),
+    getRuntimeConfig: () => Promise.resolve({ servers: [TEST_SERVER, serverB] }),
+    getToolGrants: (server) => Promise.resolve(grants.get(server.id) ?? []),
+    grantTool: (server, tool) => { grants.set(server.id, [...(grants.get(server.id) ?? []), tool]); return Promise.resolve(); },
+    requestToolApproval: async (request) => {
+      asked.push(request.message);
+      if (remember && allow) await request.secondaryApproval?.onApprove();
+      if (mode === "safe") assert.equal(request.secondaryApproval, undefined);
+      return allow;
+    },
+    callJsonRpc: ({ method, server, params }) => {
+      if (method === "tools/list") return Promise.resolve({ proxied: false, result: { result: { tools: [
+        { name: "send" }, { name: "remove", annotations: { readOnlyHint: false } },
+        { name: "read", annotations: { readOnlyHint: true } },
+      ] } } });
+      if (method === "tools/call") sent.push(`${server.id}:${JSON.stringify(params)}`);
+      return Promise.resolve({ proxied: false, result: { result: { content: [{ type: "text", text: "ok" }] } } });
+    },
+  };
+  let tool = createMcpTool(dependencies);
+  const run = (name: string, server = "local", signal?: AbortSignal) => tool.execute("call", { tool: name, server, args: '{"amount":17}' }, signal);
+  await run("read");
+  assert.equal(asked.length, 0);
+  await run("send");
+  await run("send");
+  assert.equal(asked.length, 2, "Allow once does not remember consent");
+  assert.match(asked[0] ?? "", /local[\s\S]*send[\s\S]*17/);
+  remember = true;
+  await run("send");
+  tool = createMcpTool(dependencies);
+  await run("send");
+  assert.equal(asked.length, 3, "remembered consent survives tool recreation");
+  await run("send", "other");
+  await run("remove");
+  assert.equal(asked.length, 5, "another server and another tool require independent consent");
+  mode = "safe";
+  await run("send");
+  await run("send");
+  await run("read");
+  assert.equal(asked.length, 8, "Confirm ignores remembered grants and read-only hints");
+  allow = false;
+  const before = sent.length;
+  assert.equal((await run("send")).details.ok, false);
+  assert.equal(sent.length, before);
+  const controller = new AbortController();
+  dependencies.requestToolApproval = () => { controller.abort(); return Promise.resolve(true); };
+  tool = createMcpTool(dependencies);
+  await assert.rejects(run("send", "local", controller.signal), { name: "AbortError" });
+  assert.equal(sent.length, before, "Stop prevents dispatch even if approval resolves true");
+  delete dependencies.requestToolApproval;
+  tool = createMcpTool(dependencies);
+  assert.equal((await run("send")).details.ok, false);
+  assert.equal(sent.length, before, "missing approval handler fails closed");
+});
+
+void test("MCP re-resolves a refreshed session after approval", async () => {
+  let approve = (_approved: boolean): void => {};
+  let approvalStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { approvalStarted = resolve; });
+  const approval = new Promise<boolean>((resolve) => { approve = resolve; });
+  let discovered = 0;
+  let calls = 0;
+  const tool = createMcpTool({
+    getRuntimeConfig: () => Promise.resolve({ servers: [TEST_SERVER] }),
+    requestToolApproval: () => { approvalStarted(); return approval; },
+    callJsonRpc: ({ method }) => {
+      if (method === "tools/list") {
+        discovered += 1;
+        return Promise.resolve({ proxied: false, result: { result: { tools: [{ name: discovered === 1 ? "echo" : "replacement" }] } } });
+      }
+      if (method === "tools/call") calls += 1;
+      return Promise.resolve({ proxied: false, result: { result: {} } });
+    },
+  });
+  const pending = tool.execute("pending", { tool: "echo" });
+  await started;
+  assert.equal((await tool.execute("refresh", { connect: "local" })).details.ok, true);
+  approve(true);
+  const result = await pending;
+  assert.equal(result.details.ok, false, "approval must not dispatch using the replaced discovery session");
+  assert.equal(calls, 0);
+});
+
+void test("MCP refuses configuration changed while approval was open", async () => {
+  let approve = (_approved: boolean): void => {};
+  let approvalStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { approvalStarted = resolve; });
+  const approval = new Promise<boolean>((resolve) => { approve = resolve; });
+  let enabled = true;
+  let calls = 0;
+  const tool = createMcpTool({
+    getRuntimeConfig: () => Promise.resolve({ servers: [{ ...TEST_SERVER, enabled }] }),
+    requestToolApproval: () => { approvalStarted(); return approval; },
+    callJsonRpc: ({ method }) => {
+      if (method === "tools/list") return Promise.resolve({ proxied: false, result: { result: { tools: [{ name: "echo" }] } } });
+      if (method === "tools/call") calls += 1;
+      return Promise.resolve({ proxied: false, result: { result: {} } });
+    },
+  });
+  const pending = tool.execute("pending", { tool: "echo" });
+  await started;
+  enabled = false;
+  approve(true);
+  assert.equal((await pending).details.ok, false, "approval must not authorize a now-disabled server");
+  assert.equal(calls, 0);
+});
+
+void test("MCP rechecks configuration after pending session rediscovery", async () => {
+  let approve = (_approved: boolean): void => {};
+  let approvalStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { approvalStarted = resolve; });
+  const approval = new Promise<boolean>((resolve) => { approve = resolve; });
+  let discoveryStarted = (): void => {};
+  const rediscovering = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+  let releaseDiscovery = (): void => {};
+  const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+  let enabled = true;
+  let discoveries = 0;
+  let calls = 0;
+  const tool = createMcpTool({
+    getRuntimeConfig: () => Promise.resolve({ servers: [{ ...TEST_SERVER, enabled }] }),
+    requestToolApproval: () => { approvalStarted(); return approval; },
+    callJsonRpc: async ({ method }) => {
+      if (method === "tools/list") {
+        discoveries += 1;
+        if (discoveries === 2) {
+          discoveryStarted();
+          await discoveryGate;
+        }
+        return { proxied: false, result: { result: { tools: [{ name: "echo" }] } } };
+      }
+      if (method === "tools/call") calls += 1;
+      return { proxied: false, result: { result: {} } };
+    },
+  });
+  const pending = tool.execute("pending", { tool: "echo" });
+  await started;
+  const refresh = tool.execute("refresh", { connect: "local" });
+  await rediscovering;
+  approve(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  enabled = false;
+  releaseDiscovery();
+  await refresh;
+  assert.equal((await pending).details.ok, false, "rediscovery must not bypass a server disabled after approval");
+  assert.equal(calls, 0);
 });

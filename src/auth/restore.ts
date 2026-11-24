@@ -2,22 +2,14 @@ function isAuthRestorePayloadShape(value: unknown): value is Record<string, unkn
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Auto-restore auth credentials from pi's auth.json (dev) or browser storage (OAuth).
- *
- * Per-provider priority:
- * 1. pi's ~/.pi/agent/auth.json (served by Vite plugin at /__pi-auth)
- * 2. IndexedDB SettingsStore (`oauth.<providerId>`) as fallback
- */
-
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ProviderKeysStore } from "../storage/local/provider-keys-store.js";
 import type { SettingsStore } from "../storage/local/settings-store.js";
 
 import { originalFetch } from "./cors-proxy.js";
-import { clearOAuthCredentials, loadOAuthCredentials, saveOAuthCredentials } from "./oauth-storage.js";
+import { loadOAuthCredentials } from "./oauth-storage.js";
+import { createOAuthRefresher } from "./oauth-refresh.js";
 import type { BrowserOAuthProvider } from "./browser-oauth-types.js";
-import { isOpenAICodexCredentialRefreshRequired } from "./openai-codex-browser-oauth.js";
 import { mapToApiProvider, BROWSER_OAUTH_PROVIDERS } from "./provider-map.js";
 import { getOAuthProvider } from "./oauth-provider-registry.js";
 import { getErrorMessage } from "../utils/errors.js";
@@ -53,10 +45,6 @@ function isOAuthCredential(value: unknown): value is OAuthCredential {
   );
 }
 
-/**
- * Restore credentials from all available sources.
- * Populates the ProviderKeysStore so ChatPanel can make API calls.
- */
 export async function restoreCredentials(
   providerKeys: ProviderKeysStore,
   settings: SettingsStore,
@@ -82,25 +70,24 @@ async function restoreFromPiAuth(
 
     console.log(`[auth] Found pi auth.json with ${Object.keys(authData).length} provider(s)`);
 
-    for (const [providerId, cred] of Object.entries(authData)) {
+    type AuthEntry = [providerId: string, cred: (typeof authData)[string]];
+    const restoreEntry = async ([providerId, cred]: AuthEntry, apiProvider: string): Promise<void> => {
       try {
-        const apiProvider = mapToApiProvider(providerId);
-
         if (isApiKeyCredential(cred)) {
           await providerKeys.set(apiProvider, cred.key);
           restoredProviders.add(apiProvider);
           console.log(`[auth] ${providerId}: API key loaded`);
-          continue;
+          return;
         }
 
         if (!isOAuthCredential(cred)) {
-          continue;
+          return;
         }
 
         const provider = getOAuthProvider(providerId);
         if (!provider) {
           console.log(`[auth] ${providerId}: no OAuth provider registered, skipping`);
-          continue;
+          return;
         }
 
         if (Date.now() >= cred.expires) {
@@ -121,21 +108,21 @@ async function restoreFromPiAuth(
       } catch (e) {
         console.warn(`[auth] ${providerId}: failed (${getErrorMessage(e)})`);
       }
+    };
+
+    const entriesByApiProvider = new Map<string, AuthEntry[]>();
+    for (const entry of Object.entries(authData)) {
+      const apiProvider = mapToApiProvider(entry[0]);
+      entriesByApiProvider.set(apiProvider, [...(entriesByApiProvider.get(apiProvider) ?? []), entry]);
     }
+    await Promise.all([...entriesByApiProvider].map(async ([apiProvider, entries]) => {
+      for (const entry of entries) await restoreEntry(entry, apiProvider);
+    }));
 
     return restoredProviders;
   } catch {
     return restoredProviders;
   }
-}
-
-async function clearBrowserOAuthProvider(
-  providerKeys: ProviderKeysStore,
-  settings: SettingsStore,
-  providerId: string,
-): Promise<void> {
-  await clearOAuthCredentials(settings, providerId).catch(() => {});
-  await providerKeys.delete(mapToApiProvider(providerId)).catch(() => {});
 }
 
 async function restoreFromBrowserOAuthStorage(
@@ -144,44 +131,38 @@ async function restoreFromBrowserOAuthStorage(
   getOAuthProvider: GetOAuthProvider,
   restoredProviders: Set<string>,
 ): Promise<void> {
-  for (const providerId of BROWSER_OAUTH_PROVIDERS) {
+  const refresher = createOAuthRefresher({ settings, providerKeys, getOAuthProvider });
+
+  await Promise.all(BROWSER_OAUTH_PROVIDERS.map(async (providerId) => {
     const apiProvider = mapToApiProvider(providerId);
-    if (restoredProviders.has(apiProvider)) continue;
+    if (restoredProviders.has(apiProvider)) return;
 
     const credentials = await loadOAuthCredentials(settings, providerId);
-    if (!credentials) continue;
+    if (!credentials) return;
 
     try {
       const provider = getOAuthProvider(providerId);
-      if (!provider) continue;
+      if (!provider) return;
 
-      if (Date.now() >= credentials.expires) {
-        try {
-          const refreshed = await provider.refreshToken(credentials);
-          await saveOAuthCredentials(settings, providerId, refreshed);
-          await providerKeys.set(apiProvider, provider.getApiKey(refreshed));
-          restoredProviders.add(apiProvider);
-          console.log(`[auth] ${provider.name}: token refreshed from IndexedDB`);
-        } catch (e) {
-          if (providerId === "openai-codex" && isOpenAICodexCredentialRefreshRequired(e)) {
-            await clearBrowserOAuthProvider(providerKeys, settings, providerId);
-            console.warn(`[auth] ${provider.name}: stored OAuth grant is stale; cleared credentials, please login again`);
-          } else {
-            console.warn(`[auth] ${provider.name}: refresh failed (${getErrorMessage(e)}), please login again`);
-          }
-        }
-      } else {
-        await providerKeys.set(apiProvider, provider.getApiKey(credentials));
+      const outcome = await refresher.ensureFresh(apiProvider);
+      if (outcome === "refreshed") {
+        restoredProviders.add(apiProvider);
+        console.log(`[auth] ${provider.name}: token refreshed from IndexedDB`);
+      } else if (outcome === "fresh") {
+        await providerKeys.set(apiProvider, provider.getApiKey(
+          (await loadOAuthCredentials(settings, providerId)) ?? credentials,
+        ));
         restoredProviders.add(apiProvider);
         console.log(`[auth] ${provider.name}: session restored from IndexedDB`);
+      } else if (outcome === "failed") {
+        await providerKeys.set(apiProvider, provider.getApiKey(credentials));
+        restoredProviders.add(apiProvider);
+        console.warn(`[auth] ${provider.name}: refresh failed; it will be retried before the next request`);
+      } else if (outcome === "expired") {
+        console.warn(`[auth] ${provider.name}: refresh failed; it will be retried before the next request`);
       }
     } catch (e) {
-      if (providerId === "openai-codex" && isOpenAICodexCredentialRefreshRequired(e)) {
-        await clearBrowserOAuthProvider(providerKeys, settings, providerId);
-        console.warn("[auth] OpenAI (ChatGPT Plus/Pro): stored OAuth grant is stale; cleared credentials, please login again");
-      } else {
-        console.warn(`[auth] ${providerId}: failed to restore (${getErrorMessage(e)})`);
-      }
+      console.warn(`[auth] ${providerId}: failed to restore (${getErrorMessage(e)})`);
     }
-  }
+  }));
 }

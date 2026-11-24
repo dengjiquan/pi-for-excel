@@ -1,10 +1,3 @@
-/**
- * Persisted files-workspace records: what `FilesWorkspace` reads back from the
- * two settings keys it writes. Each payload goes through the real product path
- * (construct the workspace over the settings, then list) and the test states
- * which entries survive.
- */
-
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -29,6 +22,13 @@ class MemorySettings {
 
   delete(key: string): Promise<void> {
     this.values.delete(key);
+    return Promise.resolve();
+  }
+
+  update<T, U>(key: string, parse: (raw: unknown) => T, change: (current: T) => U | undefined): Promise<void> {
+    const next = change(parse(structuredClone(this.values.get(key) ?? null)));
+    if (next === undefined) this.values.delete(key);
+    else this.values.set(key, structuredClone(next));
     return Promise.resolve();
   }
 }

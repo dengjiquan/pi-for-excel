@@ -1,23 +1,18 @@
-/**
- * view_settings — Control worksheet display settings.
- *
- * Scope: on-screen worksheet view/navigation only (not print/page layout).
- */
-
+import { runMutation } from "./mutation/run-mutation.js";
 import { Type, type Static } from "typebox";
 import { StringEnum } from "./string-enum.js";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { excelRun, parseCell, qualifiedAddress } from "../excel/helpers.js";
+import { parseCell, qualifiedAddress } from "../excel/helpers.js";
 import {
   getWorkbookChangeAuditLog,
   type AppendWorkbookChangeAuditEntryArgs,
 } from "../audit/workbook-change-audit.js";
-import { getErrorMessage } from "../utils/errors.js";
 import {
   NON_CHECKPOINTED_MUTATION_NOTE,
   NON_CHECKPOINTED_MUTATION_REASON,
   recoveryCheckpointUnavailable,
 } from "./recovery-metadata.js";
+import { describeExcelFailure, parseExcelError, unchangedClause } from "./mutation/excel-failure.js";
 import { finalizeMutationOperation } from "./mutation/finalize.js";
 import { appendMutationResultNote } from "./mutation/result-note.js";
 import type { MutationFinalizeDependencies } from "./mutation/types.js";
@@ -47,8 +42,7 @@ const schema = Type.Object({
   sheet: Type.Optional(
     Type.String({
       description:
-        "Target sheet name. Defaults to the active sheet for most actions. " +
-        "Required for hide/show/very_hide and activate.",
+        "Target sheet name. Required for mutations; get may use the active sheet.",
     }),
   ),
   count: Type.Optional(
@@ -185,22 +179,28 @@ export function createViewSettingsTool(
 
         return output;
       } catch (e) {
-        const message = getErrorMessage(e);
         const outputAddress = params.range ?? params.sheet;
+        const failure = await describeExcelFailure(parseExcelError(e), {
+          ...(params.sheet !== undefined ? { sheet: params.sheet } : {}),
+          ...(params.range !== undefined ? { range: params.range } : {}),
+        });
+        const message = failure.reason;
 
         if (!isMutation) {
           return {
             content: [{ type: "text", text: `Error: ${message}` }],
             details: undefined,
+            isError: true,
           };
         }
 
         const output: AgentToolResult<ViewSettingsDetails> = {
-          content: [{ type: "text", text: `Error: ${message}` }],
+          content: [{ type: "text", text: `Error (${params.action})${unchangedClause(failure, "the view was not changed")}. ${message}` }],
           details: buildMutationDetails({
             action: params.action,
             ...(outputAddress !== undefined ? { address: outputAddress } : {}),
           }),
+          isError: true,
         };
 
         await finalizeMutationOperation(mutationFinalizeDependencies, {
@@ -213,13 +213,6 @@ export function createViewSettingsTool(
             changes: [],
             summary: `error: ${message}`,
           },
-          recovery: {
-            result: output,
-            appendRecoverySnapshot: () => Promise.resolve(null),
-            appendResultNote: appendMutationResultNote,
-            unavailableReason: NON_CHECKPOINTED_MUTATION_REASON,
-            unavailableNote: NON_CHECKPOINTED_MUTATION_NOTE,
-          },
         });
 
         return output;
@@ -229,7 +222,7 @@ export function createViewSettingsTool(
 }
 
 async function executeViewSettingsAction(params: Params): Promise<ViewSettingsActionResult> {
-  return excelRun(async (context) => {
+  return runMutation(async (context) => {
     const sheet = params.sheet
       ? context.workbook.worksheets.getItem(params.sheet)
       : context.workbook.worksheets.getActiveWorksheet();
@@ -336,16 +329,11 @@ async function executeViewSettingsAction(params: Params): Promise<ViewSettingsAc
       case "freeze_at": {
         if (!params.range) throw new Error("range is required for freeze_at");
 
-        // parseCell returns 0-indexed col and 1-indexed row.
-        // "freeze at B5" means rows 1-4 and column A are frozen — the
-        // anchor cell is the first *unfrozen* cell (exclusive).
         const anchor = parseCell(params.range);
-        const frozenRows = anchor.row - 1; // 1-indexed → count above
-        const frozenCols = anchor.col; // 0-indexed col IS the count left of it
+        const frozenRows = anchor.row - 1;
+        const frozenCols = anchor.col;
 
         if (frozenRows === 0 && frozenCols === 0) {
-          // A1 means "nothing to freeze" — matches Excel UI which
-          // unfreezes when the anchor is A1.
           sheet.freezePanes.unfreeze();
           await context.sync();
           sheet.load("name");
@@ -363,8 +351,6 @@ async function executeViewSettingsAction(params: Params): Promise<ViewSettingsAc
         } else if (frozenRows === 0) {
           sheet.freezePanes.freezeColumns(frozenCols);
         } else {
-          // Build the frozen pane content range: A1 up to (but not
-          // including) the anchor cell.
           const paneRange = sheet.getRangeByIndexes(0, 0, frozenRows, frozenCols);
           sheet.freezePanes.freezeAt(paneRange);
         }

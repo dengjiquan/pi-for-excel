@@ -1,45 +1,24 @@
-/**
- * format_cells — Apply formatting to a range (separate from write_cells).
- *
- * Handles: font (bold, italic, color, size), fill color, number format,
- * borders, alignment, column width.
- */
-
+import { runMutation } from "./mutation/run-mutation.js";
+import { recoveryTurn, type RecoveryAttribution } from "./recovery-metadata.js";
 import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { FormatCellsDetails } from "./tool-details.js";
-import {
-  excelRun,
-  getRange,
-  parseRangeRef,
-  qualifiedAddress,
-} from "../excel/helpers.js";
+import { getRange, parseRangeRef, qualifiedAddress } from "../excel/helpers.js";
 import { getWorkbookChangeAuditLog } from "../audit/workbook-change-audit.js";
-import {
-  getWorkbookRecoveryLog,
-  MAX_RECOVERY_CELLS,
-} from "../workbook/recovery-log.js";
-import {
-  captureFormatCellsState,
-  type RecoveryFormatSelection,
-} from "../workbook/recovery-states.js";
+import { getWorkbookRecoveryLog, MAX_RECOVERY_CELLS } from "../workbook/recovery-log.js";
+import { captureFormatCellsState, type RecoveryFormatSelection } from "../workbook/recovery-states.js";
+
+type FormatCellsCapturedState = NonNullable<Awaited<ReturnType<typeof captureFormatCellsState>>["state"]>;
 import { getErrorMessage } from "../utils/errors.js";
 import { resolveStyles } from "../conventions/index.js";
 import {
-  CHECKPOINT_SKIPPED_NOTE,
   CHECKPOINT_SKIPPED_REASON,
 } from "./recovery-metadata.js";
-import {
-  finalizeMutationOperation,
-  finalizeMutationRecoveryStep,
-} from "./mutation/finalize.js";
+import { describeExcelFailure, parseExcelError, unchangedClause } from "./mutation/excel-failure.js";
+import { finalizeMutationOperation } from "./mutation/finalize.js";
 import { appendMutationResultNote } from "./mutation/result-note.js";
 import type { MutationFinalizeDependencies } from "./mutation/types.js";
-import type {
-  BorderWeight,
-  CellStyle,
-  ResolvedCellStyle,
-} from "../conventions/index.js";
+import type { BorderWeight, CellStyle, ResolvedCellStyle } from "../conventions/index.js";
 import {
   buildBorderInstructions,
   normalizeBorderParams,
@@ -48,10 +27,16 @@ import {
 } from "./format-cells-borders.js";
 import { getResolvedConventions } from "../conventions/store.js";
 import { getAppStorage } from "../storage/local/app-storage.js";
-import {
-  applyExcelCellStyle,
-  EXCEL_BUILT_IN_CELL_STYLES,
-} from "./format-cells-cell-style.js";
+import { applyExcelCellStyle, EXCEL_BUILT_IN_CELL_STYLES } from "./format-cells-cell-style.js";
+
+async function formattingChangedSince(address: string, before: FormatCellsCapturedState): Promise<boolean> {
+  try {
+    const now = await captureFormatCellsState(address, before.selection, { maxCellCount: MAX_RECOVERY_CELLS });
+    return !now.state || JSON.stringify(now.state) !== JSON.stringify(before);
+  } catch {
+    return true;
+  }
+}
 
 const DEFAULT_FONT_NAME = "Arial";
 const DEFAULT_FONT_SIZE = 10;
@@ -61,13 +46,12 @@ const POINTS_PER_CHAR_ARIAL_10 = 7.2;
 
 const schema = Type.Object({
   range: Type.String({
-    description:
-      'Range to format, e.g. "A1:D1", "Sheet2!B3:B20". Supports comma/semicolon-separated ranges on the same sheet (e.g. "A1:B2, D1:D2").',
+    description: 'Sheet-qualified range to format, e.g. "Sheet2!B3:B20". Supports comma/semicolon-separated ranges on the same named sheet (e.g. "Sheet2!A1:B2, D1:D2"). Sheet name required.',
   }),
   style: Type.Optional(
     Type.Union([Type.String(), Type.Array(Type.String())], {
       description:
-        "Named style(s) to apply. Compose as array (left-to-right). " +
+        'Named style(s) to apply. Compose as array (left-to-right). ' +
         'Format: "number", "integer", "currency", "percent", "ratio", "text". ' +
         'Structural: "header", "total-row", "subtotal", "input", "blank-section". ' +
         'Example: ["currency", "total-row"] = currency format + bold + top border.',
@@ -79,22 +63,16 @@ const schema = Type.Object({
   font_color: Type.Optional(
     Type.String({ description: 'Font color as hex, e.g. "#0000FF" for blue.' }),
   ),
-  font_size: Type.Optional(
-    Type.Number({ description: "Font size in points." }),
-  ),
-  font_name: Type.Optional(
-    Type.String({ description: 'Font name, e.g. "Arial", "Calibri".' }),
-  ),
+  font_size: Type.Optional(Type.Number({ description: "Font size in points." })),
+  font_name: Type.Optional(Type.String({ description: 'Font name, e.g. "Arial", "Calibri".' })),
   fill_color: Type.Optional(
-    Type.String({
-      description: 'Background fill color as hex, e.g. "#FFFF00" for yellow.',
-    }),
+    Type.String({ description: 'Background fill color as hex, e.g. "#FFFF00" for yellow.' }),
   ),
   number_format: Type.Optional(
     Type.String({
       description:
         'Preset name ("number", "integer", "currency", "percent", "ratio", "text") ' +
-        "or raw Excel format string. Overrides style's number format.",
+        'or raw Excel format string. Overrides style\'s number format.',
     }),
   ),
   number_format_dp: Type.Optional(
@@ -104,8 +82,7 @@ const schema = Type.Object({
   ),
   currency_symbol: Type.Optional(
     Type.String({
-      description:
-        'Override currency symbol, e.g. "£", "€". Only with currency preset.',
+      description: 'Override currency symbol, e.g. "£", "€". Only with currency preset.',
     }),
   ),
   horizontal_alignment: Type.Optional(
@@ -118,22 +95,11 @@ const schema = Type.Object({
       description: '"Top", "Center", "Bottom".',
     }),
   ),
-  wrap_text: Type.Optional(
-    Type.Boolean({ description: "Enable text wrapping." }),
-  ),
-  column_width: Type.Optional(
-    Type.Number({
-      description:
-        "Set column width in Excel character-width units (assumes Arial 10). Converted to points internally.",
-    }),
-  ),
-  row_height: Type.Optional(
-    Type.Number({ description: "Set row height in points." }),
-  ),
+  wrap_text: Type.Optional(Type.Boolean({ description: "Enable text wrapping." })),
+  column_width: Type.Optional(Type.Number({ description: "Set column width in Excel character-width units (assumes Arial 10). Converted to points internally." })),
+  row_height: Type.Optional(Type.Number({ description: "Set row height in points." })),
   auto_fit: Type.Optional(
-    Type.Boolean({
-      description: "Auto-fit column widths to content. Default: false.",
-    }),
+    Type.Boolean({ description: "Auto-fit column widths to content. Default: false." }),
   ),
   borders: Type.Optional(
     Type.Union(
@@ -145,7 +111,7 @@ const schema = Type.Object({
       ],
       {
         description:
-          "Border weight for ALL edges (shorthand). Individual edge params override this.",
+          'Border weight for ALL edges (shorthand). Individual edge params override this.',
       },
     ),
   ),
@@ -157,55 +123,24 @@ const schema = Type.Object({
         "Examples: Input, Output, Calculation, CheckCell, Note, WarningText, Good, Bad, Neutral.",
     }),
   ),
-  border_top: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("thin"),
-        Type.Literal("medium"),
-        Type.Literal("thick"),
-        Type.Literal("none"),
-      ],
-      { description: "Top border weight." },
-    ),
-  ),
-  border_bottom: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("thin"),
-        Type.Literal("medium"),
-        Type.Literal("thick"),
-        Type.Literal("none"),
-      ],
-      { description: "Bottom border weight." },
-    ),
-  ),
-  border_left: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("thin"),
-        Type.Literal("medium"),
-        Type.Literal("thick"),
-        Type.Literal("none"),
-      ],
-      { description: "Left border weight." },
-    ),
-  ),
-  border_right: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("thin"),
-        Type.Literal("medium"),
-        Type.Literal("thick"),
-        Type.Literal("none"),
-      ],
-      { description: "Right border weight." },
-    ),
-  ),
+  border_top: Type.Optional(Type.Union(
+    [Type.Literal("thin"), Type.Literal("medium"), Type.Literal("thick"), Type.Literal("none")],
+    { description: "Top border weight." },
+  )),
+  border_bottom: Type.Optional(Type.Union(
+    [Type.Literal("thin"), Type.Literal("medium"), Type.Literal("thick"), Type.Literal("none")],
+    { description: "Bottom border weight." },
+  )),
+  border_left: Type.Optional(Type.Union(
+    [Type.Literal("thin"), Type.Literal("medium"), Type.Literal("thick"), Type.Literal("none")],
+    { description: "Left border weight." },
+  )),
+  border_right: Type.Optional(Type.Union(
+    [Type.Literal("thin"), Type.Literal("medium"), Type.Literal("thick"), Type.Literal("none")],
+    { description: "Right border weight." },
+  )),
   border_color: Type.Optional(
-    Type.String({
-      description:
-        'Hex color for borders (e.g. "#000000"). Applies to all borders set in this call. Default: automatic (black).',
-    }),
+    Type.String({ description: 'Hex color for borders (e.g. "#000000"). Applies to all borders set in this call. Default: automatic (black).' }),
   ),
   merge: Type.Optional(
     Type.Boolean({ description: "Merge the range into a single cell." }),
@@ -219,12 +154,7 @@ type VerticalAlignment = "Top" | "Center" | "Bottom";
 type BorderVisibleWeight = Exclude<BorderWeight, "none">;
 
 function isHorizontalAlignment(value: string): value is HorizontalAlignment {
-  return (
-    value === "Left" ||
-    value === "Center" ||
-    value === "Right" ||
-    value === "General"
-  );
+  return value === "Left" || value === "Center" || value === "Right" || value === "General";
 }
 
 function isVerticalAlignment(value: string): value is VerticalAlignment {
@@ -263,28 +193,18 @@ function buildFormatCheckpointPlan(
   const selection: RecoveryFormatSelection = {};
   if (appliesCellStyle) selection.cellStyle = true;
   if (appliesCellStyle || hasNumberFormat) selection.numberFormat = true;
-  if (appliesCellStyle || props.fillColor !== undefined)
-    selection.fillColor = true;
-  if (appliesCellStyle || props.fontColor !== undefined)
-    selection.fontColor = true;
+  if (appliesCellStyle || props.fillColor !== undefined) selection.fillColor = true;
+  if (appliesCellStyle || props.fontColor !== undefined) selection.fontColor = true;
   if (appliesCellStyle || props.bold !== undefined) selection.bold = true;
   if (appliesCellStyle || props.italic !== undefined) selection.italic = true;
-  if (appliesCellStyle || props.underline !== undefined)
-    selection.underlineStyle = true;
-  if (appliesCellStyle || props.fontName !== undefined)
-    selection.fontName = true;
-  if (appliesCellStyle || props.fontSize !== undefined)
-    selection.fontSize = true;
-  if (appliesCellStyle || props.horizontalAlignment !== undefined)
-    selection.horizontalAlignment = true;
-  if (appliesCellStyle || props.verticalAlignment !== undefined)
-    selection.verticalAlignment = true;
-  if (appliesCellStyle || props.wrapText !== undefined)
-    selection.wrapText = true;
-  if (params.column_width !== undefined || params.auto_fit === true)
-    selection.columnWidth = true;
-  if (params.row_height !== undefined || params.auto_fit === true)
-    selection.rowHeight = true;
+  if (appliesCellStyle || props.underline !== undefined) selection.underlineStyle = true;
+  if (appliesCellStyle || props.fontName !== undefined) selection.fontName = true;
+  if (appliesCellStyle || props.fontSize !== undefined) selection.fontSize = true;
+  if (appliesCellStyle || props.horizontalAlignment !== undefined) selection.horizontalAlignment = true;
+  if (appliesCellStyle || props.verticalAlignment !== undefined) selection.verticalAlignment = true;
+  if (appliesCellStyle || props.wrapText !== undefined) selection.wrapText = true;
+  if (params.column_width !== undefined || params.auto_fit === true) selection.columnWidth = true;
+  if (params.row_height !== undefined || params.auto_fit === true) selection.rowHeight = true;
   if (params.merge !== undefined) selection.mergedAreas = true;
 
   const hasShorthand = borderParams.shorthand !== undefined;
@@ -299,14 +219,7 @@ function buildFormatCheckpointPlan(
     props.borderLeft !== undefined ||
     props.borderRight !== undefined;
 
-  if (appliesCellStyle) {
-    selection.borderTop = true;
-    selection.borderBottom = true;
-    selection.borderLeft = true;
-    selection.borderRight = true;
-    selection.borderInsideHorizontal = true;
-    selection.borderInsideVertical = true;
-  } else if (hasShorthand && !hasParamEdges && !hasStyleEdges) {
+  if (hasShorthand && !hasParamEdges && !hasStyleEdges) {
     selection.borderTop = true;
     selection.borderBottom = true;
     selection.borderLeft = true;
@@ -314,19 +227,13 @@ function buildFormatCheckpointPlan(
     selection.borderInsideHorizontal = true;
     selection.borderInsideVertical = true;
   } else {
-    if (borderParams.top !== undefined || props.borderTop !== undefined)
-      selection.borderTop = true;
-    if (borderParams.bottom !== undefined || props.borderBottom !== undefined)
-      selection.borderBottom = true;
-    if (borderParams.left !== undefined || props.borderLeft !== undefined)
-      selection.borderLeft = true;
-    if (borderParams.right !== undefined || props.borderRight !== undefined)
-      selection.borderRight = true;
+    if (borderParams.top !== undefined || props.borderTop !== undefined) selection.borderTop = true;
+    if (borderParams.bottom !== undefined || props.borderBottom !== undefined) selection.borderBottom = true;
+    if (borderParams.left !== undefined || props.borderLeft !== undefined) selection.borderLeft = true;
+    if (borderParams.right !== undefined || props.borderRight !== undefined) selection.borderRight = true;
   }
 
-  const hasSelectedProperty = Object.values(selection).some(
-    (value) => value === true,
-  );
+  const hasSelectedProperty = Object.values(selection).some((value) => value === true);
   if (!hasSelectedProperty) {
     return {
       selection,
@@ -365,8 +272,7 @@ function applyFontAndFill(
   }
   if (props.underline !== undefined) {
     format.font.underline = props.underline ? "Single" : "None";
-    if (!hasNamedStyle)
-      applied.push(props.underline ? "underline" : "no underline");
+    if (!hasNamedStyle) applied.push(props.underline ? "underline" : "no underline");
   }
   if (props.fontColor) {
     format.font.color = props.fontColor;
@@ -397,15 +303,11 @@ function applyNumberFormat(
   if (resolved.isMultiRange) {
     for (const area of resolved.target.areas.items) {
       area.numberFormat = Array.from({ length: area.rowCount }, () =>
-        Array.from({ length: area.columnCount }, () => numberFormat),
-      );
+        Array.from({ length: area.columnCount }, () => numberFormat));
     }
   } else {
-    resolved.target.numberFormat = Array.from(
-      { length: resolved.target.rowCount },
-      () =>
-        Array.from({ length: resolved.target.columnCount }, () => numberFormat),
-    );
+    resolved.target.numberFormat = Array.from({ length: resolved.target.rowCount }, () =>
+      Array.from({ length: resolved.target.columnCount }, () => numberFormat));
   }
 
   if (!hasNamedStyle) applied.push(`format "${numberFormat}"`);
@@ -424,8 +326,7 @@ function applyAlignment(
       );
     }
     format.horizontalAlignment = props.horizontalAlignment;
-    if (!hasNamedStyle)
-      applied.push(`align ${props.horizontalAlignment.toLowerCase()}`);
+    if (!hasNamedStyle) applied.push(`align ${props.horizontalAlignment.toLowerCase()}`);
   }
 
   if (props.verticalAlignment) {
@@ -435,8 +336,7 @@ function applyAlignment(
       );
     }
     format.verticalAlignment = props.verticalAlignment;
-    if (!hasNamedStyle)
-      applied.push(`v-align ${props.verticalAlignment.toLowerCase()}`);
+    if (!hasNamedStyle) applied.push(`v-align ${props.verticalAlignment.toLowerCase()}`);
   }
 
   if (props.wrapText !== undefined) {
@@ -468,8 +368,7 @@ function applyDimensions(
     }
 
     const columnTarget = target.getEntireColumn();
-    columnTarget.format.columnWidth =
-      params.column_width * POINTS_PER_CHAR_ARIAL_10;
+    columnTarget.format.columnWidth = params.column_width * POINTS_PER_CHAR_ARIAL_10;
     columnTarget.format.load("columnWidth");
     columnWidthFormat = columnTarget.format;
     applied.push(`col width ${params.column_width}`);
@@ -489,11 +388,7 @@ function applyDimensions(
   return columnWidthFormat;
 }
 
-function applyMerge(
-  resolved: FormatResolution,
-  merge: boolean | undefined,
-  applied: string[],
-): void {
+function applyMerge(resolved: FormatResolution, merge: boolean | undefined, applied: string[]): void {
   if (merge === undefined) return;
 
   if (resolved.isMultiRange) {
@@ -519,8 +414,7 @@ async function applyResolvedFormatting(
   const resolved = resolveFormatTarget(context, params.range);
   resolved.sheet.load("name");
   resolved.target.load("address");
-  if (resolved.isMultiRange)
-    resolved.target.areas.load("items/rowCount,items/columnCount");
+  if (resolved.isMultiRange) resolved.target.areas.load("items/rowCount,items/columnCount");
   else resolved.target.load("rowCount,columnCount");
   await context.sync();
 
@@ -530,9 +424,7 @@ async function applyResolvedFormatting(
   const hasNamedStyle = Boolean(params.style);
 
   if (params.cell_style) {
-    const styleRanges = resolved.isMultiRange
-      ? resolved.target.areas.items
-      : [resolved.target];
+    const styleRanges = resolved.isMultiRange ? resolved.target.areas.items : [resolved.target];
     applyExcelCellStyle(styleRanges, params.cell_style);
     applied.push(`Excel cell style ${params.cell_style}`);
   }
@@ -558,24 +450,20 @@ async function applyResolvedFormatting(
   if (columnWidthFormat && typeof params.column_width === "number") {
     const actualPoints = columnWidthFormat.columnWidth;
     if (typeof actualPoints !== "number") {
-      warnings.push(
-        "Column widths are not uniform; Excel returned no single width value.",
-      );
+      warnings.push("Column widths are not uniform; Excel returned no single width value.");
     } else {
       const actualChars = actualPoints / POINTS_PER_CHAR_ARIAL_10;
       if (Math.abs(actualChars - params.column_width) > 0.1) {
-        warnings.push(
-          `Requested column width ${params.column_width}, Excel applied ${actualChars.toFixed(2)}.`,
-        );
+        warnings.push(`Requested column width ${params.column_width}, Excel applied ${actualChars.toFixed(2)}.`);
       }
     }
   }
 
   const cellCount = resolved.isMultiRange
     ? resolved.target.areas.items.reduce(
-        (total, area) => total + area.rowCount * area.columnCount,
-        0,
-      )
+      (total, area) => total + area.rowCount * area.columnCount,
+      0,
+    )
     : resolved.target.rowCount * resolved.target.columnCount;
 
   return {
@@ -592,16 +480,13 @@ const mutationFinalizeDependencies: MutationFinalizeDependencies = {
   appendAuditEntry: (entry) => getWorkbookChangeAuditLog().append(entry),
 };
 
-export function createFormatCellsTool(): AgentTool<
-  typeof schema,
-  FormatCellsDetails
-> {
+export function createFormatCellsTool(attribution: RecoveryAttribution = {}): AgentTool<typeof schema, FormatCellsDetails> {
   return {
     name: "format_cells",
     label: "Format Cells",
     description:
       "Apply formatting to a range of cells (supports comma-separated ranges on one sheet). " +
-      'Use named styles for common patterns: style: "currency" or style: ["currency", "total-row"]. ' +
+      "Use named styles for common patterns: style: \"currency\" or style: [\"currency\", \"total-row\"]. " +
       "Individual params (bold, fill_color, etc.) override style properties. " +
       "Does NOT modify cell values — use write_cells for that.",
     parameters: schema,
@@ -609,70 +494,37 @@ export function createFormatCellsTool(): AgentTool<
       toolCallId: string,
       params: Params,
     ): Promise<AgentToolResult<FormatCellsDetails>> => {
+      let capturedState: FormatCellsCapturedState | undefined;
       try {
-        // ── Load stored conventions ──────────────────────────────────
         const storage = getAppStorage();
         const conventionConfig = await getResolvedConventions(storage.settings);
 
         const normalizedBorders = normalizeBorderParams(params);
 
-        // ── Resolve styles + overrides into flat properties ──────────
         const styleOverrides: CellStyle = {
-          ...(params.number_format !== undefined
-            ? { numberFormat: params.number_format }
-            : {}),
-          ...(params.number_format_dp !== undefined
-            ? { numberFormatDp: params.number_format_dp }
-            : {}),
-          ...(params.currency_symbol !== undefined
-            ? { currencySymbol: params.currency_symbol }
-            : {}),
+          ...(params.number_format !== undefined ? { numberFormat: params.number_format } : {}),
+          ...(params.number_format_dp !== undefined ? { numberFormatDp: params.number_format_dp } : {}),
+          ...(params.currency_symbol !== undefined ? { currencySymbol: params.currency_symbol } : {}),
           ...(params.bold !== undefined ? { bold: params.bold } : {}),
           ...(params.italic !== undefined ? { italic: params.italic } : {}),
-          ...(params.underline !== undefined
-            ? { underline: params.underline }
-            : {}),
-          ...(params.font_color !== undefined
-            ? { fontColor: params.font_color }
-            : {}),
-          ...(params.font_size !== undefined
-            ? { fontSize: params.font_size }
-            : {}),
-          ...(params.font_name !== undefined
-            ? { fontName: params.font_name }
-            : {}),
-          ...(params.fill_color !== undefined
-            ? { fillColor: params.fill_color }
-            : {}),
-          ...(params.horizontal_alignment !== undefined &&
-          isHorizontalAlignment(params.horizontal_alignment)
+          ...(params.underline !== undefined ? { underline: params.underline } : {}),
+          ...(params.font_color !== undefined ? { fontColor: params.font_color } : {}),
+          ...(params.font_size !== undefined ? { fontSize: params.font_size } : {}),
+          ...(params.font_name !== undefined ? { fontName: params.font_name } : {}),
+          ...(params.fill_color !== undefined ? { fillColor: params.fill_color } : {}),
+          ...(params.horizontal_alignment !== undefined && isHorizontalAlignment(params.horizontal_alignment)
             ? { horizontalAlignment: params.horizontal_alignment }
             : {}),
-          ...(params.vertical_alignment !== undefined &&
-          isVerticalAlignment(params.vertical_alignment)
+          ...(params.vertical_alignment !== undefined && isVerticalAlignment(params.vertical_alignment)
             ? { verticalAlignment: params.vertical_alignment }
             : {}),
-          ...(params.wrap_text !== undefined
-            ? { wrapText: params.wrap_text }
-            : {}),
-          ...(normalizedBorders.top !== undefined
-            ? { borderTop: normalizedBorders.top }
-            : {}),
-          ...(normalizedBorders.bottom !== undefined
-            ? { borderBottom: normalizedBorders.bottom }
-            : {}),
-          ...(normalizedBorders.left !== undefined
-            ? { borderLeft: normalizedBorders.left }
-            : {}),
-          ...(normalizedBorders.right !== undefined
-            ? { borderRight: normalizedBorders.right }
-            : {}),
+          ...(params.wrap_text !== undefined ? { wrapText: params.wrap_text } : {}),
+          ...(normalizedBorders.top !== undefined ? { borderTop: normalizedBorders.top } : {}),
+          ...(normalizedBorders.bottom !== undefined ? { borderBottom: normalizedBorders.bottom } : {}),
+          ...(normalizedBorders.left !== undefined ? { borderLeft: normalizedBorders.left } : {}),
+          ...(normalizedBorders.right !== undefined ? { borderRight: normalizedBorders.right } : {}),
         };
-        const styleResult = resolveStyles(
-          params.style,
-          styleOverrides,
-          conventionConfig,
-        );
+        const styleResult = resolveStyles(params.style, styleOverrides, conventionConfig);
         const props = styleResult.properties;
 
         const checkpointPlan = buildFormatCheckpointPlan(
@@ -708,14 +560,10 @@ export function createFormatCellsTool(): AgentTool<
           }
         }
 
-        const result = await excelRun((context) =>
-          applyResolvedFormatting(
-            context,
-            params,
-            normalizedBorders,
-            styleResult,
-          ),
-        );
+        if (checkpointCapture.supported && checkpointCapture.state) capturedState = checkpointCapture.state;
+
+        const result = await runMutation((context) =>
+          applyResolvedFormatting(context, params, normalizedBorders, styleResult));
 
         const fullAddr = result.isMultiRange
           ? result.address
@@ -738,30 +586,9 @@ export function createFormatCellsTool(): AgentTool<
           },
         };
 
-        const recoveryUnavailableReason =
-          checkpointCapture.supported && checkpointCapture.state
-            ? CHECKPOINT_SKIPPED_REASON
-            : (checkpointCapture.reason ?? CHECKPOINT_SKIPPED_REASON);
-
-        await finalizeMutationRecoveryStep({
-          result: toolResult,
-          appendRecoverySnapshot: () => {
-            if (!checkpointCapture.supported || !checkpointCapture.state) {
-              return Promise.resolve(null);
-            }
-
-            return getWorkbookRecoveryLog().appendFormatCells({
-              toolName: "format_cells",
-              toolCallId,
-              address: fullAddr,
-              changedCount: result.cellCount,
-              formatRangeState: checkpointCapture.state,
-            });
-          },
-          appendResultNote: appendMutationResultNote,
-          unavailableReason: recoveryUnavailableReason,
-          unavailableNote: CHECKPOINT_SKIPPED_NOTE,
-        });
+        const recoveryUnavailableReason = checkpointCapture.supported && checkpointCapture.state
+          ? CHECKPOINT_SKIPPED_REASON
+          : (checkpointCapture.reason ?? CHECKPOINT_SKIPPED_REASON);
 
         await finalizeMutationOperation(mutationFinalizeDependencies, {
           auditEntry: {
@@ -771,17 +598,51 @@ export function createFormatCellsTool(): AgentTool<
             outputAddress: fullAddr,
             changedCount: result.cellCount,
             changes: [],
-            summary:
-              `formatted ${result.cellCount} cell(s)` +
-              (result.warnings.length > 0
-                ? ` with ${result.warnings.length} warning(s)`
-                : ""),
+            summary: `formatted ${result.cellCount} cell(s)` +
+              (result.warnings.length > 0 ? ` with ${result.warnings.length} warning(s)` : ""),
+          },
+          recovery: {
+            result: toolResult,
+            appendRecoverySnapshot: () => {
+              if (!checkpointCapture.supported || !checkpointCapture.state) {
+                return Promise.resolve(null);
+              }
+
+              return getWorkbookRecoveryLog().appendFormatCells({
+                ...recoveryTurn(attribution, toolCallId),
+                toolName: "format_cells",
+                toolCallId,
+                address: fullAddr,
+                changedCount: result.cellCount,
+                formatRangeState: checkpointCapture.state,
+              });
+            },
+            appendResultNote: appendMutationResultNote,
+            unavailableReason: recoveryUnavailableReason,
           },
         });
 
         return toolResult;
       } catch (e) {
-        const message = getErrorMessage(e);
+        const failure = await describeExcelFailure(parseExcelError(e), { range: params.range });
+        const message = failure.reason;
+
+        let backupNote = "";
+        if (capturedState && await formattingChangedSince(params.range, capturedState)) {
+          try {
+            const snapshot = await getWorkbookRecoveryLog().appendFormatCells({
+              ...recoveryTurn(attribution, toolCallId),
+              toolName: "format_cells",
+              toolCallId,
+              address: params.range,
+              changedCount: 0,
+              formatRangeState: capturedState,
+            });
+            if (snapshot) backupNote = "\n\nSome formatting may have been applied before the error; a backup of the previous formatting was saved, so it can be reverted.";
+          } catch (backupError) {
+            backupNote = `\n\n⚠️ Some formatting may have been applied before the error, and no backup could be saved: ${getErrorMessage(backupError)}`;
+          }
+        }
 
         await finalizeMutationOperation(mutationFinalizeDependencies, {
           auditEntry: {
@@ -796,26 +657,21 @@ export function createFormatCellsTool(): AgentTool<
         });
 
         return {
-          content: [{ type: "text", text: `Error formatting: ${message}` }],
+          content: [{ type: "text", text: `Error formatting ${params.range}${unchangedClause(failure, "no formatting was applied")}. ${message}${failure.maybeApplied ? backupNote : ""}` }],
           details: { kind: "format_cells", address: params.range },
+          isError: true,
         };
       }
     },
   };
 }
 
-// ── Border application ───────────────────────────────────────────────
-
-/** Map a border weight string to the Office.js enum value. */
-function toBorderWeight(
-  weight: BorderVisibleWeight,
-): "Thin" | "Medium" | "Thick" {
+function toBorderWeight(weight: BorderVisibleWeight): "Thin" | "Medium" | "Thick" {
   if (weight === "thin") return "Thin";
   if (weight === "medium") return "Medium";
   return "Thick";
 }
 
-/** Apply a single border edge. */
 function applyEdge(
   formatTarget: Excel.RangeFormat,
   edge: BorderEdgeIndex,
@@ -835,21 +691,10 @@ function applyEdge(
   }
 }
 
-/**
- * Resolve and apply borders. Priority:
- *   1. Individual edge params (border_top, etc.) — highest
- *   2. Style-resolved edges (from named styles)
- *   3. `borders` shorthand (all edges + inside) — lowest
- */
 function applyBorders(
   formatTarget: Excel.RangeFormat,
   borderParams: NormalizedBorderParams,
-  props: {
-    borderTop?: BorderWeight;
-    borderBottom?: BorderWeight;
-    borderLeft?: BorderWeight;
-    borderRight?: BorderWeight;
-  },
+  props: { borderTop?: BorderWeight; borderBottom?: BorderWeight; borderLeft?: BorderWeight; borderRight?: BorderWeight },
   color: string | undefined,
   applied: string[],
 ): void {
@@ -876,10 +721,7 @@ type FormatResolution =
   | { sheet: Excel.Worksheet; target: Excel.Range; isMultiRange: false }
   | { sheet: Excel.Worksheet; target: Excel.RangeAreas; isMultiRange: true };
 
-function resolveFormatTarget(
-  context: Excel.RequestContext,
-  ref: string,
-): FormatResolution {
+function resolveFormatTarget(context: Excel.RequestContext, ref: string): FormatResolution {
   const parts = splitRangeList(ref);
   if (parts.length <= 1) {
     const { sheet, range } = getRange(context, ref);

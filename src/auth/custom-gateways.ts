@@ -1,27 +1,17 @@
-/**
- * Helpers for custom OpenAI-compatible gateway providers.
- */
-
 import type { Api, Model, Models } from "@earendil-works/pi-ai";
 import type { CustomProvider } from "../storage/local/custom-providers-store.js";
+import { isLoopbackProxyUrl } from "./proxy-validation.js";
+import { t } from "../language/index.js";
 
 const OPENAI_GATEWAY_ID_PREFIX = "pi-openai-gateway:";
 export const OPENAI_GATEWAY_PROVIDER_PREFIX = "Gateway · ";
 const OPENAI_GATEWAY_TYPE = "openai-completions";
 const OPENAI_RESPONSES_GATEWAY_TYPE = "openai-responses";
 
-/** Wire protocol the gateway speaks; providers like opencode GO route some
- * models (gpt-5.6-luna, grok-4.6) only through the Responses API. */
 export type GatewayApiType = "openai-completions" | "openai-responses";
 
-/** UI choice: "auto" resolves the protocol from the model name at save time. */
 export type GatewayApiChoice = "auto" | GatewayApiType;
 
-/**
- * opencode GO route table (https://opencode.ai/docs/go/): responses-only
- * models are gpt-*, grok-*, muse-spark*; everything else is chat completions.
- * Manual override exists for models this table does not know yet.
- */
 export function resolveGatewayApiType(modelId: string): GatewayApiType {
   return /^(gpt-|grok-|muse-spark)/i.test(modelId)
     ? "openai-responses"
@@ -29,8 +19,7 @@ export function resolveGatewayApiType(modelId: string): GatewayApiType {
 }
 
 export const DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW = 16_384;
-// ponytail: fixed default; expose per-model override in gateway settings if users need lower
-const DEFAULT_OPENAI_GATEWAY_MAX_TOKENS = 65_536;
+export const DEFAULT_OPENAI_GATEWAY_MAX_TOKENS = 65_536;
 
 type StoredModel = NonNullable<CustomProvider["models"]>[number];
 
@@ -50,10 +39,10 @@ export interface OpenAiGatewayConfig {
   providerName: string;
   contextWindow: number;
   headers?: Record<string, string>;
-  /** Resolved protocol actually used for requests. */
   api: GatewayApiType;
-  /** The stored UI choice ("auto" or a locked protocol). */
   apiMode: GatewayApiChoice;
+  maxTokens: number;
+  connectDirectly: boolean;
 }
 
 export interface SaveOpenAiGatewayInput {
@@ -65,6 +54,8 @@ export interface SaveOpenAiGatewayInput {
   contextWindow?: number;
   headers?: Record<string, string>;
   api?: GatewayApiChoice;
+  maxTokens?: number;
+  connectDirectly?: boolean;
 }
 
 export interface CustomProviderRuntimeInfo {
@@ -81,27 +72,27 @@ function normalizeOptionalString(value: string | null | undefined): string {
   return value.trim();
 }
 
-function normalizeRequiredString(value: string, label: string): string {
+function normalizeRequiredString(value: string, requiredMessage: () => string): string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
-    throw new Error(`${label} is required.`);
+    throw new Error(requiredMessage());
   }
 
   return trimmed;
 }
 
 export function normalizeGatewayEndpointUrl(endpointUrl: string): string {
-  const raw = normalizeRequiredString(endpointUrl, "Endpoint URL");
+  const raw = normalizeRequiredString(endpointUrl, () => t("custom-gateway.error.endpointRequired"));
 
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error("Endpoint URL must be a valid http:// or https:// URL.");
+    throw new Error(t("custom-gateway.error.endpointInvalid"));
   }
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("Endpoint URL must use http:// or https://.");
+    throw new Error(t("custom-gateway.error.endpointScheme"));
   }
 
   parsed.hash = "";
@@ -109,14 +100,21 @@ export function normalizeGatewayEndpointUrl(endpointUrl: string): string {
   return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
 }
 
-export function normalizeGatewayModelId(modelId: string): string {
-  return normalizeRequiredString(modelId, "Model ID");
+export function isPlainHttpRemoteEndpoint(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  return parsed.protocol === "http:" && !isLoopbackProxyUrl(url);
 }
 
-/**
- * Parse "Header-Name: value" lines into a header record.
- * Blank lines are skipped; a line without ":" is an error.
- */
+export function normalizeGatewayModelId(modelId: string): string {
+  return normalizeRequiredString(modelId, () => t("custom-gateway.error.modelRequired"));
+}
+
 export function parseGatewayHeaderText(text: string): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const rawLine of text.split(/\r?\n/)) {
@@ -139,10 +137,7 @@ export function parseGatewayHeaderText(text: string): Record<string, string> {
   return headers;
 }
 
-/** Render a header record back as "Name: value" lines for editing. */
-export function formatGatewayHeaders(
-  headers: Record<string, string> | undefined,
-): string {
+export function formatGatewayHeaders(headers: Record<string, string> | undefined): string {
   if (!headers) return "";
   return Object.entries(headers)
     .map(([name, value]) => `${name}: ${value}`)
@@ -157,21 +152,30 @@ export function normalizeGatewayContextWindow(
   }
 
   if (!Number.isInteger(contextWindow)) {
-    throw new Error("Max context tokens must be a whole number.");
+    throw new Error(t("custom-gateway.error.contextWhole"));
   }
 
   const normalized = contextWindow;
   if (normalized < 1_024) {
-    throw new Error("Max context tokens must be at least 1024.");
+    throw new Error(t("custom-gateway.error.contextMin"));
   }
 
   return normalized;
 }
 
-function deriveDisplayName(
-  rawName: string | undefined,
-  endpointUrl: string,
-): string {
+function normalizeGatewayMaxTokens(maxTokens: number): number {
+  if (!Number.isInteger(maxTokens)) {
+    throw new Error(t("custom-gateway.error.maxTokensWhole"));
+  }
+
+  if (maxTokens < 1) {
+    throw new Error(t("custom-gateway.error.maxTokensMin"));
+  }
+
+  return maxTokens;
+}
+
+function deriveDisplayName(rawName: string | undefined, endpointUrl: string): string {
   const explicit = normalizeOptionalString(rawName);
   if (explicit.length > 0) {
     return explicit;
@@ -185,7 +189,6 @@ function deriveDisplayName(
       return host;
     }
   } catch {
-    // noop — endpoint URL is validated before this runs.
   }
 
   return "Custom gateway";
@@ -276,6 +279,8 @@ function providerToGatewayConfig(
       provider.apiMode === "openai-responses"
         ? provider.apiMode
         : "auto",
+    maxTokens: model.maxTokens,
+    connectDirectly: provider.connectDirectly === true,
   };
 }
 
@@ -286,11 +291,12 @@ function createGatewayModel(args: {
   contextWindow: number;
   headers?: Record<string, string>;
   api: GatewayApiType;
+  maxTokens?: number;
   registryModel?: Model<Api>;
 }): Model<Api> {
   const registryModel = args.registryModel;
   const maxTokens = Math.min(
-    registryModel?.maxTokens ?? DEFAULT_OPENAI_GATEWAY_MAX_TOKENS,
+    args.maxTokens ?? registryModel?.maxTokens ?? DEFAULT_OPENAI_GATEWAY_MAX_TOKENS,
     args.contextWindow,
   );
 
@@ -382,12 +388,19 @@ export async function saveOpenAiGatewayConfig(
   const contextWindow = normalizeGatewayContextWindow(
     input.contextWindow ?? registryModel?.contextWindow,
   );
+  const explicitMaxTokens = input.maxTokens === undefined
+    ? undefined
+    : normalizeGatewayMaxTokens(input.maxTokens);
+  const connectDirectly = input.connectDirectly === true;
+  if (connectDirectly && isPlainHttpRemoteEndpoint(endpointUrl)) {
+    throw new Error(t("custom-gateway.error.directNeedsHttps"));
+  }
   const existingGateways = await listOpenAiGatewayConfigs(customProvidersStore);
 
   if (input.id) {
     const match = existingGateways.find((gateway) => gateway.id === input.id);
     if (!match) {
-      throw new Error("Gateway not found.");
+      throw new Error(t("custom-gateway.error.notFound"));
     }
   }
 
@@ -417,31 +430,33 @@ export async function saveOpenAiGatewayConfig(
   const hasHeaders = headers !== undefined && Object.keys(headers).length > 0;
   const normalizedHeaders = hasHeaders ? headers : undefined;
 
+  const gatewayModel = createGatewayModel({
+    endpointUrl,
+    modelId,
+    providerName,
+    contextWindow,
+    api,
+    ...(explicitMaxTokens !== undefined ? { maxTokens: explicitMaxTokens } : {}),
+    ...(normalizedHeaders !== undefined ? { headers: normalizedHeaders } : {}),
+    ...(registryModel !== undefined ? { registryModel } : {}),
+  });
+
   const provider: CustomProvider = {
     id,
     name: displayName,
     type: api,
     baseUrl: endpointUrl,
     apiMode: apiChoice,
-    models: [
-      createGatewayModel({
-        endpointUrl,
-        modelId,
-        providerName,
-        contextWindow,
-        api,
-        ...(normalizedHeaders !== undefined
-          ? { headers: normalizedHeaders }
-          : {}),
-        ...(registryModel !== undefined ? { registryModel } : {}),
-      }),
-    ],
+    models: [gatewayModel],
   };
   if (apiKey.length > 0) {
     provider.apiKey = apiKey;
   }
   if (normalizedHeaders !== undefined) {
     provider.headers = normalizedHeaders;
+  }
+  if (connectDirectly) {
+    provider.connectDirectly = true;
   }
 
   await customProvidersStore.set(provider);
@@ -457,6 +472,8 @@ export async function saveOpenAiGatewayConfig(
     ...(provider.headers !== undefined ? { headers: provider.headers } : {}),
     api,
     apiMode: apiChoice,
+    maxTokens: gatewayModel.maxTokens,
+    connectDirectly,
   };
 }
 

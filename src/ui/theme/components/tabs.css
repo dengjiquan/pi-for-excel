@@ -1,7 +1,3 @@
-/* ═══════════════════════════════════════════════════════
-   3. PI-SIDEBAR — tabs + messages area + input area
-   ═══════════════════════════════════════════════════════ */
-
 pi-sidebar {
   display: flex;
   flex: 1 1 auto;
@@ -17,9 +13,9 @@ pi-sidebar {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 20px 6px 8px;
+  padding: 7px 8px 6px;
+  padding-right: 44px;
 
-  /* ── Liquid glass surface ── */
   background: transparent;
 
   flex-shrink: 0;
@@ -27,7 +23,6 @@ pi-sidebar {
   z-index: 10;
 }
 
-/* Liquid glass fade — tab strip dissolves into content below */
 .pi-session-tabs::after {
   content: '';
   position: absolute;
@@ -37,11 +32,27 @@ pi-sidebar {
   height: 24px;
   background: linear-gradient(
     to bottom,
-    oklch(0.98 0.002 90 / 0.5),
-    oklch(0.98 0.002 90 / 0.2) 40%,
+    rgba(250, 249, 247, 0.5),
+    rgba(250, 249, 247, 0.2) 40%,
     transparent
   );
   pointer-events: none;
+}
+
+.dark .pi-session-tabs::after {
+  background: linear-gradient(to bottom, var(--background), transparent);
+}
+
+.dark .pi-session-tab,
+.dark .pi-session-tabs__scroll,
+.dark .pi-utilities-btn {
+  background: var(--glass-bg-solid);
+}
+
+.dark .pi-session-tabs__scroll:hover,
+.dark .pi-utilities-btn:hover,
+.dark .pi-utilities-btn[aria-expanded="true"] {
+  background: var(--accent);
 }
 
 .pi-session-tabs__scroller-wrap {
@@ -58,9 +69,13 @@ pi-sidebar {
   gap: 4px;
   overflow-x: auto;
   overflow-y: visible;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   min-width: 0;
   flex: 1;
+}
+
+.pi-session-tabs__scroller::-webkit-scrollbar {
+  display: none;
 }
 
 .pi-session-tabs__scroll {
@@ -92,6 +107,7 @@ pi-sidebar {
 .pi-session-tab {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   position: relative;
   border: 1px solid var(--alpha-10);
   border-radius: var(--radius-sm);
@@ -110,8 +126,8 @@ pi-sidebar {
 }
 
 .pi-session-tab.is-active {
-  background: oklch(0.45 0.12 160 / 0.18);
-  border-color: var(--green-alpha-25);
+  background: var(--surface-2);
+  border-color: var(--line-strong);
   color: var(--foreground);
 }
 
@@ -126,8 +142,8 @@ pi-sidebar {
 }
 
 .pi-session-tab.is-active:focus-within {
-  border-color: var(--pi-green);
-  box-shadow: 0 0 0 2px var(--green-alpha-14);
+  border-color: var(--fg-3);
+  box-shadow: 0 0 0 2px var(--alpha-8);
 }
 
 .pi-session-tab__main {
@@ -167,18 +183,49 @@ pi-sidebar {
 }
 
 .pi-session-tab__busy {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: var(--radius-full);
-  background: white;
-  box-shadow: 0 0 0 3px var(--white-alpha-25);
+  background: var(--fg-2);
+  box-shadow: none;
   flex-shrink: 0;
+  animation: pi-tab-busy 1.4s ease-in-out infinite;
+}
+
+@keyframes pi-tab-busy {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pi-session-tab__busy { animation: none; }
+}
+
+.pi-session-tab__marker {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.pi-session-tab__marker--failed {
+  background: var(--destructive);
+  box-shadow: 0 0 0 2px var(--white-alpha-90);
+}
+
+.pi-session-tab__marker--finished {
+  border: 2px solid var(--pi-green);
+  box-sizing: border-box;
 }
 
 .pi-session-tab__lock {
   font-size: var(--text-xs);
-  color: var(--white-alpha-70);
-  font-family: var(--font-mono);
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: var(--radius-xs);
+  background: var(--amber-alpha-16);
+  color: var(--pi-amber-text);
   flex-shrink: 0;
 }
 
@@ -205,14 +252,14 @@ pi-sidebar {
 }
 
 .pi-session-tab.is-active .pi-session-tab__close {
-  background: oklch(1 0 0 / 0.58);
-  border-color: var(--green-alpha-20);
-  color: oklch(0.43 0.02 160);
+  background: var(--surface-1);
+  border-color: var(--line);
+  color: var(--fg-2);
 }
 
 .pi-session-tab__close:hover {
-  background: oklch(0.58 0.22 27 / 0.95);
-  border-color: oklch(0.58 0.22 27 / 0.75);
+  background: var(--red);
+  border-color: var(--red);
   color: white;
 }
 
@@ -240,9 +287,9 @@ pi-sidebar {
 }
 
 .pi-session-tabs__new:hover {
-  background: var(--pi-green-light);
-  border-color: var(--green-alpha-30);
-  color: var(--pi-green);
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+  color: var(--foreground);
 }
 
 .pi-session-tab__close:disabled {
@@ -257,25 +304,23 @@ pi-sidebar {
 }
 
 .pi-session-tab.is-active .pi-session-tab__close:disabled:hover {
-  background: oklch(1 0 0 / 0.58);
-  border-color: var(--green-alpha-20);
-  color: oklch(0.43 0.02 160);
+  background: var(--surface-1);
+  border-color: var(--line);
+  color: var(--fg-2);
 }
 
 .pi-session-tab-context-menu {
   min-width: 170px;
   padding: 4px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   border: 1px solid var(--alpha-12);
-  background: var(--glass-bg-solid);
-  backdrop-filter: var(--glass-blur-dropdown);
-  -webkit-backdrop-filter: var(--glass-blur-dropdown);
+  background: var(--menu-surface);
   box-shadow: var(--glass-shadow-lg), var(--glass-highlight), var(--glass-inner-shadow);
 }
 
 .pi-session-tab-context-menu--floating {
   position: fixed;
-  z-index: 260;
+  z-index: var(--z-popover);
 }
 
 .pi-session-tab-context-menu__item {
@@ -302,7 +347,7 @@ pi-sidebar {
 }
 
 .pi-session-tab-context-menu__item--danger {
-  color: oklch(0.58 0.2 27);
+  color: var(--red);
 }
 
 .pi-session-tab-context-menu__divider {
@@ -315,8 +360,6 @@ pi-sidebar {
     var(--white-alpha-40)
   );
 }
-
-/* ── Utilities menu trigger (gear in tab strip) ── */
 
 .pi-utilities-anchor {
   position: relative;
@@ -390,7 +433,6 @@ pi-sidebar {
   overflow-x: hidden;
   min-height: 0;
   position: relative;
-  /* We drive chat stick-to-bottom in JS; disable browser anchoring jitter. */
   overflow-anchor: none;
 }
 
@@ -401,7 +443,14 @@ pi-sidebar {
   gap: 4px;
 }
 
-/* Footer surfaces (widget slot + input footer) */
+.pi-dock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 10;
+}
+
 :is(.pi-input-area, .pi-widget-slot) {
   flex-shrink: 0;
   padding: 6px 10px;
@@ -410,8 +459,12 @@ pi-sidebar {
   background: transparent;
 }
 
-/* Input footer — soft fade into content above */
-.pi-input-area::before {
+.pi-dock--busy .pi-input-area,
+.pi-dock > .pi-queue + .pi-input-area {
+  padding-top: 0;
+}
+
+.pi-dock::before {
   content: '';
   position: absolute;
   top: -10px;
@@ -437,5 +490,4 @@ pi-sidebar {
     padding: 4px 8px;
   }
 }
-
 

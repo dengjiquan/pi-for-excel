@@ -192,9 +192,12 @@ function wrapTool(tool: AgentTool, connectionManager: ConnectionManager): AgentT
     ...tool,
     execute: async (toolCallId, params, signal, onUpdate) => {
       const snapshots: ConnectionSnapshot[] = [];
+      const fetchedSnapshots = await Promise.all(requiredConnectionIds.map(async (connectionId) => ({
+        connectionId,
+        snapshot: await connectionManager.getSnapshot(connectionId),
+      })));
 
-      for (const connectionId of requiredConnectionIds) {
-        const snapshot = await connectionManager.getSnapshot(connectionId);
+      for (const { connectionId, snapshot } of fetchedSnapshots) {
         if (!snapshot) {
           return buildUnregisteredConnectionResult(connectionId);
         }
@@ -234,15 +237,13 @@ function wrapTool(tool: AgentTool, connectionManager: ConnectionManager): AgentT
               errorMessage,
             );
           } catch {
-            // best-effort redaction only; fallback to original message below.
           }
 
           try {
             await connectionManager.markRuntimeAuthFailure(authFailureSnapshot.connectionId, {
               message: errorMessage,
-            });
+            }, authFailureSnapshot.credentialRevision);
           } catch {
-            // best-effort status update only
           }
 
           const refreshedSnapshot = await connectionManager.getSnapshot(authFailureSnapshot.connectionId);

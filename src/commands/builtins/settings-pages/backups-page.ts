@@ -1,11 +1,3 @@
-/**
- * Backups page — workbook recovery snapshots.
- *
- * Progressive-disclosure empty state: when there are no backups, only the
- * warning callout and empty message are shown. Search, filter, toolbar,
- * and retention controls appear once backups exist.
- */
-
 import { formatRelativeDate } from "../overlay-relative-date.js";
 import { t } from "../../../language/index.js";
 import {
@@ -26,10 +18,7 @@ import {
   createActionsRow,
 } from "../../../ui/extensions-hub-components.js";
 import { lucide, AlertTriangle, Package, Search } from "../../../ui/lucide-icons.js";
-import {
-  MAX_RECOVERY_ENTRIES,
-  MIN_RETENTION_LIMIT,
-} from "../../../workbook/recovery/constants.js";
+import type { RecoveryCursor, RecoveryPageOptions } from "../../../workbook/recovery/log-store.js";
 import { getSettingsPagesDependencies } from "./dependencies.js";
 import type {
   RecoveryCheckpointSummary,
@@ -85,31 +74,21 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${unit}`;
 }
 
-// ---------------------------------------------------------------------------
-// Retention
-// ---------------------------------------------------------------------------
-
-export interface RetentionConfig {
-  maxSnapshots: number;
-}
-
 export interface ManualFullBackupSummary {
   id: string;
   sizeBytes: number;
+  kept: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Overlay
-// ---------------------------------------------------------------------------
-
 export interface BackupsPageCallbacks {
-  loadCheckpoints: () => Promise<RecoveryCheckpointSummary[]>;
+  loadCheckpoints: (options?: RecoveryPageOptions) => Promise<{
+    entries: RecoveryCheckpointSummary[];
+    nextCursor?: RecoveryCursor;
+  }>;
   onRestore: (snapshotId: string) => Promise<void>;
   onDelete: (snapshotId: string) => Promise<boolean>;
   onClear: () => Promise<number>;
   onCreateManualFullBackup?: () => Promise<ManualFullBackupSummary>;
-  getRetentionConfig?: () => Promise<RetentionConfig>;
-  setRetentionConfig?: (config: RetentionConfig) => Promise<void>;
 }
 
 export function createBackupsPage(): SettingsShellPage {
@@ -138,16 +117,12 @@ async function renderBackupsContent(
   addCleanup: (cleanup: () => void) => void,
   opts: BackupsPageCallbacks,
 ): Promise<void> {
-  // -- Warning callout --
-
   const warningCallout = createCallout(
     "warn",
     lucide(AlertTriangle),
     t("recovery.warning"),
     { compact: true },
   );
-
-  // -- Search + filters (hidden when empty) --
 
   const searchRow = document.createElement("div");
   searchRow.className = "pi-recovery-search-row pi-overlay-inline-row pi-overlay-inline-row--compact pi-overlay-inline-row--wrap";
@@ -167,8 +142,6 @@ async function renderBackupsContent(
 
   searchRow.append(searchInput, toolFilterSelect, sortButton);
 
-  // -- Toolbar (hidden when empty) --
-
   const toolbar = document.createElement("div");
   toolbar.className = "pi-overlay-toolbar";
 
@@ -187,7 +160,10 @@ async function renderBackupsContent(
         statusText.textContent = t("recovery.capturing");
         try {
           const backup = await createManualFullBackup();
-          showToast(t("recovery.toast.backupDownloaded", { id: shortId(backup.id), size: formatBytes(backup.sizeBytes) }));
+          const size = formatBytes(backup.sizeBytes);
+          showToast(backup.kept
+            ? t("recovery.toast.backupDownloaded", { id: backup.id, size })
+            : t("recovery.toast.backupDownloadedNotKept", { id: backup.id, size }));
           renderList();
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
@@ -229,7 +205,7 @@ async function renderBackupsContent(
       void (async () => {
         const proceed = await requestConfirmationDialog({
           title: t("recovery.confirm.deleteAllTitle"),
-          message: t("recovery.confirm.deleteAllMessage", { count: allCheckpoints.length, plural: allCheckpoints.length === 1 ? "" : "s" }),
+          message: t("recovery.confirm.deleteAllMessage"),
           confirmLabel: t("recovery.confirm.deleteAllLabel"),
           cancelLabel: t("confirm.cancel"),
           confirmButtonTone: "danger",
@@ -260,76 +236,26 @@ async function renderBackupsContent(
 
   toolbar.append(toolbarActions, statusText);
 
-  // -- Retention (hidden by default, collapsible) --
-
-  const hasRetention = opts.getRetentionConfig !== undefined && opts.setRetentionConfig !== undefined;
-  const retentionDetails = document.createElement("details");
-  retentionDetails.className = "pi-recovery-retention-details";
-  retentionDetails.hidden = !hasRetention;
-
-  const retentionSummary = document.createElement("summary");
-  retentionSummary.className = "pi-recovery-retention-summary";
-  retentionSummary.textContent = t("recovery.retentionSettings");
-  retentionDetails.appendChild(retentionSummary);
-
-  const retentionRow = document.createElement("div");
-  retentionRow.className = "pi-recovery-retention pi-overlay-inline-row pi-overlay-inline-row--compact";
-
-  const retentionLabel = document.createElement("label");
-  retentionLabel.className = "pi-recovery-retention__label";
-  retentionLabel.textContent = t("recovery.keepAtMost");
-
-  const retentionInput = document.createElement("input");
-  retentionInput.type = "number";
-  retentionInput.min = String(MIN_RETENTION_LIMIT);
-  retentionInput.max = String(MAX_RECOVERY_ENTRIES);
-  retentionInput.className = "pi-recovery-retention__input pi-overlay-inline-control";
-
-  const retentionSuffix = document.createElement("span");
-  retentionSuffix.className = "pi-recovery-retention__suffix";
-  retentionSuffix.textContent = t("recovery.backupsSuffix");
-
-  const retentionSave = createButton(t("recovery.retentionSave"), {
-    compact: true,
-    onClick: () => {
-      if (busy) return;
-      const setConfig = opts.setRetentionConfig;
-      if (!setConfig) return;
-      const value = parseInt(retentionInput.value, 10);
-      if (!Number.isFinite(value) || value < MIN_RETENTION_LIMIT || value > MAX_RECOVERY_ENTRIES) {
-        showToast(t("recovery.toast.retentionLimit", { min: MIN_RETENTION_LIMIT, max: MAX_RECOVERY_ENTRIES }));
-        return;
-      }
-      void (async () => {
-        setBusy(true);
-        try {
-          await setConfig({ maxSnapshots: value });
-          showToast(t("recovery.toast.retentionSet", { count: value }));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown error";
-          showToast(t("recovery.toast.retentionSaveFailed", { message }));
-        } finally {
-          setBusy(false);
-        }
-      })();
-    },
-  });
-
-  retentionRow.append(retentionLabel, retentionInput, retentionSuffix, retentionSave);
-  retentionDetails.appendChild(retentionRow);
-
-  // -- List --
-
   const list = document.createElement("div");
   list.className = "pi-recovery-list";
 
-  // -- Assemble --
-
-  host.append(warningCallout, searchRow, toolbar, retentionDetails, list);
-
-  // -- State --
+  const previousButton = createButton(t("recovery.previousPage"), {
+    compact: true,
+    onClick: () => { if (!busy && cursors.length > 1) void navigate(false); },
+  });
+  const nextButton = createButton(t("recovery.nextPage"), {
+    compact: true,
+    onClick: () => { if (!busy && nextCursor) void navigate(true); },
+  });
+  const pager = createActionsRow(previousButton, nextButton);
+  const pageHint = document.createElement("p");
+  pageHint.className = "pi-overlay-hint";
+  pageHint.textContent = t("recovery.pageHint");
+  host.append(warningCallout, searchRow, toolbar, pageHint, list, pager);
 
   let allCheckpoints: RecoveryCheckpointSummary[] = [];
+  let nextCursor: RecoveryCursor | undefined;
+  let cursors: Array<RecoveryCursor | undefined> = [undefined];
   let busy = false;
   const filterState: RecoveryFilterState = { ...DEFAULT_FILTER_STATE };
 
@@ -338,12 +264,12 @@ async function renderBackupsContent(
 
   const shortId = (id: string): string => (id.length > 12 ? id.slice(0, 12) : id);
 
-  /** Show/hide progressive-disclosure controls based on checkpoint count. */
   const syncVisibility = (): void => {
     const hasBackups = allCheckpoints.length > 0;
     searchRow.hidden = !hasBackups;
     toolbar.hidden = !hasBackups;
-    retentionDetails.hidden = !hasRetention || !hasBackups;
+    pager.hidden = !hasBackups && cursors.length === 1;
+    pageHint.hidden = !hasBackups;
   };
 
   const setBusy = (next: boolean): void => {
@@ -354,7 +280,8 @@ async function renderBackupsContent(
     searchInput.disabled = next;
     toolFilterSelect.disabled = next;
     sortButton.disabled = next;
-    retentionSave.disabled = next;
+    previousButton.disabled = next || cursors.length === 1;
+    nextButton.disabled = next || !nextCursor;
 
     for (const button of list.querySelectorAll<HTMLButtonElement>("button")) {
       button.disabled = next;
@@ -430,8 +357,7 @@ async function renderBackupsContent(
             statusText.textContent = t("recovery.restoring");
             try {
               await opts.onRestore(checkpoint.id);
-              allCheckpoints = await opts.loadCheckpoints();
-              renderList();
+              await reload();
             } catch (error) {
               const message = error instanceof Error ? error.message : "Unknown error";
               showToast(t("recovery.toast.restoreFailed", { message }));
@@ -465,8 +391,7 @@ async function renderBackupsContent(
               if (!deleted) {
                 showToast(t("recovery.backupNotFound"));
               }
-              allCheckpoints = await opts.loadCheckpoints();
-              renderList();
+              await reload();
             } catch (error) {
               const message = error instanceof Error ? error.message : "Unknown error";
               showToast(t("recovery.toast.deleteFailed", { message }));
@@ -502,11 +427,33 @@ async function renderBackupsContent(
   };
 
   const reload = async (): Promise<void> => {
-    allCheckpoints = await opts.loadCheckpoints();
+    cursors = [undefined];
+    await loadPage();
+  };
+
+  const loadPage = async (): Promise<void> => {
+    const cursor = cursors.at(-1);
+    const page = await opts.loadCheckpoints({
+      ...(cursor ? { cursor } : {}),
+      oldestFirst: filterState.sortOrder === "oldest",
+    });
+    allCheckpoints = page.entries;
+    nextCursor = page.nextCursor;
     renderList();
   };
 
-  // -- Event listeners --
+  const navigate = async (forward: boolean): Promise<void> => {
+    const previousCursors = [...cursors];
+    if (forward) cursors.push(nextCursor);
+    else cursors.pop();
+    setBusy(true);
+    try { await loadPage(); }
+    catch (error) {
+      cursors = previousCursors;
+      const message = error instanceof Error ? error.message : "Unknown error";
+      showToast(t("recovery.toast.refreshFailed", { message }));
+    } finally { setBusy(false); }
+  };
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -526,29 +473,25 @@ async function renderBackupsContent(
   sortButton.addEventListener("click", () => {
     const next: RecoverySortOrder = filterState.sortOrder === "newest" ? "oldest" : "newest";
     filterState.sortOrder = next;
-    renderList();
+    void navigateToFirst();
   });
 
-  // -- Cleanup --
+  const navigateToFirst = async (): Promise<void> => {
+    setBusy(true);
+    try { await reload(); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      showToast(t("recovery.toast.refreshFailed", { message }));
+    } finally { setBusy(false); }
+  };
 
   addCleanup(() => {
     if (searchTimer !== null) clearTimeout(searchTimer);
   });
 
-  // -- Initial load --
-
   setBusy(true);
   statusText.textContent = t("recovery.loading");
   try {
-    if (opts.getRetentionConfig) {
-      try {
-        const config = await opts.getRetentionConfig();
-        retentionInput.value = String(config.maxSnapshots);
-      } catch {
-        retentionInput.value = String(MAX_RECOVERY_ENTRIES);
-      }
-    }
-
     await reload();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

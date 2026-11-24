@@ -1,5 +1,3 @@
-/** WPS Spreadsheets host implementation. */
-
 import {
   getWpsActiveWorkbook,
   getWpsEtApplication,
@@ -25,6 +23,7 @@ export const WPS_UNSUPPORTED_PHASE_1_MESSAGE =
 export class WpsHost implements SpreadsheetHost {
   readonly kind = "wps";
   readonly displayName = "WPS Spreadsheets";
+  readonly servesOneDocument = false;
   readonly sessionStorage: SpreadsheetHostSessionStorage = settingsBackedSessionStorage;
   readonly documentInstance = null;
 
@@ -70,8 +69,6 @@ export class WpsHost implements SpreadsheetHost {
   }
 
   resolveThemeDark(): boolean | null {
-    // TODO(NEXSELL-370): map WPS theme APIs if available. Unknown keeps the
-    // existing media-query fallback in the taskpane UI.
     return null;
   }
 }

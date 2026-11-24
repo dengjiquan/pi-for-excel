@@ -1,6 +1,7 @@
 import {
   createModels,
   createProvider,
+  isModelType,
   lazyApi,
   type Api,
   type ApiKeyAuth,
@@ -13,24 +14,29 @@ import {
   type Provider,
   type ProviderStreams,
 } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import {
+  builtinProviders,
+  getBuiltinModelDataGeneratedAt,
+} from "@earendil-works/pi-ai/providers/all";
+
+import { createConcurrencyLimit, type ConcurrencyLimit } from "../utils/concurrency.js";
 
 import { originalFetch } from "../auth/cors-proxy.js";
 import { isOpenAiGatewayProvider } from "../auth/custom-gateways.js";
 import { normalizeProxyUrl } from "../auth/proxy-validation.js";
 import type { CustomProvider } from "../storage/local/custom-providers-store.js";
+import { MAX_MODEL_ID_LENGTH } from "../storage/local/model-catalogs-store.js";
+import { withRemoteCatalog } from "./remote-model-catalog.js";
 import {
   ProviderCredentialsStore,
   type ProviderKeysStoreLike,
 } from "../storage/local/provider-credentials-store.js";
 
 const DEFAULT_DISCOVERED_CONTEXT_WINDOW = 32_768;
-// ponytail: fixed default; add per-model override in provider settings if lower is needed
 const DEFAULT_DISCOVERED_MAX_TOKENS = 65_536;
 const MODEL_DISCOVERY_TIMEOUT_MS = 8_000;
 const MAX_MODEL_DISCOVERY_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_DISCOVERED_MODELS = 2_000;
-const MAX_DISCOVERED_MODEL_ID_LENGTH = 256;
 
 const openAiCompletionsStreams: ProviderStreams = lazyApi(
   () => import("@earendil-works/pi-ai/api/openai-completions"),
@@ -43,7 +49,9 @@ const anthropicMessagesStreams: ProviderStreams = lazyApi(
 );
 
 export type BrowserProviderApi =
-  "openai-completions" | "openai-responses" | "anthropic-messages";
+  | "openai-completions"
+  | "openai-responses"
+  | "anthropic-messages";
 
 export interface BrowserProviderModelDefinition {
   id: string;
@@ -55,7 +63,6 @@ export interface BrowserProviderModelDefinition {
   inputLimits?: Model<Api>["inputLimits"];
   contextWindow?: number;
   maxTokens?: number;
-  /** Static per-model headers merged into every API request (pi-ai Model.headers). */
   headers?: Record<string, string>;
 }
 
@@ -65,20 +72,20 @@ export interface BrowserProviderRegistration {
   api: BrowserProviderApi;
   baseUrl: string;
   models: readonly BrowserProviderModelDefinition[];
-  /** Omit to derive the discovery URL; null keeps only the supplied models. */
   modelsUrl?: string | null;
   resolveApiKey: () => Promise<string | undefined>;
-  /** Keyless local providers can opt in while still satisfying Pi AI auth semantics. */
   allowKeyless?: boolean;
-  /** Extra static headers merged into every API request (e.g. x-opencode-session). */
   headers?: Record<string, string>;
 }
+
+export type ProviderRoute = "proxy" | "direct";
 
 export interface CreateBrowserModelRuntimeOptions {
   providerKeys: ProviderKeysStoreLike;
   modelCatalogs: ModelsStore;
   getProxyUrl: () => Promise<string | undefined>;
   fetchFn?: typeof globalThis.fetch;
+  modelCatalogUrl?: (providerId: string) => string;
 }
 
 interface DynamicProviderCatalogSpec {
@@ -117,6 +124,8 @@ function streamsForApi(api: BrowserProviderApi): ProviderStreams {
   return anthropicMessagesStreams;
 }
 
+const KEYLESS_PROVIDER_API_KEY = "pi-for-excel-keyless";
+
 function createStoredApiKeyAuth(args: {
   name: string;
   resolveApiKey: () => Promise<string | undefined>;
@@ -129,7 +138,7 @@ function createStoredApiKeyAuth(args: {
       if (!key && !args.allowKeyless) return undefined;
 
       return {
-        auth: key ? { apiKey: key } : {},
+        auth: { apiKey: key || KEYLESS_PROVIDER_API_KEY },
         source: key ? "Browser credential store" : "Keyless provider",
       };
     },
@@ -159,10 +168,8 @@ function createBrowserAdapterProvider(provider: Provider): Provider {
     },
     models: provider.getModels(),
     api: {
-      stream: (model, context, options) =>
-        provider.stream(model, context, options),
-      streamSimple: (model, context, options) =>
-        provider.streamSimple(model, context, options),
+      stream: (model, context, options) => provider.stream(model, context, options),
+      streamSimple: (model, context, options) => provider.streamSimple(model, context, options),
     },
   });
 }
@@ -174,16 +181,11 @@ function createModel(args: {
   definition: BrowserProviderModelDefinition;
 }): Model<Api> {
   const id = normalizeNonEmpty(args.definition.id, "Model id");
-  const contextWindow =
-    args.definition.contextWindow ?? DEFAULT_DISCOVERED_CONTEXT_WINDOW;
-  const maxTokens =
-    args.definition.maxTokens ??
-    Math.min(DEFAULT_DISCOVERED_MAX_TOKENS, contextWindow);
+  const contextWindow = args.definition.contextWindow ?? DEFAULT_DISCOVERED_CONTEXT_WINDOW;
+  const maxTokens = args.definition.maxTokens ?? Math.min(DEFAULT_DISCOVERED_MAX_TOKENS, contextWindow);
 
   if (!Number.isInteger(contextWindow) || contextWindow < 1_024) {
-    throw new Error(
-      `Model ${id} contextWindow must be an integer of at least 1024.`,
-    );
+    throw new Error(`Model ${id} contextWindow must be an integer of at least 1024.`);
   }
   if (!Number.isInteger(maxTokens) || maxTokens < 1) {
     throw new Error(`Model ${id} maxTokens must be a positive integer.`);
@@ -196,9 +198,7 @@ function createModel(args: {
     provider: args.providerId,
     baseUrl: args.baseUrl,
     reasoning: args.definition.reasoning ?? false,
-    ...(args.definition.thinkingLevelMap !== undefined
-      ? { thinkingLevelMap: args.definition.thinkingLevelMap }
-      : {}),
+    ...(args.definition.thinkingLevelMap !== undefined ? { thinkingLevelMap: args.definition.thinkingLevelMap } : {}),
     input: args.definition.input ? [...args.definition.input] : ["text"],
     ...(args.definition.inputLimits !== undefined
       ? { inputLimits: args.definition.inputLimits }
@@ -211,16 +211,11 @@ function createModel(args: {
     },
     contextWindow,
     maxTokens,
-    ...(args.definition.headers !== undefined
-      ? { headers: args.definition.headers }
-      : {}),
+    ...(args.definition.headers !== undefined ? { headers: args.definition.headers } : {}),
   };
 }
 
-function deriveModelsUrl(
-  baseUrl: string,
-  api: BrowserProviderApi,
-): string | undefined {
+function deriveModelsUrl(baseUrl: string, api: BrowserProviderApi): string | undefined {
   if (api !== "openai-completions" && api !== "openai-responses") {
     return undefined;
   }
@@ -234,25 +229,23 @@ function sanitizeCatalogEntry(
 ): ModelsStoreEntry {
   const models: Model<Api>[] = [];
   for (const model of entry.models) {
+    if (!isModelType(model, "chat")) continue;
     try {
-      models.push(
-        createModel({
-          providerId,
-          api: spec.api,
-          baseUrl: spec.baseUrl,
-          definition: {
-            id: model.id,
-            name: model.name,
-            reasoning: model.reasoning,
-            input: model.input,
-            inputLimits: model.inputLimits,
-            contextWindow: model.contextWindow,
-            maxTokens: model.maxTokens,
-          },
-        }),
-      );
+      models.push(createModel({
+        providerId,
+        api: spec.api,
+        baseUrl: spec.baseUrl,
+        definition: {
+          id: model.id,
+          name: model.name,
+          reasoning: model.reasoning,
+          input: model.input,
+          inputLimits: model.inputLimits,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+        },
+      }));
     } catch {
-      // Ignore malformed/stale entries rather than restoring unsafe metadata.
     }
   }
 
@@ -262,10 +255,10 @@ function sanitizeCatalogEntry(
   };
 }
 
-/** Rebind cached discovery results to the currently registered transport. */
 class BrowserModelCatalogsStore implements ModelsStore {
   private readonly persisted: ModelsStore;
   private readonly specs = new Map<string, DynamicProviderCatalogSpec>();
+  private readonly operations = new Map<string, ConcurrencyLimit>();
 
   constructor(persisted: ModelsStore) {
     this.persisted = persisted;
@@ -279,24 +272,31 @@ class BrowserModelCatalogsStore implements ModelsStore {
     this.specs.delete(providerId);
   }
 
-  async read(providerId: string): Promise<ModelsStoreEntry | undefined> {
-    const entry = await this.persisted.read(providerId);
-    const spec = this.specs.get(providerId);
-    return entry && spec
-      ? sanitizeCatalogEntry(providerId, spec, entry)
-      : entry;
+  private operation(providerId: string): ConcurrencyLimit {
+    let operation = this.operations.get(providerId);
+    if (!operation) {
+      operation = createConcurrencyLimit(1);
+      this.operations.set(providerId, operation);
+    }
+    return operation;
+  }
+
+  read(providerId: string): Promise<ModelsStoreEntry | undefined> {
+    return this.operation(providerId)(async () => {
+      const entry = await this.persisted.read(providerId);
+      const spec = this.specs.get(providerId);
+      return entry && spec ? sanitizeCatalogEntry(providerId, spec, entry) : entry;
+    });
   }
 
   write(providerId: string, entry: ModelsStoreEntry): Promise<void> {
     const spec = this.specs.get(providerId);
-    return this.persisted.write(
-      providerId,
-      spec ? sanitizeCatalogEntry(providerId, spec, entry) : entry,
-    );
+    const sanitized = spec ? sanitizeCatalogEntry(providerId, spec, entry) : entry;
+    return this.operation(providerId)(() => this.persisted.write(providerId, sanitized));
   }
 
   delete(providerId: string): Promise<void> {
-    return this.persisted.delete(providerId);
+    return this.operation(providerId)(() => this.persisted.delete(providerId));
   }
 }
 
@@ -309,9 +309,7 @@ function parseModelIds(value: unknown): string[] {
     throw new Error("Model discovery response must contain a data array.");
   }
   if (value.data.length > MAX_DISCOVERED_MODELS) {
-    throw new Error(
-      `Model discovery returned more than ${MAX_DISCOVERED_MODELS} entries.`,
-    );
+    throw new Error(`Model discovery returned more than ${MAX_DISCOVERED_MODELS} entries.`);
   }
 
   const ids: string[] = [];
@@ -319,27 +317,26 @@ function parseModelIds(value: unknown): string[] {
     if (!isModelsResponse(entry) || typeof entry.id !== "string") continue;
     const id = entry.id.trim();
     if (id.length === 0) continue;
-    if (id.length > MAX_DISCOVERED_MODEL_ID_LENGTH) {
+    if (id.length > MAX_MODEL_ID_LENGTH) {
       throw new Error(
-        `Discovered model id exceeds ${MAX_DISCOVERED_MODEL_ID_LENGTH} characters.`,
+        `Discovered model id exceeds ${MAX_MODEL_ID_LENGTH} characters.`,
       );
     }
     ids.push(id);
   }
 
-  return Array.from(new Set(ids)).sort((left, right) =>
-    left.localeCompare(right),
-  );
+  return Array.from(new Set(ids)).sort((left, right) => left.localeCompare(right));
 }
 
 async function readLimitedDiscoveryJson(response: Response): Promise<unknown> {
   const declaredLengthRaw = response.headers.get("content-length");
-  const declaredLength =
-    declaredLengthRaw === null ? null : Number.parseInt(declaredLengthRaw, 10);
+  const declaredLength = declaredLengthRaw === null
+    ? null
+    : Number.parseInt(declaredLengthRaw, 10);
   if (
-    declaredLength !== null &&
-    Number.isFinite(declaredLength) &&
-    declaredLength > MAX_MODEL_DISCOVERY_RESPONSE_BYTES
+    declaredLength !== null
+    && Number.isFinite(declaredLength)
+    && declaredLength > MAX_MODEL_DISCOVERY_RESPONSE_BYTES
   ) {
     throw new Error(
       `Model discovery response exceeds ${MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes.`,
@@ -348,10 +345,7 @@ async function readLimitedDiscoveryJson(response: Response): Promise<unknown> {
 
   if (!response.body) {
     const text = await response.text();
-    if (
-      new TextEncoder().encode(text).byteLength >
-      MAX_MODEL_DISCOVERY_RESPONSE_BYTES
-    ) {
+    if (new TextEncoder().encode(text).byteLength > MAX_MODEL_DISCOVERY_RESPONSE_BYTES) {
       throw new Error(
         `Model discovery response exceeds ${MAX_MODEL_DISCOVERY_RESPONSE_BYTES} bytes.`,
       );
@@ -408,18 +402,12 @@ async function fetchWithDiscoveryTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const handleAbort = (): void => controller.abort();
-  const signals: readonly (AbortSignal | undefined)[] = [
-    signal,
-    lifecycleSignal,
-  ];
+  const signals: readonly (AbortSignal | undefined)[] = [signal, lifecycleSignal];
   for (const sourceSignal of signals) {
     if (sourceSignal?.aborted) controller.abort();
     sourceSignal?.addEventListener("abort", handleAbort, { once: true });
   }
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    MODEL_DISCOVERY_TIMEOUT_MS,
-  );
+  const timeoutId = setTimeout(() => controller.abort(), MODEL_DISCOVERY_TIMEOUT_MS);
 
   try {
     return await fetchFn(requestUrl, {
@@ -443,30 +431,24 @@ function createRegisteredProvider(
   const id = normalizeNonEmpty(registration.id, "Provider id");
   const name = normalizeNonEmpty(registration.name, "Provider name");
   const baseUrl = normalizeHttpUrl(registration.baseUrl, "Provider baseUrl");
-  const baselineModels = registration.models.map((definition) =>
-    createModel({
-      providerId: id,
-      api: registration.api,
-      baseUrl,
-      definition,
-    }),
-  );
-  const modelsUrlRaw =
-    registration.modelsUrl === undefined
-      ? deriveModelsUrl(baseUrl, registration.api)
-      : registration.modelsUrl;
-  const modelsUrl =
-    modelsUrlRaw != null
-      ? normalizeHttpUrl(modelsUrlRaw, "Provider modelsUrl")
-      : undefined;
+  const baselineModels = registration.models.map((definition) => createModel({
+    providerId: id,
+    api: registration.api,
+    baseUrl,
+    definition,
+  }));
+  const modelsUrlRaw = registration.modelsUrl === undefined
+    ? deriveModelsUrl(baseUrl, registration.api)
+    : registration.modelsUrl;
+  const modelsUrl = modelsUrlRaw != null
+    ? normalizeHttpUrl(modelsUrlRaw, "Provider modelsUrl")
+    : undefined;
 
   return createProvider({
     id,
     name,
     baseUrl,
-    ...(registration.headers !== undefined
-      ? { headers: registration.headers }
-      : {}),
+    ...(registration.headers !== undefined ? { headers: registration.headers } : {}),
     auth: {
       apiKey: createStoredApiKeyAuth({
         name: `${name} credential`,
@@ -477,88 +459,61 @@ function createRegisteredProvider(
     models: baselineModels,
     ...(modelsUrl !== undefined
       ? {
-          fetchModels: async ({ credential, signal }) => {
-            const requestUrl = await resolveDiscoveryRequestUrl(
-              modelsUrl,
-              getProxyUrl,
-            );
-            const headers: Record<string, string> = {
-              Accept: "application/json",
-            };
-            if (credential?.type === "api_key" && credential.key) {
-              headers.Authorization = `Bearer ${credential.key}`;
-            }
+        fetchModels: async ({ credential, signal }) => {
+          const requestUrl = await resolveDiscoveryRequestUrl(modelsUrl, getProxyUrl);
+          const headers: Record<string, string> = { Accept: "application/json" };
+          if (credential?.type === "api_key" && credential.key) {
+            headers.Authorization = `Bearer ${credential.key}`;
+          }
 
-            const response = await fetchWithDiscoveryTimeout(
-              fetchFn,
-              requestUrl,
-              headers,
-              signal,
-              lifecycleSignal,
-            );
-            if (!response.ok) {
-              throw new Error(
-                `Model discovery failed with HTTP ${response.status}.`,
-              );
-            }
+          const response = await fetchWithDiscoveryTimeout(
+            fetchFn,
+            requestUrl,
+            headers,
+            signal,
+            lifecycleSignal,
+          );
+          if (!response.ok) {
+            throw new Error(`Model discovery failed with HTTP ${response.status}.`);
+          }
 
-            const ids = parseModelIds(await readLimitedDiscoveryJson(response));
-            const template = registration.models[0];
-            return ids.map((modelId) =>
-              createModel({
-                providerId: id,
-                api: registration.api,
-                baseUrl,
-                definition: {
-                  id: modelId,
-                  ...(template?.reasoning !== undefined
-                    ? { reasoning: template.reasoning }
-                    : {}),
-                  ...(template?.input !== undefined
-                    ? { input: template.input }
-                    : {}),
-                  ...(template?.inputLimits !== undefined
-                    ? { inputLimits: template.inputLimits }
-                    : {}),
-                  ...(template?.contextWindow !== undefined
-                    ? { contextWindow: template.contextWindow }
-                    : {}),
-                  ...(template?.maxTokens !== undefined
-                    ? { maxTokens: template.maxTokens }
-                    : {}),
-                },
-              }),
-            );
-          },
-        }
+          const ids = parseModelIds(await readLimitedDiscoveryJson(response));
+          const template = registration.models[0];
+          return ids.map((modelId) => createModel({
+            providerId: id,
+            api: registration.api,
+            baseUrl,
+            definition: {
+              id: modelId,
+              ...(template?.reasoning !== undefined ? { reasoning: template.reasoning } : {}),
+              ...(template?.input !== undefined ? { input: template.input } : {}),
+              ...(template?.inputLimits !== undefined ? { inputLimits: template.inputLimits } : {}),
+              ...(template?.contextWindow !== undefined ? { contextWindow: template.contextWindow } : {}),
+              ...(template?.maxTokens !== undefined ? { maxTokens: template.maxTokens } : {}),
+            },
+          }));
+        },
+      }
       : {}),
     api: streamsForApi(registration.api),
   });
 }
 
-function customProviderRegistrations(
-  provider: CustomProvider,
-): BrowserProviderRegistration[] {
+function customProviderRegistrations(provider: CustomProvider): BrowserProviderRegistration[] {
   const storedModels = provider.models ?? [];
   const modelsByProvider = new Map<string, BrowserProviderModelDefinition[]>();
 
   for (const model of storedModels) {
     const definitions = modelsByProvider.get(model.provider) ?? [];
-    // Fall back to provider-level headers: gateways saved before per-model
-    // headers existed store them on the provider only.
     const headers = model.headers ?? provider.headers;
     definitions.push({
       id: model.id,
       name: model.name,
       reasoning: model.reasoning,
-      ...(model.thinkingLevelMap !== undefined
-        ? { thinkingLevelMap: model.thinkingLevelMap }
-        : {}),
+      ...(model.thinkingLevelMap !== undefined ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
       cost: model.cost,
       input: model.input,
-      ...(model.inputLimits !== undefined
-        ? { inputLimits: model.inputLimits }
-        : {}),
+      ...(model.inputLimits !== undefined ? { inputLimits: model.inputLimits } : {}),
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
       ...(headers !== undefined ? { headers } : {}),
@@ -568,9 +523,9 @@ function customProviderRegistrations(
 
   if (modelsByProvider.size === 0) return [];
   if (
-    provider.type !== "openai-completions" &&
-    provider.type !== "openai-responses" &&
-    provider.type !== "anthropic-messages"
+    provider.type !== "openai-completions"
+    && provider.type !== "openai-responses"
+    && provider.type !== "anthropic-messages"
   ) {
     return [];
   }
@@ -589,7 +544,6 @@ function customProviderRegistrations(
   }));
 }
 
-/** Browser-native Pi AI provider runtime with IndexedDB credentials/catalogues. */
 export class BrowserModelRuntime {
   readonly models: MutableModels;
 
@@ -598,11 +552,10 @@ export class BrowserModelRuntime {
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly builtinProviderIds = new Set<string>();
   private readonly customProviderIds = new Set<string>();
+  private readonly directCustomProviderIds = new Set<string>();
   private readonly extensionProviderOwners = new Map<string, string>();
-  private readonly dynamicProviderAbortControllers = new Map<
-    string,
-    AbortController
-  >();
+  private readonly dynamicProviderAbortControllers = new Map<string, AbortController>();
+  private dynamicProviderRevision = 0;
 
   constructor(options: CreateBrowserModelRuntimeOptions) {
     this.modelCatalogs = new BrowserModelCatalogsStore(options.modelCatalogs);
@@ -617,18 +570,31 @@ export class BrowserModelRuntime {
       },
     });
 
+    const catalogUrl = options.modelCatalogUrl;
     for (const provider of builtinProviders()) {
-      const browserProvider = provider.auth.apiKey
+      const adapted = provider.auth.apiKey
         ? provider
         : createBrowserAdapterProvider(provider);
+      const browserProvider = catalogUrl && !adapted.refreshModels
+        ? withRemoteCatalog(adapted, {
+          catalogUrl,
+          fetchFn: this.fetchFn,
+          bundledGeneratedAt: getBuiltinModelDataGeneratedAt(),
+        })
+        : adapted;
       this.models.setProvider(browserProvider);
       this.builtinProviderIds.add(browserProvider.id);
     }
   }
 
-  private createDynamicProvider(
-    registration: BrowserProviderRegistration,
-  ): Provider {
+  get providerRevision(): number {
+    return this.dynamicProviderRevision;
+  }
+
+  private createDynamicProvider(registration: BrowserProviderRegistration): {
+    provider: Provider;
+    controller: AbortController;
+  } {
     const controller = new AbortController();
     const provider = createRegisteredProvider(
       registration,
@@ -637,88 +603,77 @@ export class BrowserModelRuntime {
       controller.signal,
     );
 
+    return { provider, controller };
+  }
+
+  private setDynamicProvider(
+    registration: BrowserProviderRegistration,
+    { provider, controller }: { provider: Provider; controller: AbortController },
+  ): void {
     this.dynamicProviderAbortControllers.get(provider.id)?.abort();
     this.dynamicProviderAbortControllers.set(provider.id, controller);
-    return provider;
+    this.dynamicProviderRevision += 1;
+    this.modelCatalogs.configure(provider.id, {
+      api: registration.api,
+      baseUrl: provider.baseUrl ?? normalizeHttpUrl(registration.baseUrl, "Provider baseUrl"),
+    });
+    this.models.setProvider(provider);
   }
 
   private stopDynamicProvider(providerId: string): void {
     this.dynamicProviderAbortControllers.get(providerId)?.abort();
     this.dynamicProviderAbortControllers.delete(providerId);
+    this.dynamicProviderRevision += 1;
   }
 
-  async syncCustomProviders(
-    customProviders: readonly CustomProvider[],
-  ): Promise<void> {
-    const nextIds = new Set<string>();
-
-    for (const customProvider of customProviders) {
-      for (const registration of customProviderRegistrations(customProvider)) {
-        if (this.builtinProviderIds.has(registration.id)) {
-          throw new Error(
-            `Custom provider id conflicts with built-in provider: ${registration.id}`,
-          );
+  async syncCustomProviders(customProviders: readonly CustomProvider[]): Promise<void> {
+    const prepared = customProviders.flatMap((customProvider) =>
+      customProviderRegistrations(customProvider).map((registration) => {
+        const dynamicProvider = this.createDynamicProvider(registration);
+        const { id } = dynamicProvider.provider;
+        if (this.builtinProviderIds.has(id)) {
+          throw new Error(`Custom provider id conflicts with built-in provider: ${id}`);
         }
-        if (this.extensionProviderOwners.has(registration.id)) {
-          throw new Error(
-            `Custom provider id conflicts with extension provider: ${registration.id}`,
-          );
+        if (this.extensionProviderOwners.has(id)) {
+          throw new Error(`Custom provider id conflicts with extension provider: ${id}`);
         }
+        return { registration, ...dynamicProvider, direct: customProvider.connectDirectly === true };
+      }),
+    );
+    const nextIds = new Set(prepared.map(({ provider }) => provider.id));
 
-        const provider = this.createDynamicProvider(registration);
-        this.modelCatalogs.configure(provider.id, {
-          api: registration.api,
-          baseUrl:
-            provider.baseUrl ??
-            normalizeHttpUrl(registration.baseUrl, "Provider baseUrl"),
-        });
-        this.models.setProvider(provider);
-        nextIds.add(registration.id);
-      }
+    for (const { registration, provider, controller, direct } of prepared) {
+      this.setDynamicProvider(registration, { provider, controller });
+      this.customProviderIds.add(provider.id);
+      if (direct) this.directCustomProviderIds.add(provider.id);
+      else this.directCustomProviderIds.delete(provider.id);
     }
 
+    const deletions: Promise<void>[] = [];
     for (const previousId of this.customProviderIds) {
       if (nextIds.has(previousId)) continue;
       this.stopDynamicProvider(previousId);
       this.models.deleteProvider(previousId);
-      try {
-        await this.modelCatalogs.delete(previousId);
-      } finally {
-        this.modelCatalogs.unconfigure(previousId);
-      }
+      this.customProviderIds.delete(previousId);
+      this.directCustomProviderIds.delete(previousId);
+      this.modelCatalogs.unconfigure(previousId);
+      deletions.push(this.modelCatalogs.delete(previousId));
     }
-
-    this.customProviderIds.clear();
-    for (const providerId of nextIds) this.customProviderIds.add(providerId);
+    await Promise.all(deletions);
   }
 
-  registerExtensionProvider(
-    ownerId: string,
-    registration: BrowserProviderRegistration,
-  ): void {
+  registerExtensionProvider(ownerId: string, registration: BrowserProviderRegistration): void {
     const providerId = normalizeNonEmpty(registration.id, "Provider id");
-    if (
-      this.builtinProviderIds.has(providerId) ||
-      this.customProviderIds.has(providerId)
-    ) {
+    if (this.builtinProviderIds.has(providerId) || this.customProviderIds.has(providerId)) {
       throw new Error(`Provider id is reserved: ${providerId}`);
     }
 
     const existingOwner = this.extensionProviderOwners.get(providerId);
     if (existingOwner && existingOwner !== ownerId) {
-      throw new Error(
-        `Provider id is already registered by another extension: ${providerId}`,
-      );
+      throw new Error(`Provider id is already registered by another extension: ${providerId}`);
     }
 
-    const provider = this.createDynamicProvider(registration);
-    this.modelCatalogs.configure(provider.id, {
-      api: registration.api,
-      baseUrl:
-        provider.baseUrl ??
-        normalizeHttpUrl(registration.baseUrl, "Provider baseUrl"),
-    });
-    this.models.setProvider(provider);
+    this.setDynamicProvider(registration, this.createDynamicProvider(registration));
     this.extensionProviderOwners.set(providerId, ownerId);
   }
 
@@ -726,17 +681,15 @@ export class BrowserModelRuntime {
     return this.extensionProviderOwners.has(providerId);
   }
 
-  shouldProxyProvider(providerId: string): boolean {
-    return (
-      this.customProviderIds.has(providerId) ||
-      this.extensionProviderOwners.has(providerId)
-    );
+  providerRoute(providerId: string): ProviderRoute | undefined {
+    if (this.directCustomProviderIds.has(providerId)) return "direct";
+    if (this.customProviderIds.has(providerId) || this.extensionProviderOwners.has(providerId)) {
+      return "proxy";
+    }
+    return undefined;
   }
 
-  async unregisterExtensionProvider(
-    ownerId: string,
-    providerId: string,
-  ): Promise<void> {
+  async unregisterExtensionProvider(ownerId: string, providerId: string): Promise<void> {
     if (this.extensionProviderOwners.get(providerId) !== ownerId) {
       throw new Error(`Provider is not owned by this extension: ${providerId}`);
     }
@@ -744,11 +697,8 @@ export class BrowserModelRuntime {
     this.extensionProviderOwners.delete(providerId);
     this.stopDynamicProvider(providerId);
     this.models.deleteProvider(providerId);
-    try {
-      await this.modelCatalogs.delete(providerId);
-    } finally {
-      this.modelCatalogs.unconfigure(providerId);
-    }
+    this.modelCatalogs.unconfigure(providerId);
+    await this.modelCatalogs.delete(providerId);
   }
 
   async unregisterExtensionProviders(ownerId: string): Promise<void> {
@@ -756,9 +706,7 @@ export class BrowserModelRuntime {
       .filter(([, owner]) => owner === ownerId)
       .map(([providerId]) => providerId);
 
-    for (const providerId of ownedIds) {
-      await this.unregisterExtensionProvider(ownerId, providerId);
-    }
+    await Promise.all(ownedIds.map((providerId) => this.unregisterExtensionProvider(ownerId, providerId)));
   }
 
   refresh(options?: ModelsRefreshOptions): Promise<ModelsRefreshResult> {

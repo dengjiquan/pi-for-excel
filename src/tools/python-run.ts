@@ -1,14 +1,8 @@
+import { defaultGetApprovedPythonBridgeUrl } from "./experimental-tool-gates/evaluation.js";
+
 function isToolsPythonRunPayloadShape(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-/**
- * python_run — Execute Python via native bridge (preferred) or Pyodide fallback.
- *
- * This tool stays registered for a stable tool list/prompt cache.
- * If no native bridge is reachable (configured override or default localhost URL),
- * it can run in-browser via Pyodide.
- */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { SettingsStore } from "../storage/local/settings-store.js";
@@ -26,6 +20,7 @@ import {
   DEFAULT_PYTHON_BRIDGE_URL,
   PYTHON_BRIDGE_URL_SETTING_KEY,
 } from "./experimental-tool-gates.js";
+import { isStop, ToolStoppedError } from "./tool-stopped.js";
 
 const PYTHON_BRIDGE_API_PATH = "/v1/python-run";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 20_000;
@@ -33,6 +28,20 @@ const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 120_000;
 
 export const PYTHON_BRIDGE_TOKEN_SETTING_KEY = "python.bridge.token";
+export const PYODIDE_BACKEND_LABEL = "Pyodide (in-browser)";
+
+export const PYTHON_BRIDGE_LIMITS = {
+  requestBodyBytes: 512 * 1024,
+  inputJsonChars: 200_000,
+  outputBytes: 256 * 1024,
+} as const;
+
+export class PythonBridgeUnreachableError extends Error {
+  constructor(url: string, cause: unknown) {
+    super(`Python bridge unreachable at ${url}: ${getErrorMessage(cause)}`);
+    this.name = "PythonBridgeUnreachableError";
+  }
+}
 
 const schema = Type.Object({
   code: Type.String({
@@ -58,7 +67,7 @@ type Params = Static<typeof schema>;
 export interface PythonBridgeConfig {
   url: string;
   token?: string;
-  source?: "configured" | "default";
+  configured: boolean;
 }
 
 export interface PythonBridgeRequest {
@@ -95,15 +104,14 @@ export interface PythonRunToolDetails {
 }
 
 export interface PythonRunToolDependencies {
+  getApprovedBridgeUrl?: () => Promise<string | undefined>;
   getBridgeConfig?: () => Promise<PythonBridgeConfig | null>;
   callBridge?: (
     request: PythonBridgeRequest,
     config: PythonBridgeConfig,
     signal: AbortSignal | undefined,
   ) => Promise<PythonBridgeResponse>;
-  /** Override Pyodide availability check (for testing). */
   isPyodideAvailable?: () => boolean;
-  /** Override Pyodide runtime call (for testing). */
   callPyodide?: (
     request: PythonBridgeRequest,
     signal: AbortSignal | undefined,
@@ -213,25 +221,26 @@ async function getSettingsStore(): Promise<SettingsStore> {
 
 export async function getDefaultPythonBridgeConfig(): Promise<PythonBridgeConfig | null> {
   let rawUrl = DEFAULT_PYTHON_BRIDGE_URL;
-  let source: "configured" | "default" = "default";
+  let configured = false;
   let token: string | undefined;
 
   try {
     const settings = await getSettingsStore();
 
-    const urlValue = await settings.get(PYTHON_BRIDGE_URL_SETTING_KEY);
+    const [urlValue, tokenValue] = await Promise.all([
+      settings.get(PYTHON_BRIDGE_URL_SETTING_KEY),
+      settings.get(PYTHON_BRIDGE_TOKEN_SETTING_KEY).catch(() => null),
+    ]);
     const configuredUrl = typeof urlValue === "string" ? urlValue.trim() : "";
     if (configuredUrl.length > 0) {
       rawUrl = configuredUrl;
-      source = "configured";
+      configured = true;
     }
 
-    const tokenValue = await settings.get(PYTHON_BRIDGE_TOKEN_SETTING_KEY);
     token = typeof tokenValue === "string" && tokenValue.trim().length > 0
       ? tokenValue.trim()
       : undefined;
   } catch {
-    // Fall back to default localhost URL when settings are unavailable.
   }
 
   try {
@@ -239,7 +248,7 @@ export async function getDefaultPythonBridgeConfig(): Promise<PythonBridgeConfig
     return {
       url: normalizedUrl,
       ...(token !== undefined ? { token } : {}),
-      source,
+      configured,
     };
   } catch {
     return null;
@@ -286,17 +295,28 @@ export async function callDefaultPythonBridge(
   }
 
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new PythonBridgeUnreachableError(config.url, error);
+    }
 
     const rawBody = await response.text();
     const parsedBody = tryParseBridgeJson(rawBody);
 
     if (!response.ok) {
+      const failed = parsedBody === null ? null : parseBridgeResponse(parsedBody);
+      if (failed && (failed.stderr !== undefined || failed.stdout !== undefined)) {
+        throw new Error(formatPythonFailure(failed, `local Python (bridge at ${config.url})`));
+      }
+
       const payloadError = extractBridgeErrorMessage(parsedBody);
       const textError = rawBody.trim().length > 0 ? rawBody.trim() : null;
       const reason = payloadError ?? textError ?? `HTTP ${response.status}`;
@@ -321,7 +341,7 @@ export async function callDefaultPythonBridge(
   } catch (error) {
     if (isAbortError(error)) {
       if (signal?.aborted) {
-        throw new Error("Aborted");
+        throw new ToolStoppedError();
       }
       throw new Error(`Python bridge request timed out after ${timeoutMs}ms.`);
     }
@@ -416,23 +436,25 @@ export function shouldFallbackToPyodideAfterBridgeError(
   error: unknown,
   bridgeConfig: PythonBridgeConfig,
 ): boolean {
-  if (bridgeConfig.source !== "default") {
-    return false;
+  return !bridgeConfig.configured && error instanceof PythonBridgeUnreachableError;
+}
+
+export function formatPythonFailure(response: PythonBridgeResponse, backend: string): string {
+  const stderr = response.stderr?.trim() ?? "";
+  const error = response.error?.trim() ?? "";
+  const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  const tracebackException = [...lines].reverse().find((line) => /^[A-Za-z_][\w.]*(Error|Exception|Interrupt|Exit)\b/u.test(line));
+  const exception = error.length > 0 && error !== stderr ? error : tracebackException ?? lines.at(-1) ?? "";
+  const exitCode = response.exit_code !== undefined ? ` (exit code ${response.exit_code})` : "";
+  const sections = [`Python failed in ${backend}${exitCode}${exception.length > 0 ? `: ${exception}` : "."}`];
+
+  if (stderr.length > 0) sections.push(`Stderr:\n\n${renderCodeBlock(stderr)}`);
+  if (response.stdout && response.stdout.trim().length > 0) {
+    sections.push(`Stdout:\n\n${renderCodeBlock(response.stdout)}`);
   }
+  if (exception.length === 0 && stderr.length === 0) sections.push("No error message or stderr was produced.");
 
-  const message = getErrorMessage(error).toLowerCase();
-
-  return (
-    message.includes("timed out")
-    || message.includes("failed to fetch")
-    || message.includes("fetch failed")
-    || message.includes("networkerror")
-    || message.includes("network request failed")
-    || message.includes("ecconnrefused")
-    || message.includes("econnrefused")
-    || message.includes("econnreset")
-    || message.includes("enotfound")
-  );
+  return sections.join("\n\n");
 }
 
 async function getDefaultPyodideAvailable(): Promise<boolean> {
@@ -456,6 +478,7 @@ export function createPythonRunTool(
   dependencies: PythonRunToolDependencies = {},
 ): AgentTool<TSchema, PythonRunToolDetails> {
   const getBridgeConfig = dependencies.getBridgeConfig ?? getDefaultPythonBridgeConfig;
+  const getApprovedBridgeUrl = dependencies.getApprovedBridgeUrl ?? defaultGetApprovedPythonBridgeUrl;
   const callBridge = dependencies.callBridge ?? callDefaultPythonBridge;
   const checkPyodide = dependencies.isPyodideAvailable;
   const pyodideCall = dependencies.callPyodide;
@@ -480,10 +503,13 @@ export function createPythonRunTool(
         params = parseParams(rawParams);
         validateParams(params);
 
-        const bridgeConfig = await getBridgeConfig();
+        let bridgeConfig = await getBridgeConfig();
+        if (bridgeConfig && await getApprovedBridgeUrl() !== bridgeConfig.url) {
+          if (bridgeConfig.configured) throw new Error("Python bridge URL requires user approval before execution.");
+          bridgeConfig = null;
+        }
         const request = toBridgeRequest(params);
 
-        // Prefer native bridge when configured or available at default localhost URL.
         if (bridgeConfig) {
           try {
             const response = await callBridge(request, bridgeConfig, signal);
@@ -516,7 +542,6 @@ export function createPythonRunTool(
           }
         }
 
-        // Fall back to in-browser Pyodide
         const pyodideAvailable = checkPyodide
           ? checkPyodide()
           : await getDefaultPyodideAvailable();
@@ -541,7 +566,7 @@ export function createPythonRunTool(
         const response = await callPyodideFn(request, signal);
 
         if (!response.ok) {
-          throw new Error(response.error ?? "Pyodide execution failed.");
+          throw new Error(formatPythonFailure(response, PYODIDE_BACKEND_LABEL));
         }
 
         const stdoutPreview = buildOutputPreview(response.stdout);
@@ -561,6 +586,7 @@ export function createPythonRunTool(
           },
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         const message = getErrorMessage(error);
         const skillHint = shouldAttachPythonBridgeSkillHint(message)
           ? "python-bridge"

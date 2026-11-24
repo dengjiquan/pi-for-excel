@@ -1,13 +1,3 @@
-/**
- * Recovery state schemas.
- *
- * Each persisted recovery state is a TypeBox schema; the exported types are
- * `Static<>` of the schemas, so the code that captures a state and the codec
- * that reads it back share one shape. Cross-field invariants (grid dimensions
- * against declared counts) are refinements on the schema, so a persisted entry
- * that breaks them fails the same check as one with a wrong field type.
- */
-
 import { type Static, Type } from "typebox";
 
 import { StringEnum } from "../../tools/string-enum.js";
@@ -16,10 +6,6 @@ import {
   addressIsWithinRowBand,
   addressMatchesRangeShape,
 } from "./address.js";
-
-// ---------------------------------------------------------------------------
-// Conditional formats
-// ---------------------------------------------------------------------------
 
 export const RecoveryConditionalCellValueOperatorSchema = StringEnum([
   "Between",
@@ -75,17 +61,9 @@ export const RecoveryConditionalPresetCriterionSchema = StringEnum([
   "DuplicateValues",
 ]);
 
-export const RecoveryConditionalDataBarAxisFormatSchema = StringEnum([
-  "Automatic",
-  "None",
-  "CellMidPoint",
-]);
+export const RecoveryConditionalDataBarAxisFormatSchema = StringEnum(["Automatic", "None", "CellMidPoint"]);
 
-export const RecoveryConditionalDataBarDirectionSchema = StringEnum([
-  "Context",
-  "LeftToRight",
-  "RightToLeft",
-]);
+export const RecoveryConditionalDataBarDirectionSchema = StringEnum(["Context", "LeftToRight", "RightToLeft"]);
 
 export const RecoveryConditionalDataBarRuleTypeSchema = StringEnum([
   "Automatic",
@@ -106,17 +84,9 @@ export const RecoveryConditionalColorCriterionTypeSchema = StringEnum([
   "Percentile",
 ]);
 
-export const RecoveryConditionalIconCriterionTypeSchema = StringEnum([
-  "Number",
-  "Percent",
-  "Formula",
-  "Percentile",
-]);
+export const RecoveryConditionalIconCriterionTypeSchema = StringEnum(["Number", "Percent", "Formula", "Percentile"]);
 
-export const RecoveryConditionalIconCriterionOperatorSchema = StringEnum([
-  "GreaterThan",
-  "GreaterThanOrEqual",
-]);
+export const RecoveryConditionalIconCriterionOperatorSchema = StringEnum(["GreaterThan", "GreaterThanOrEqual"]);
 
 export const RecoveryConditionalIconSetSchema = StringEnum([
   "ThreeArrows",
@@ -193,7 +163,6 @@ export const RecoveryConditionalIconSetStateSchema = Type.Object({
   criteria: Type.Array(RecoveryConditionalIconCriterionSchema, { minItems: 1 }),
 });
 
-/** Formatting and placement shared by every rule type. */
 const conditionalFormatRuleBase = {
   stopIfTrue: Type.Optional(Type.Boolean()),
   fillColor: Type.Optional(Type.String()),
@@ -205,11 +174,7 @@ const conditionalFormatRuleBase = {
 };
 
 export const RecoveryConditionalFormatRuleSchema = Type.Union([
-  Type.Object({
-    ...conditionalFormatRuleBase,
-    type: Type.Literal("custom"),
-    formula: Type.String(),
-  }),
+  Type.Object({ ...conditionalFormatRuleBase, type: Type.Literal("custom"), formula: Type.String() }),
   Type.Object({
     ...conditionalFormatRuleBase,
     type: Type.Literal("cell_value"),
@@ -234,21 +199,13 @@ export const RecoveryConditionalFormatRuleSchema = Type.Union([
     type: Type.Literal("preset_criteria"),
     presetCriterion: RecoveryConditionalPresetCriterionSchema,
   }),
-  Type.Object({
-    ...conditionalFormatRuleBase,
-    type: Type.Literal("data_bar"),
-    dataBar: RecoveryConditionalDataBarStateSchema,
-  }),
+  Type.Object({ ...conditionalFormatRuleBase, type: Type.Literal("data_bar"), dataBar: RecoveryConditionalDataBarStateSchema }),
   Type.Object({
     ...conditionalFormatRuleBase,
     type: Type.Literal("color_scale"),
     colorScale: RecoveryConditionalColorScaleStateSchema,
   }),
-  Type.Object({
-    ...conditionalFormatRuleBase,
-    type: Type.Literal("icon_set"),
-    iconSet: RecoveryConditionalIconSetStateSchema,
-  }),
+  Type.Object({ ...conditionalFormatRuleBase, type: Type.Literal("icon_set"), iconSet: RecoveryConditionalIconSetStateSchema }),
 ]);
 
 export const RecoveryConditionalFormatRuleTypeSchema = StringEnum([
@@ -262,10 +219,6 @@ export const RecoveryConditionalFormatRuleTypeSchema = StringEnum([
   "icon_set",
 ]);
 
-// ---------------------------------------------------------------------------
-// Comments and charts
-// ---------------------------------------------------------------------------
-
 export const RecoveryCommentThreadStateSchema = Type.Object({
   exists: Type.Boolean(),
   content: Type.String(),
@@ -273,15 +226,9 @@ export const RecoveryCommentThreadStateSchema = Type.Object({
   replies: Type.Array(Type.String()),
 });
 
-export const RecoveryChartTitleStateSchema = Type.Object({
-  text: Type.String(),
-  visible: Type.Boolean(),
-});
+export const RecoveryChartTitleStateSchema = Type.Object({ text: Type.String(), visible: Type.Boolean() });
 
-export const RecoveryChartLegendStateSchema = Type.Object({
-  position: Type.String(),
-  visible: Type.Boolean(),
-});
+export const RecoveryChartLegendStateSchema = Type.Object({ position: Type.String(), visible: Type.Boolean() });
 
 export const RecoveryChartPositionStateSchema = Type.Object({
   top: Type.Number(),
@@ -294,10 +241,6 @@ export const RecoveryChartAbsentStateSchema = Type.Object({
   kind: Type.Literal("chart_absent"),
   sheetName: Type.String(),
   name: Type.String(),
-  /**
-   * Stable Office.js chart id captured at creation. Restore prefers this over
-   * the mutable name so rename/name-reuse cannot delete an unrelated chart.
-   */
   chartId: Type.Optional(Type.String()),
 });
 
@@ -313,64 +256,27 @@ export const RecoveryChartPresentStateSchema = Type.Object({
   position: RecoveryChartPositionStateSchema,
 });
 
-export const RecoveryChartStateSchema = Type.Union([
-  RecoveryChartAbsentStateSchema,
-  RecoveryChartPresentStateSchema,
-]);
+export const RecoveryChartStateSchema = Type.Union([RecoveryChartAbsentStateSchema, RecoveryChartPresentStateSchema]);
 
-// ---------------------------------------------------------------------------
-// Structure
-// ---------------------------------------------------------------------------
+export const RecoverySheetVisibilitySchema = StringEnum(["Visible", "Hidden", "VeryHidden"]);
 
-export const RecoverySheetVisibilitySchema = StringEnum([
-  "Visible",
-  "Hidden",
-  "VeryHidden",
-]);
-
-/**
- * Cell grids are checked with a row walk rather than a per-cell schema. The
- * cells are opaque host values, and the generic checker costs about 20 ms per
- * 20k cells, which the boot-time load of up to 120 snapshots cannot afford;
- * the row walk costs 0.03 ms.
- */
 function isGrid(value: unknown): value is unknown[][] {
   return Array.isArray(value) && value.every((row) => Array.isArray(row));
 }
 
 function isStringGrid(value: unknown): value is string[][] {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (row) =>
-        Array.isArray(row) && row.every((cell) => typeof cell === "string"),
-    )
-  );
+  return Array.isArray(value) &&
+    value.every((row) => Array.isArray(row) && row.every((cell) => typeof cell === "string"));
 }
 
-/** Cell grid as Office.js returns it: rows of cell values, no typing per cell. */
-export const RecoveryGridSchema = Type.Refine(
-  Type.Unsafe<unknown[][]>({}),
-  isGrid,
-  () => "cell grid must be rows",
-);
+export const RecoveryGridSchema = Type.Refine(Type.Unsafe<unknown[][]>({}), isGrid, () => "cell grid must be rows");
 
-const StringGridSchema = Type.Refine(
-  Type.Unsafe<string[][]>({}),
-  isStringGrid,
-  () => "grid must be rows of strings",
-);
+const StringGridSchema = Type.Refine(Type.Unsafe<string[][]>({}), isStringGrid, () => "grid must be rows of strings");
 
 const positiveInteger = Type.Integer({ minimum: 1 });
 
-function gridMatches(
-  grid: readonly unknown[][],
-  rowCount: number,
-  columnCount: number,
-): boolean {
-  return (
-    grid.length === rowCount && grid.every((row) => row.length === columnCount)
-  );
+function gridMatches(grid: readonly unknown[][], rowCount: number, columnCount: number): boolean {
+  return grid.length === rowCount && grid.every((row) => row.length === columnCount);
 }
 
 export const RecoveryStructureValueRangeStateSchema = Type.Refine(
@@ -389,28 +295,12 @@ export const RecoveryStructureValueRangeStateSchema = Type.Refine(
 );
 
 const sheetIdentity = { sheetId: Type.String(), sheetName: Type.String() };
-const rowOrColumnRun = {
-  ...sheetIdentity,
-  position: positiveInteger,
-  count: positiveInteger,
-};
+const rowOrColumnRun = { ...sheetIdentity, position: positiveInteger, count: positiveInteger };
 
 export const RecoveryModifyStructureStateSchema = Type.Union([
-  Type.Object({
-    kind: Type.Literal("sheet_name"),
-    sheetId: Type.String(),
-    name: Type.String(),
-  }),
-  Type.Object({
-    kind: Type.Literal("sheet_visibility"),
-    sheetId: Type.String(),
-    visibility: RecoverySheetVisibilitySchema,
-  }),
-  Type.Object({
-    kind: Type.Literal("sheet_absent"),
-    ...sheetIdentity,
-    allowDataDelete: Type.Optional(Type.Boolean()),
-  }),
+  Type.Object({ kind: Type.Literal("sheet_name"), sheetId: Type.String(), name: Type.String() }),
+  Type.Object({ kind: Type.Literal("sheet_visibility"), sheetId: Type.String(), visibility: RecoverySheetVisibilitySchema }),
+  Type.Object({ kind: Type.Literal("sheet_absent"), ...sheetIdentity, allowDataDelete: Type.Optional(Type.Boolean()) }),
   Type.Object({
     kind: Type.Literal("sheet_present"),
     ...sheetIdentity,
@@ -418,51 +308,27 @@ export const RecoveryModifyStructureStateSchema = Type.Union([
     visibility: RecoverySheetVisibilitySchema,
     dataRange: Type.Optional(RecoveryStructureValueRangeStateSchema),
   }),
-  Type.Object({
-    kind: Type.Literal("rows_absent"),
-    ...rowOrColumnRun,
-    allowDataDelete: Type.Optional(Type.Boolean()),
-  }),
+  Type.Object({ kind: Type.Literal("rows_absent"), ...rowOrColumnRun, allowDataDelete: Type.Optional(Type.Boolean()) }),
   Type.Refine(
     Type.Object({
       kind: Type.Literal("rows_present"),
       ...rowOrColumnRun,
       dataRange: Type.Optional(RecoveryStructureValueRangeStateSchema),
     }),
-    (state) =>
-      !state.dataRange ||
-      addressIsWithinRowBand(
-        state.dataRange.address,
-        state.position,
-        state.count,
-      ),
+    (state) => !state.dataRange || addressIsWithinRowBand(state.dataRange.address, state.position, state.count),
     () => "captured data range must be within the restored row run",
   ),
-  Type.Object({
-    kind: Type.Literal("columns_absent"),
-    ...rowOrColumnRun,
-    allowDataDelete: Type.Optional(Type.Boolean()),
-  }),
+  Type.Object({ kind: Type.Literal("columns_absent"), ...rowOrColumnRun, allowDataDelete: Type.Optional(Type.Boolean()) }),
   Type.Refine(
     Type.Object({
       kind: Type.Literal("columns_present"),
       ...rowOrColumnRun,
       dataRange: Type.Optional(RecoveryStructureValueRangeStateSchema),
     }),
-    (state) =>
-      !state.dataRange ||
-      addressIsWithinColumnBand(
-        state.dataRange.address,
-        state.position,
-        state.count,
-      ),
+    (state) => !state.dataRange || addressIsWithinColumnBand(state.dataRange.address, state.position, state.count),
     () => "captured data range must be within the restored column run",
   ),
 ]);
-
-// ---------------------------------------------------------------------------
-// Cell formatting
-// ---------------------------------------------------------------------------
 
 export const RecoveryFormatSelectionSchema = Type.Object({
   cellStyle: Type.Optional(Type.Boolean()),
@@ -522,15 +388,11 @@ export const RecoveryFormatAreaStateSchema = Type.Refine(
     borderInsideVertical: Type.Optional(RecoveryFormatBorderStateSchema),
   }),
   (area) =>
-    (area.cellStyles === undefined ||
-      gridMatches(area.cellStyles, area.rowCount, area.columnCount)) &&
-    (area.numberFormat === undefined ||
-      gridMatches(area.numberFormat, area.rowCount, area.columnCount)) &&
-    (area.columnWidths === undefined ||
-      area.columnWidths.length === area.columnCount) &&
+    (area.cellStyles === undefined || gridMatches(area.cellStyles, area.rowCount, area.columnCount)) &&
+    (area.numberFormat === undefined || gridMatches(area.numberFormat, area.rowCount, area.columnCount)) &&
+    (area.columnWidths === undefined || area.columnWidths.length === area.columnCount) &&
     (area.rowHeights === undefined || area.rowHeights.length === area.rowCount),
-  () =>
-    "cellStyles, numberFormat, columnWidths and rowHeights must match rowCount x columnCount",
+  () => "numberFormat, columnWidths and rowHeights must match rowCount x columnCount",
 );
 
 export const RecoveryFormatRangeStateSchema = Type.Object({
@@ -539,145 +401,52 @@ export const RecoveryFormatRangeStateSchema = Type.Object({
   cellCount: Type.Number(),
 });
 
-// ---------------------------------------------------------------------------
-// Static types
-// ---------------------------------------------------------------------------
+export type RecoveryConditionalCellValueOperator = Static<typeof RecoveryConditionalCellValueOperatorSchema>;
+export type RecoveryConditionalTextOperator = Static<typeof RecoveryConditionalTextOperatorSchema>;
+export type RecoveryConditionalTopBottomCriterionType = Static<typeof RecoveryConditionalTopBottomCriterionTypeSchema>;
+export type RecoveryConditionalPresetCriterion = Static<typeof RecoveryConditionalPresetCriterionSchema>;
+export type RecoveryConditionalDataBarAxisFormat = Static<typeof RecoveryConditionalDataBarAxisFormatSchema>;
+export type RecoveryConditionalDataBarDirection = Static<typeof RecoveryConditionalDataBarDirectionSchema>;
+export type RecoveryConditionalDataBarRuleType = Static<typeof RecoveryConditionalDataBarRuleTypeSchema>;
+export type RecoveryConditionalDataBarRule = Static<typeof RecoveryConditionalDataBarRuleSchema>;
+export type RecoveryConditionalDataBarState = Static<typeof RecoveryConditionalDataBarStateSchema>;
+export type RecoveryConditionalColorCriterionType = Static<typeof RecoveryConditionalColorCriterionTypeSchema>;
+export type RecoveryConditionalColorScaleCriterion = Static<typeof RecoveryConditionalColorScaleCriterionSchema>;
+export type RecoveryConditionalColorScaleState = Static<typeof RecoveryConditionalColorScaleStateSchema>;
+export type RecoveryConditionalIconCriterionType = Static<typeof RecoveryConditionalIconCriterionTypeSchema>;
+export type RecoveryConditionalIconCriterionOperator = Static<typeof RecoveryConditionalIconCriterionOperatorSchema>;
+export type RecoveryConditionalIconSet = Static<typeof RecoveryConditionalIconSetSchema>;
+export type RecoveryConditionalIcon = Static<typeof RecoveryConditionalIconSchema>;
+export type RecoveryConditionalIconCriterion = Static<typeof RecoveryConditionalIconCriterionSchema>;
+export type RecoveryConditionalIconSetState = Static<typeof RecoveryConditionalIconSetStateSchema>;
+export type RecoveryConditionalFormatRuleType = Static<typeof RecoveryConditionalFormatRuleTypeSchema>;
+export type RecoveryConditionalFormatRule = Static<typeof RecoveryConditionalFormatRuleSchema>;
+export type RecoveryConditionalFormatRuleOfType<T extends RecoveryConditionalFormatRuleType> = Extract<
+  RecoveryConditionalFormatRule,
+  { type: T }
+>;
 
-export type RecoveryConditionalCellValueOperator = Static<
-  typeof RecoveryConditionalCellValueOperatorSchema
->;
-export type RecoveryConditionalTextOperator = Static<
-  typeof RecoveryConditionalTextOperatorSchema
->;
-export type RecoveryConditionalTopBottomCriterionType = Static<
-  typeof RecoveryConditionalTopBottomCriterionTypeSchema
->;
-export type RecoveryConditionalPresetCriterion = Static<
-  typeof RecoveryConditionalPresetCriterionSchema
->;
-export type RecoveryConditionalDataBarAxisFormat = Static<
-  typeof RecoveryConditionalDataBarAxisFormatSchema
->;
-export type RecoveryConditionalDataBarDirection = Static<
-  typeof RecoveryConditionalDataBarDirectionSchema
->;
-export type RecoveryConditionalDataBarRuleType = Static<
-  typeof RecoveryConditionalDataBarRuleTypeSchema
->;
-export type RecoveryConditionalDataBarRule = Static<
-  typeof RecoveryConditionalDataBarRuleSchema
->;
-export type RecoveryConditionalDataBarState = Static<
-  typeof RecoveryConditionalDataBarStateSchema
->;
-export type RecoveryConditionalColorCriterionType = Static<
-  typeof RecoveryConditionalColorCriterionTypeSchema
->;
-export type RecoveryConditionalColorScaleCriterion = Static<
-  typeof RecoveryConditionalColorScaleCriterionSchema
->;
-export type RecoveryConditionalColorScaleState = Static<
-  typeof RecoveryConditionalColorScaleStateSchema
->;
-export type RecoveryConditionalIconCriterionType = Static<
-  typeof RecoveryConditionalIconCriterionTypeSchema
->;
-export type RecoveryConditionalIconCriterionOperator = Static<
-  typeof RecoveryConditionalIconCriterionOperatorSchema
->;
-export type RecoveryConditionalIconSet = Static<
-  typeof RecoveryConditionalIconSetSchema
->;
-export type RecoveryConditionalIcon = Static<
-  typeof RecoveryConditionalIconSchema
->;
-export type RecoveryConditionalIconCriterion = Static<
-  typeof RecoveryConditionalIconCriterionSchema
->;
-export type RecoveryConditionalIconSetState = Static<
-  typeof RecoveryConditionalIconSetStateSchema
->;
-export type RecoveryConditionalFormatRuleType = Static<
-  typeof RecoveryConditionalFormatRuleTypeSchema
->;
-export type RecoveryConditionalFormatRule = Static<
-  typeof RecoveryConditionalFormatRuleSchema
->;
-export type RecoveryConditionalFormatRuleOfType<
-  T extends RecoveryConditionalFormatRuleType,
-> = Extract<RecoveryConditionalFormatRule, { type: T }>;
-
-export type RecoveryCommentThreadState = Static<
-  typeof RecoveryCommentThreadStateSchema
->;
-export type RecoveryChartTitleState = Static<
-  typeof RecoveryChartTitleStateSchema
->;
-export type RecoveryChartLegendState = Static<
-  typeof RecoveryChartLegendStateSchema
->;
-export type RecoveryChartPositionState = Static<
-  typeof RecoveryChartPositionStateSchema
->;
-export type RecoveryChartAbsentState = Static<
-  typeof RecoveryChartAbsentStateSchema
->;
-export type RecoveryChartPresentState = Static<
-  typeof RecoveryChartPresentStateSchema
->;
+export type RecoveryCommentThreadState = Static<typeof RecoveryCommentThreadStateSchema>;
+export type RecoveryChartTitleState = Static<typeof RecoveryChartTitleStateSchema>;
+export type RecoveryChartLegendState = Static<typeof RecoveryChartLegendStateSchema>;
+export type RecoveryChartPositionState = Static<typeof RecoveryChartPositionStateSchema>;
+export type RecoveryChartAbsentState = Static<typeof RecoveryChartAbsentStateSchema>;
+export type RecoveryChartPresentState = Static<typeof RecoveryChartPresentStateSchema>;
 export type RecoveryChartState = Static<typeof RecoveryChartStateSchema>;
 
-export type RecoverySheetVisibility = Static<
-  typeof RecoverySheetVisibilitySchema
->;
-export type RecoveryStructureValueRangeState = Static<
-  typeof RecoveryStructureValueRangeStateSchema
->;
-export type RecoveryModifyStructureState = Static<
-  typeof RecoveryModifyStructureStateSchema
->;
-export type RecoverySheetNameState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "sheet_name" }
->;
-export type RecoverySheetVisibilityState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "sheet_visibility" }
->;
-export type RecoverySheetAbsentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "sheet_absent" }
->;
-export type RecoverySheetPresentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "sheet_present" }
->;
-export type RecoveryRowsAbsentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "rows_absent" }
->;
-export type RecoveryRowsPresentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "rows_present" }
->;
-export type RecoveryColumnsAbsentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "columns_absent" }
->;
-export type RecoveryColumnsPresentState = Extract<
-  RecoveryModifyStructureState,
-  { kind: "columns_present" }
->;
+export type RecoverySheetVisibility = Static<typeof RecoverySheetVisibilitySchema>;
+export type RecoveryStructureValueRangeState = Static<typeof RecoveryStructureValueRangeStateSchema>;
+export type RecoveryModifyStructureState = Static<typeof RecoveryModifyStructureStateSchema>;
+export type RecoverySheetNameState = Extract<RecoveryModifyStructureState, { kind: "sheet_name" }>;
+export type RecoverySheetVisibilityState = Extract<RecoveryModifyStructureState, { kind: "sheet_visibility" }>;
+export type RecoverySheetAbsentState = Extract<RecoveryModifyStructureState, { kind: "sheet_absent" }>;
+export type RecoverySheetPresentState = Extract<RecoveryModifyStructureState, { kind: "sheet_present" }>;
+export type RecoveryRowsAbsentState = Extract<RecoveryModifyStructureState, { kind: "rows_absent" }>;
+export type RecoveryRowsPresentState = Extract<RecoveryModifyStructureState, { kind: "rows_present" }>;
+export type RecoveryColumnsAbsentState = Extract<RecoveryModifyStructureState, { kind: "columns_absent" }>;
+export type RecoveryColumnsPresentState = Extract<RecoveryModifyStructureState, { kind: "columns_present" }>;
 
-export type RecoveryFormatSelection = Static<
-  typeof RecoveryFormatSelectionSchema
->;
-export type RecoveryFormatBorderState = Static<
-  typeof RecoveryFormatBorderStateSchema
->;
-export type RecoveryFormatAreaState = Static<
-  typeof RecoveryFormatAreaStateSchema
->;
-export type RecoveryFormatRangeState = Static<
-  typeof RecoveryFormatRangeStateSchema
->;
+export type RecoveryFormatSelection = Static<typeof RecoveryFormatSelectionSchema>;
+export type RecoveryFormatBorderState = Static<typeof RecoveryFormatBorderStateSchema>;
+export type RecoveryFormatAreaState = Static<typeof RecoveryFormatAreaStateSchema>;
+export type RecoveryFormatRangeState = Static<typeof RecoveryFormatRangeStateSchema>;

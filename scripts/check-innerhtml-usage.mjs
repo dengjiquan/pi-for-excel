@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -32,9 +31,7 @@ for (const dir of searchRoots) {
 
 if (offenders.length > 0) {
   console.error("innerHTML usage check failed.");
-  console.error(
-    "Use DOM APIs when practical, or setSafeInnerHTML(...) from src/utils/html.ts with escaped dynamic values and a local safety reason.",
-  );
+  console.error("Use DOM APIs when practical, or setSafeInnerHTML(...) from src/utils/html.ts with escaped dynamic values and a local safety reason.");
   for (const offender of offenders) console.error(`- ${offender}`);
   process.exit(1);
 }

@@ -1,10 +1,4 @@
-/**
- * Session ↔ workbook association.
- *
- * `SessionsStore` metadata schema is fixed (pi-web-ui), so we store the mapping
- * in `SettingsStore` using a dedicated key prefix.
- */
-
+import { mapWithConcurrency } from "../utils/concurrency.js";
 import type { SettingsWriter } from "../storage/local/settings-store.js";
 
 const SESSION_WORKBOOK_PREFIX = "session.workbook.v1.";
@@ -26,12 +20,6 @@ export async function getSessionWorkbookId(
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
-/**
- * Link a session to a workbook.
- *
- * Does not overwrite an existing link (so resuming an old session in a different
- * workbook won't accidentally "move" it).
- */
 export async function linkSessionToWorkbook(
   settings: SettingsWriter,
   sessionId: string,
@@ -41,6 +29,17 @@ export async function linkSessionToWorkbook(
   const existing = await settings.get(key);
   if (typeof existing === "string" && existing.trim().length > 0) return;
   await settings.set(key, workbookId);
+}
+
+export async function moveSessionToWorkbook(
+  settings: SettingsWriter,
+  sessionId: string,
+  from: string | null,
+  to: string,
+): Promise<void> {
+  const existing = await getSessionWorkbookId(settings, sessionId);
+  if (existing !== null && existing !== from) return;
+  await settings.set(sessionWorkbookKey(sessionId), to);
 }
 
 export async function setLatestSessionForWorkbook(
@@ -65,13 +64,8 @@ export interface SessionWorkbookPartition {
   foreignSessionIds: string[];
 }
 
-/**
- * Partition session ids by workbook association.
- *
- * - `matchingSessionIds`: linked to this workbook
- * - `unlinkedSessionIds`: legacy/no mapping
- * - `foreignSessionIds`: linked to another workbook
- */
+const SESSION_LOOKUP_CONCURRENCY = 16;
+
 export async function partitionSessionIdsByWorkbook(
   settings: SettingsWriter,
   sessionIds: string[],
@@ -81,8 +75,12 @@ export async function partitionSessionIdsByWorkbook(
   const unlinkedSessionIds: string[] = [];
   const foreignSessionIds: string[] = [];
 
-  for (const sessionId of sessionIds) {
-    const linkedWorkbookId = await getSessionWorkbookId(settings, sessionId);
+  const linkedWorkbookIds = await mapWithConcurrency(sessionIds, SESSION_LOOKUP_CONCURRENCY, async (sessionId) => ({
+    sessionId,
+    linkedWorkbookId: await getSessionWorkbookId(settings, sessionId),
+  }));
+
+  for (const { sessionId, linkedWorkbookId } of linkedWorkbookIds) {
     if (!linkedWorkbookId) {
       unlinkedSessionIds.push(sessionId);
       continue;

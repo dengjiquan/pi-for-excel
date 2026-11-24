@@ -1,31 +1,6 @@
-/**
- * Keyboard shortcuts page.
- *
- * Shortcuts are grouped into logical sections and key notation adapts
- * to the current platform (macOS symbols vs Windows/Linux labels).
- */
-
 import { t } from "../../../language/index.js";
 import type { SettingsShellPage } from "../../../ui/settings-shell.js";
-
-// ---------------------------------------------------------------------------
-// Platform detection
-// ---------------------------------------------------------------------------
-
-function isMacPlatform(): boolean {
-  if (typeof navigator === "undefined") return false;
-
-  // navigator.platform is deprecated but widely supported; userAgentData
-  // is the modern replacement but not available in all WebViews yet.
-  const ua = navigator.userAgent ?? "";
-  const platform = navigator.platform ?? "";
-
-  return platform.startsWith("Mac") || ua.includes("Macintosh");
-}
-
-// ---------------------------------------------------------------------------
-// Shortcut data
-// ---------------------------------------------------------------------------
+import { isMacPlatform } from "../../../utils/platform.js";
 
 interface ShortcutEntry {
   mac: string;
@@ -38,7 +13,6 @@ interface ShortcutGroup {
   shortcuts: ShortcutEntry[];
 }
 
-/** Key that displays identically on both platforms. */
 function same(key: string, description: string): ShortcutEntry {
   return { mac: key, win: key, description };
 }
@@ -52,17 +26,19 @@ function getShortcutGroups(): readonly ShortcutGroup[] {
         same(t("shortcuts.keys.enterStreaming"), t("shortcuts.desc.interrupt")),
         { mac: "⌥ Enter", win: "Alt+Enter", description: t("shortcuts.desc.queue") },
         { mac: "⌥ ↑", win: "Alt+↑", description: t("shortcuts.desc.restore_queue") },
-        { mac: "⇧ Tab", win: "Shift+Tab", description: t("shortcuts.desc.cycle_thinking") },
+        { mac: "⌃ ⌥ T", win: "Ctrl+Alt+T", description: t("shortcuts.desc.cycle_thinking") },
+        { mac: "⌘ O", win: "Ctrl+O", description: t("shortcuts.desc.toggle_details") },
       ],
     },
     {
       title: t("shortcuts.section.tabs"),
       shortcuts: [
-        { mac: "⌘ T", win: "Ctrl+T", description: t("shortcuts.desc.new_tab") },
-        { mac: "⌘ W", win: "Ctrl+W", description: t("shortcuts.desc.close_tab") },
-        { mac: "⌘ ⇧ T", win: "Ctrl+Shift+T", description: t("shortcuts.desc.reopen_tab") },
+        { mac: "⌃ ⌥ N", win: "Ctrl+Alt+N", description: t("shortcuts.desc.new_tab") },
+        { mac: "⌃ ⌥ W", win: "Ctrl+Alt+W", description: t("shortcuts.desc.close_tab") },
+        { mac: "⌃ ⌥ ⇧ T", win: "Ctrl+Alt+Shift+T", description: t("shortcuts.desc.reopen_tab") },
         same("← →", t("shortcuts.desc.switch_tabs")),
-        { mac: "⌘ ⇧ [  /  ⌘ ⇧ ]", win: "Ctrl+PgUp / PgDn", description: t("shortcuts.desc.prev_next_tab") },
+        { mac: "⌃ ⌥ ← / →", win: "Ctrl+Alt+← / →", description: t("shortcuts.desc.prev_next_tab") },
+        { mac: "⇧ F10", win: "Shift+F10", description: t("shortcuts.desc.tab_menu") },
       ],
     },
     {
@@ -71,8 +47,6 @@ function getShortcutGroups(): readonly ShortcutGroup[] {
         same("/", t("shortcuts.desc.command_menu")),
         same("↑ ↓", t("shortcuts.desc.navigate_menu")),
         same("F2", t("shortcuts.desc.focus_input")),
-        same("F6", t("shortcuts.desc.toggle_focus")),
-        { mac: "⇧ F6", win: "Shift+F6", description: t("shortcuts.desc.toggle_focus_reverse") },
       ],
     },
     {
@@ -83,10 +57,6 @@ function getShortcutGroups(): readonly ShortcutGroup[] {
     },
   ];
 }
-
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
 
 export function createShortcutsPage(): SettingsShellPage {
   return {

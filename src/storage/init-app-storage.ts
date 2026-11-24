@@ -1,7 +1,3 @@
-/**
- * Shared app storage initialization for taskpane + dialog.
- */
-
 import { AppStorage, setAppStorage } from "./local/app-storage.js";
 import { IndexedDBStorageBackend } from "./local/indexeddb-storage-backend.js";
 import { CustomProvidersStore } from "./local/custom-providers-store.js";
@@ -10,9 +6,10 @@ import { ProviderKeysStore } from "./local/provider-keys-store.js";
 import { SessionsStore } from "./local/sessions-store.js";
 import { SettingsStore } from "./local/settings-store.js";
 import type { IndexedDBConfig, StorageBackend } from "./local/types.js";
+import { recoveryStoreConfigs } from "../workbook/recovery/log-store.js";
 
 export const APP_STORAGE_DATABASE_NAME = "pi-for-excel";
-export const APP_STORAGE_DATABASE_VERSION = 2;
+export const APP_STORAGE_DATABASE_VERSION = 3;
 
 export function getAppStorageConfig(
   dbName = APP_STORAGE_DATABASE_NAME,
@@ -33,6 +30,7 @@ export function getAppStorageConfig(
       SessionsStore.getMetadataConfig(),
       customProviders.getConfig(),
       modelCatalogs.getConfig(),
+      ...recoveryStoreConfigs(),
     ],
   };
 }

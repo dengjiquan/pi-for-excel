@@ -1,14 +1,5 @@
-/**
- * trace_dependencies — Return formula lineage for a cell.
- *
- * Supports tracing both:
- * - precedents (what feeds this cell)
- * - dependents (what this cell feeds)
- *
- * Uses Office.js direct APIs when available and falls back to formula parsing.
- */
-
 import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   cellAddress,
@@ -21,6 +12,7 @@ import {
   qualifiedAddress,
 } from "../excel/helpers.js";
 import { getErrorMessage } from "../utils/errors.js";
+import { cellValueGridSchema } from "../utils/format.js";
 import type {
   DepNodeDetail,
   TraceDependenciesDetails,
@@ -30,7 +22,8 @@ import type {
 import {
   extractFormulaReferences,
   normalizeTraceMode,
-  normalizeTraversalAddress,
+  expandReferenceBounds,
+  expandTraversalAddress,
   parseQualifiedCellAddress,
   parsedReferencesContainTarget,
   summarizeTraceTree,
@@ -82,10 +75,18 @@ function resolveTraceSource(state: TraceBuildState): TraceDependencySource {
   return "none";
 }
 
+function rangeNode(cellRef: string): DepNodeDetail | null {
+  return parseRangeRef(cellRef).address.includes(":")
+    ? { address: cellRef, value: null, precedents: [] }
+    : null;
+}
+
 async function loadLeafNode(
   context: Excel.RequestContext,
   cellRef: string,
 ): Promise<DepNodeDetail> {
+  const largeRange = rangeNode(cellRef);
+  if (largeRange) return largeRange;
   const { sheet, range } = getRange(context, cellRef);
   range.load("values,formulas,address,numberFormat");
   sheet.load("name");
@@ -98,7 +99,7 @@ async function loadLeafNode(
 
   return {
     address: qualifiedAddress(sheet.name, range.address),
-    value: range.values[0]?.[0],
+    value: Value.Parse(cellValueGridSchema, range.values)[0]?.[0] ?? null,
     ...(numberFormat !== undefined ? { numberFormat } : {}),
     ...(formula !== undefined ? { formula } : {}),
     precedents: [],
@@ -125,7 +126,6 @@ function estimateAddressCellCount(address: string): number {
       const height = Math.abs(end.row - start.row) + 1;
       total += width * height;
     } catch {
-      // Skip malformed area segment.
     }
   }
 
@@ -262,8 +262,8 @@ async function resolveChildAddresses(
 ): Promise<string[]> {
   const children = new Set<string>();
 
-  const addChild = (address: string | null): void => {
-    if (!address) return;
+  const addChild = (address: string): void => {
+    if (children.has(address)) return;
     if (children.size >= MAX_CHILDREN_PER_NODE) {
       state.truncated = true;
       return;
@@ -276,8 +276,8 @@ async function resolveChildAddresses(
     if (precedents !== null) {
       state.usedApi = true;
       for (const group of precedents) {
-        for (const address of group) {
-          addChild(normalizeTraversalAddress(address, sheetName));
+        for (const address of group.flatMap((part) => expandTraversalAddress(part, sheetName))) {
+          addChild(address);
           if (children.size >= MAX_CHILDREN_PER_NODE) {
             return [...children];
           }
@@ -297,7 +297,7 @@ async function resolveChildAddresses(
     }
 
     for (const ref of refs.slice(0, MAX_PRECEDENT_FALLBACK_REFS)) {
-      addChild(ref.startAddress);
+      for (const address of expandReferenceBounds(ref.sheet, ref)) addChild(address);
     }
 
     return [...children];
@@ -307,8 +307,8 @@ async function resolveChildAddresses(
   if (dependents !== null) {
     state.usedApi = true;
     for (const group of dependents) {
-      for (const address of group) {
-        addChild(normalizeTraversalAddress(address, sheetName));
+      for (const address of group.flatMap((part) => expandTraversalAddress(part, sheetName))) {
+        addChild(address);
         if (children.size >= MAX_CHILDREN_PER_NODE) {
           return [...children];
         }
@@ -335,6 +335,7 @@ async function traceCell(
   mode: TraceDependenciesMode,
   state: TraceBuildState,
 ): Promise<DepNodeDetail | null> {
+  if (currentDepth > 0 && rangeNode(cellRef)) return null;
   const { sheet, range } = getRange(context, cellRef);
   range.load("values,formulas,address,numberFormat");
   sheet.load("name");
@@ -343,11 +344,12 @@ async function traceCell(
   const fullAddr = qualifiedAddress(sheet.name, range.address);
   const rawFmt: unknown = range.numberFormat[0]?.[0];
   const numberFormat = typeof rawFmt === "string" && rawFmt !== "" ? rawFmt : undefined;
+  const value = Value.Parse(cellValueGridSchema, range.values)[0]?.[0] ?? null;
 
   if (visited.has(fullAddr)) {
     return {
       address: fullAddr,
-      value: range.values[0]?.[0],
+      value,
       ...(numberFormat !== undefined ? { numberFormat } : {}),
       formula: "(circular reference — already visited)",
       precedents: [],
@@ -356,12 +358,10 @@ async function traceCell(
   visited.add(fullAddr);
 
   const rawFormula: unknown = range.formulas[0]?.[0];
-  const value: unknown = range.values[0]?.[0];
   const formula = typeof rawFormula === "string" && rawFormula.startsWith("=")
     ? rawFormula
     : undefined;
 
-  // Precedent tracing requires a formula at the current node.
   if (mode === "precedents" && !formula) {
     return null;
   }
@@ -416,8 +416,9 @@ function renderTree(node: DepNodeDetail, lines: string[], prefix: string, isLast
     ? ` = ${typeof rawVal === "string" || typeof rawVal === "number" || typeof rawVal === "boolean" ? String(rawVal) : JSON.stringify(rawVal)}`
     : "";
   const formulaStr = node.formula ? ` (${node.formula})` : "";
+  const rangeStr = parseRangeRef(node.address).address.includes(":") ? " (range, values not traced)" : "";
 
-  lines.push(`${prefix}${connector}**${node.address}**${valueStr}${formulaStr}`);
+  lines.push(`${prefix}${connector}**${node.address}**${valueStr}${formulaStr}${rangeStr}`);
 
   const childPrefix = prefix + (isLast ? "    " : "│   ");
   for (const [index, child] of node.precedents.entries()) {
@@ -467,6 +468,9 @@ export function createTraceDependenciesTool(): AgentTool<typeof schema> {
 
         const heading = mode === "dependents" ? "Dependents" : "Precedents";
         const lines: string[] = [`**${heading} tree for ${tree.address}:**`, ""];
+        if (!params.cell.includes("!")) {
+          lines.splice(1, 0, "Sheet: the active sheet (the cell address named no sheet).");
+        }
         renderTree(tree, lines, "", true);
 
         if (mode === "dependents" && tree.precedents.length === 0) {

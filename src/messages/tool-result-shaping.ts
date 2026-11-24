@@ -4,15 +4,12 @@ interface ToolResultShapingConfig {
   recentToolResultsToKeep: number;
   maxCharsBeforeCompaction: number;
   previewChars: number;
+  compactToolCallIds?: ReadonlySet<string>;
 }
 
 export const DEFAULT_TOOL_RESULT_SHAPING: Readonly<ToolResultShapingConfig> = {
-  // Keep recent tool outputs fully intact so immediate follow-up reasoning stays high quality.
-  // Primary payload safety comes from execution-time tool-output truncation.
   recentToolResultsToKeep: 6,
-  // Older tool results above this size are compacted for model-facing context.
   maxCharsBeforeCompaction: 1200,
-  // Keep a short deterministic preview for grounding.
   previewChars: 500,
 };
 
@@ -56,6 +53,7 @@ function clampPositiveInteger(value: number, fallback: number): number {
 
 function normalizeConfig(config: Partial<ToolResultShapingConfig> | undefined): ToolResultShapingConfig {
   return {
+    ...(config?.compactToolCallIds ? { compactToolCallIds: config.compactToolCallIds } : {}),
     recentToolResultsToKeep: clampPositiveInteger(
       config?.recentToolResultsToKeep ?? DEFAULT_TOOL_RESULT_SHAPING.recentToolResultsToKeep,
       DEFAULT_TOOL_RESULT_SHAPING.recentToolResultsToKeep,
@@ -82,15 +80,13 @@ function collectToolResultIndices(messages: readonly AgentMessage[]): number[] {
 }
 
 function buildRecentIndexSet(indices: readonly number[], keep: number): Set<number> {
-  if (indices.length <= keep) return new Set<number>(indices);
-  return new Set<number>(indices.slice(indices.length - keep));
+  const compacted = Math.floor(Math.max(0, indices.length - keep) / keep) * keep;
+  return new Set<number>(indices.slice(compacted));
 }
 
 function normalizeToolResultContent(message: ToolResultMessage): ToolResultMessage["content"] {
   const rawContent: unknown = message.content;
 
-  // Backwards compatibility: older persisted sessions may still carry string
-  // tool-result payloads.
   if (typeof rawContent === "string") {
     return [{ type: "text", text: rawContent }];
   }
@@ -156,7 +152,7 @@ function summarizeToolResult(
     lines.push("Preview: (no text payload)");
   }
 
-  lines.push("Full output remains visible in chat history; this compact version is model-facing only.");
+  lines.push("The full output was shown to the user in the tool card but is no longer in your context; run the tool again if you need it.");
 
   return {
     type: "text",
@@ -190,7 +186,7 @@ export function shapeToolResultsForLlm(
       content: normalizeToolResultContent(message),
     };
 
-    if (recentSet.has(index)) return normalizedMessage;
+    if (recentSet.has(index) && !resolvedConfig.compactToolCallIds?.has(message.toolCallId)) return normalizedMessage;
 
     const payload = collectToolResultPayload(normalizedMessage.content);
     if (!shouldCompactToolResult(payload, resolvedConfig.maxCharsBeforeCompaction)) {
@@ -202,4 +198,10 @@ export function shapeToolResultsForLlm(
       content: [summarizeToolResult(normalizedMessage, payload, resolvedConfig.previewChars)],
     };
   });
+}
+
+export function compactToolResult(message: ToolResultMessage): ToolResultMessage {
+  const normalized: ToolResultMessage = { ...message, content: normalizeToolResultContent(message) };
+  const payload = collectToolResultPayload(normalized.content);
+  return { ...normalized, content: [summarizeToolResult(normalized, payload, DEFAULT_TOOL_RESULT_SHAPING.previewChars)] };
 }

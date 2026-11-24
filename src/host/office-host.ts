@@ -1,5 +1,3 @@
-/** Office.js-backed host implementation. */
-
 import type { DocumentInstanceIdentity } from "./document-instance.js";
 import { createOfficeDocumentInstanceIdentity } from "./office-document-instance.js";
 import { createOfficeDocumentUrlReader } from "./office-document-url.js";
@@ -45,6 +43,7 @@ function fromOfficeReadyInfo(info: OfficeReadyInfoLike): SpreadsheetHostReadyInf
 export class OfficeHost implements SpreadsheetHost {
   readonly kind = "office";
   readonly displayName = "Microsoft Excel";
+  readonly servesOneDocument = true;
   readonly sessionStorage: SpreadsheetHostSessionStorage = settingsBackedSessionStorage;
   readonly documentInstance: DocumentInstanceIdentity = createOfficeDocumentInstanceIdentity();
   private readonly documentUrl = createOfficeDocumentUrlReader();

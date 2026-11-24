@@ -2,17 +2,6 @@ function isToolsTmuxPayloadShape(value: unknown): value is Record<string, unknow
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * tmux — Experimental local tmux bridge adapter.
- *
- * This tool stays registered for a stable tool list/prompt cache,
- * but execution is gated by:
- * - bridge URL override from /experimental tmux-bridge-url (or default https://localhost:3341)
- * - reachable bridge health endpoint
- *
- * The local bridge contract (v1) is a POST JSON request to /v1/tmux.
- */
-
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static, type TSchema } from "typebox";
 import { StringEnum } from "./string-enum.js";
@@ -29,6 +18,7 @@ import {
   DEFAULT_TMUX_BRIDGE_URL,
   TMUX_BRIDGE_URL_SETTING_KEY,
 } from "./experimental-tool-gates.js";
+import { isStop, ToolStoppedError } from "./tool-stopped.js";
 
 const TMUX_BRIDGE_API_PATH = "/v1/tmux";
 const DEFAULT_TMUX_BRIDGE_TIMEOUT_MS = 15_000;
@@ -356,18 +346,19 @@ async function defaultGetBridgeConfig(): Promise<TmuxBridgeConfig | null> {
     const storageModule = await import("../storage/local/app-storage.js");
     const settings = storageModule.getAppStorage().settings;
 
-    const urlValue = await settings.get(TMUX_BRIDGE_URL_SETTING_KEY);
+    const [urlValue, tokenValue] = await Promise.all([
+      settings.get(TMUX_BRIDGE_URL_SETTING_KEY),
+      settings.get(TMUX_BRIDGE_TOKEN_SETTING_KEY).catch(() => null),
+    ]);
     const configuredUrl = typeof urlValue === "string" ? urlValue.trim() : "";
     if (configuredUrl.length > 0) {
       rawUrl = configuredUrl;
     }
 
-    const tokenValue = await settings.get(TMUX_BRIDGE_TOKEN_SETTING_KEY);
     token = typeof tokenValue === "string" && tokenValue.trim().length > 0
       ? tokenValue.trim()
       : undefined;
   } catch {
-    // Fall back to default localhost URL when settings are unavailable.
   }
 
   try {
@@ -469,7 +460,7 @@ async function defaultCallBridge(
   } catch (error) {
     if (isAbortError(error)) {
       if (signal?.aborted) {
-        throw new Error("Aborted");
+        throw new ToolStoppedError();
       }
       throw new Error(`Tmux bridge request timed out after ${timeoutMs}ms.`);
     }
@@ -651,6 +642,7 @@ export function createTmuxTool(
           },
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         const message = getErrorMessage(error);
         const fallbackAction =
           params?.action ??

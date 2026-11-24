@@ -1,4 +1,5 @@
 import {
+  backupSkippedNote,
   recoveryCheckpointCreated,
   recoveryCheckpointUnavailable,
 } from "../recovery-metadata.js";
@@ -9,33 +10,49 @@ import type {
   MutationRecoveryStep,
   MutationResultDetails,
 } from "./types.js";
+import { getErrorMessage } from "../../utils/errors.js";
+
+export const PI_BACKUP_SAVE_FAILED_EVENT = "pi:backup-save-failed";
 
 export async function finalizeMutationOperation<TDetails extends MutationResultDetails>(
   dependencies: MutationFinalizeDependencies,
   operation: MutationFinalizeOperation<TDetails>,
 ): Promise<MutationFinalizeRecoveryResult | null> {
-  try {
-    await dependencies.appendAuditEntry(operation.auditEntry);
-  } catch {
+  const auditAppended = dependencies.appendAuditEntry(operation.auditEntry).catch(() => {
     console.warn("[pi] Failed to append workbook mutation audit entry.");
-  }
-
-  const recovery = operation.recovery;
-  if (!recovery) {
-    return null;
-  }
-
-  return finalizeMutationRecoveryStep(recovery);
+  });
+  const [, recovery] = await Promise.all([
+    auditAppended,
+    operation.recovery ? finalizeMutationRecoveryStep(operation.recovery) : null,
+  ]);
+  return recovery;
 }
 
 export async function finalizeMutationRecoveryStep<TDetails extends MutationResultDetails>(
   recovery: MutationRecoveryStep<TDetails>,
 ): Promise<MutationFinalizeRecoveryResult> {
-  const checkpoint = await recovery.appendRecoverySnapshot();
+  let checkpoint: Awaited<ReturnType<typeof recovery.appendRecoverySnapshot>>;
+  try {
+    checkpoint = await recovery.appendRecoverySnapshot();
+  } catch (error) {
+    const reason = getErrorMessage(error);
+    console.warn(`[pi] ${reason}`);
+    recovery.result.details.recovery = recoveryCheckpointUnavailable(reason);
+    recovery.appendResultNote(
+      recovery.result,
+      `⚠️ ${reason.replace(/[.!?]?$/, ".")} This change cannot be reverted from backups.`,
+    );
+    if (typeof document !== "undefined") {
+      document.dispatchEvent(new Event(PI_BACKUP_SAVE_FAILED_EVENT));
+    }
+    return {
+      checkpointCreated: false,
+    };
+  }
 
   if (!checkpoint) {
     recovery.result.details.recovery = recoveryCheckpointUnavailable(recovery.unavailableReason);
-    recovery.appendResultNote(recovery.result, recovery.unavailableNote);
+    recovery.appendResultNote(recovery.result, recovery.unavailableNote ?? backupSkippedNote(recovery.unavailableReason));
 
     return {
       checkpointCreated: false,
@@ -43,6 +60,7 @@ export async function finalizeMutationRecoveryStep<TDetails extends MutationResu
   }
 
   recovery.result.details.recovery = recoveryCheckpointCreated(checkpoint.id);
+  recovery.appendResultNote(recovery.result, `Backup saved: \`${checkpoint.id}\`.`);
 
   return {
     checkpointCreated: true,

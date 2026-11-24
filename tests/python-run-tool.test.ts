@@ -37,7 +37,7 @@ void test("python_run returns guidance when no backend is available", async () =
 
 void test("python_run validates input_json before bridge call", async () => {
   const tool = createPythonRunTool({
-    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340" }),
+    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340", configured: true }),
     callBridge: () => Promise.resolve({ ok: true, action: "run_python" }),
   });
 
@@ -55,9 +55,11 @@ void test("python_run sends v1 bridge payload and renders stdout/result", async 
   let capturedConfig: PythonBridgeConfig | null = null;
 
   const tool = createPythonRunTool({
+    getApprovedBridgeUrl: () => Promise.resolve("https://localhost:3340"),
     getBridgeConfig: () => Promise.resolve({
       url: "https://localhost:3340",
       token: "secret-token",
+      configured: true,
     }),
     callBridge: (
       request: PythonBridgeRequest,
@@ -102,7 +104,8 @@ void test("python_run sends v1 bridge payload and renders stdout/result", async 
 
 void test("python_run bridge errors are surfaced", async () => {
   const tool = createPythonRunTool({
-    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340" }),
+    getApprovedBridgeUrl: () => Promise.resolve("https://localhost:3340"),
+    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340", configured: true }),
     callBridge: () => Promise.reject(new Error("bridge unavailable")),
   });
 
@@ -117,34 +120,63 @@ void test("python_run bridge errors are surfaced", async () => {
   assert.equal(result.details?.skillHint, "python-bridge");
 });
 
-void test("python_run falls back to Pyodide when default bridge URL is unavailable", async () => {
-  const tool = createPythonRunTool({
-    getBridgeConfig: () => Promise.resolve({
-      url: "https://localhost:3340",
-      source: "default",
-    }),
-    callBridge: () => Promise.reject(new Error("fetch failed")),
-    isPyodideAvailable: () => true,
-    callPyodide: () => Promise.resolve({
-      ok: true,
-      action: "run_python",
-      exit_code: 0,
-      stdout: "pyodide fallback",
-    }),
+void test("python_run falls back to Pyodide only when the default bridge is unreachable", async (t) => {
+  const traceback = "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'pandas'";
+  const cases: Array<{ name: string; fetch: () => Promise<Response>; fallback: boolean; text: RegExp }> = [
+    {
+      name: "connection refused",
+      fetch: () => Promise.reject(new TypeError("Failed to fetch")),
+      fallback: true,
+      text: /pyodide fallback/u,
+    },
+    {
+      name: "python error on the bridge",
+      fetch: () => Promise.resolve(new Response(JSON.stringify({
+        ok: false, error: traceback, action: "run_python", exit_code: 1, stderr: traceback,
+      }), { status: 400 })),
+      fallback: false,
+      text: /Python failed in local Python \(bridge at https:\/\/localhost:3340\) \(exit code 1\): ModuleNotFoundError: No module named 'pandas'/u,
+    },
+    {
+      name: "bridge timeout",
+      fetch: () => Promise.resolve(new Response(JSON.stringify({
+        ok: false, error: "Process timed out after 2000ms.",
+      }), { status: 504 })),
+      fallback: false,
+      text: /timed out after 2000ms/u,
+    },
+  ];
+
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
   });
 
-  const result = await tool.execute("tc-fallback", {
-    code: "print('x')",
-  });
+  for (const testCase of cases) {
+    globalThis.fetch = testCase.fetch;
+    let pyodideCalls = 0;
+    const tool = createPythonRunTool({
+      getApprovedBridgeUrl: () => Promise.resolve("https://localhost:3340"),
+      getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340", configured: false }),
+      isPyodideAvailable: () => true,
+      callPyodide: () => {
+        pyodideCalls += 1;
+        return Promise.resolve({ ok: true, action: "run_python", exit_code: 0, stdout: "pyodide fallback" });
+      },
+    });
 
-  assert.match(firstText(result), /pyodide fallback/u);
-  assert.equal(result.details?.ok, true);
-  assert.equal(result.details?.exitCode, 0);
+    const result = await tool.execute("tc-fallback", { code: "import pandas", timeout_ms: 2000 });
+
+    assert.equal(pyodideCalls, testCase.fallback ? 1 : 0, testCase.name);
+    assert.match(firstText(result), testCase.text, testCase.name);
+    assert.equal(result.details?.ok, testCase.fallback, testCase.name);
+  }
 });
 
 void test("python_run handles explicit bridge-level rejection payloads", async () => {
   const tool = createPythonRunTool({
-    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340" }),
+    getApprovedBridgeUrl: () => Promise.resolve("https://localhost:3340"),
+    getBridgeConfig: () => Promise.resolve({ url: "https://localhost:3340", configured: true }),
     callBridge: () => Promise.resolve({
       ok: false,
       action: "run_python",

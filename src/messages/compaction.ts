@@ -5,13 +5,28 @@
  * custom AgentMessage role so we can:
  * - render it as a dedicated UI card (not an assistant text blob)
  * - keep the summary in LLM context via Agent.convertToLlm
+ *
+ * pi-agent-core declared this role until 1.0, when it removed its experimental
+ * harness. Persisted sessions still contain it, so the shape must not change.
  */
 
-import type { CompactionSummaryMessage } from "@earendil-works/pi-agent-core";
 import { t } from "../language/index.js";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { UserMessage } from "@earendil-works/pi-ai";
 
-export type { CompactionSummaryMessage };
+export interface CompactionSummaryMessage {
+  role: "compactionSummary";
+  summary: string;
+  tokensBefore: number;
+  timestamp: number;
+  compactedToolCallIds?: string[];
+}
+
+declare module "@earendil-works/pi-agent-core" {
+  interface CustomAgentMessages {
+    compactionSummary: CompactionSummaryMessage;
+  }
+}
 
 export const COMPACTION_SUMMARY_PREFIX =
   "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
@@ -22,19 +37,27 @@ export function createCompactionSummaryMessage(args: {
   summary: string;
   tokensBefore: number;
   timestamp: number;
+  compactedToolCallIds?: string[];
 }): CompactionSummaryMessage {
   return {
     role: "compactionSummary",
     summary: args.summary,
     tokensBefore: args.tokensBefore,
     timestamp: args.timestamp,
+    ...(args.compactedToolCallIds && args.compactedToolCallIds.length > 0
+      ? { compactedToolCallIds: args.compactedToolCallIds }
+      : {}),
   };
 }
 
-/**
- * UI-only formatter (message renderer card title). Safe to localize — the
- * agent-facing compaction summary text is built separately below.
- */
+export function getCompactedToolCallIds(messages: readonly AgentMessage[]): ReadonlySet<string> {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "compactionSummary") return new Set(message.compactedToolCallIds ?? []);
+  }
+  return new Set();
+}
+
 export function formatCompactionSummaryExtent(msg: CompactionSummaryMessage): string {
   if (typeof msg.tokensBefore === "number") {
     const key = msg.tokensBefore === 1 ? "compaction.extent.token" : "compaction.extent.tokens";

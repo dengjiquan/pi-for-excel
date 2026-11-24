@@ -1,7 +1,3 @@
-/**
- * Builtin model-related commands.
- */
-
 import type { Agent } from "@earendil-works/pi-agent-core";
 
 import type { SlashCommand } from "../types.js";
@@ -32,16 +28,6 @@ export function createModelCommands(actions: ModelCommandActions): SlashCommand[
       description: t("command.model.desc"),
       source: "builtin",
       execute: runModelSelector,
-    },
-    {
-      name: "default-models",
-      description: t("command.model.cycle"),
-      source: "builtin",
-      execute: () => {
-        // TODO: implement scoped models dialog
-        // For now, open model selector as a placeholder
-        runModelSelector();
-      },
     },
   ];
 }

@@ -1,13 +1,5 @@
-/**
- * Manual full-workbook backup flow (#191).
- *
- * This module intentionally stays separate from automatic range-level recovery
- * checkpoints. It captures the current workbook as a compressed Office file
- * only when the user explicitly requests a manual backup.
- */
-
 import { bytesToBase64 } from "../files/encoding.js";
-import { getFilesWorkspace } from "../files/workspace.js";
+import { getFilesWorkspace, type PendingWorkspaceDownload } from "../files/workspace.js";
 import type { WorkspaceFileEntry } from "../files/types.js";
 import {
   getOfficeDocumentFileAdapter,
@@ -15,17 +7,18 @@ import {
   type OfficeFileLike,
   type OfficeSliceLike,
 } from "../host/office-file.js";
+import { saveBlobAsFile } from "../utils/download.js";
 import { formatWorkbookLabel, getWorkbookContext, type WorkbookContext } from "./context.js";
 
 const FULL_BACKUP_PATH_PREFIX = "manual-backups/full-workbook/v1";
 const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const DEFAULT_SLICE_SIZE_BYTES = 1_048_576; // 1 MB
+const DEFAULT_SLICE_SIZE_BYTES = 1_048_576;
 const DEFAULT_LIST_LIMIT = 20;
 
 interface ManualFullBackupWorkspace {
   listFiles: () => Promise<WorkspaceFileEntry[]>;
   writeBase64File: (path: string, base64: string, mimeTypeHint?: string) => Promise<void>;
-  downloadFile: (path: string) => Promise<void>;
+  beginDownload: () => PendingWorkspaceDownload;
   deleteFile: (path: string) => Promise<void>;
 }
 
@@ -33,6 +26,7 @@ interface ManualFullBackupDependencies {
   getWorkspace: () => ManualFullBackupWorkspace;
   getWorkbookContext: () => Promise<WorkbookContext>;
   captureWorkbookBytes: () => Promise<Uint8Array>;
+  saveFile: (file: Blob, fileName: string) => void;
   now: () => number;
   createSuffix: () => string;
 }
@@ -42,6 +36,19 @@ export interface ManualFullWorkbookBackup {
   path: string;
   createdAt: number;
   sizeBytes: number;
+}
+
+export interface DownloadedFullWorkbookBackup {
+  id: string;
+  createdAt: number;
+  sizeBytes: number;
+  kept: boolean;
+}
+
+interface CapturedWorkbook {
+  id: string;
+  createdAt: number;
+  bytes: Uint8Array;
 }
 
 function defaultNow(): number {
@@ -285,6 +292,7 @@ export class ManualFullWorkbookBackupStore {
       getWorkspace: dependencies.getWorkspace ?? (() => getFilesWorkspace()),
       getWorkbookContext: dependencies.getWorkbookContext ?? getWorkbookContext,
       captureWorkbookBytes: dependencies.captureWorkbookBytes ?? (() => captureWorkbookCompressedBytes()),
+      saveFile: dependencies.saveFile ?? saveBlobAsFile,
       now: dependencies.now ?? defaultNow,
       createSuffix: dependencies.createSuffix ?? defaultCreateSuffix,
     };
@@ -321,74 +329,84 @@ export class ManualFullWorkbookBackupStore {
     return this.listForWorkbookId(workbookId, limit);
   }
 
-  async create(): Promise<ManualFullWorkbookBackup> {
-    const workbookContext = await this.dependencies.getWorkbookContext();
-    const scoped = assertWorkbookIdentity(workbookContext);
+  private async withDownload<T extends ManualFullWorkbookBackup | null>(
+    produce: () => Promise<T>,
+  ): Promise<T> {
+    const pending = this.dependencies.getWorkspace().beginDownload();
+    try {
+      const backup = await produce();
+      if (!backup) {
+        pending.cancel();
+        return backup;
+      }
+      await pending.download(backup.path);
+      return backup;
+    } catch (error) {
+      pending.cancel();
+      throw error;
+    }
+  }
 
-    const bytes = await this.dependencies.captureWorkbookBytes();
-    const createdAt = this.dependencies.now();
-    const backupId = createBackupId({
-      workbookName: scoped.workbookName,
-      at: createdAt,
-      suffix: this.dependencies.createSuffix(),
+  async createAndDownload(options: {
+    runCapture?: <T>(capture: () => Promise<T>) => Promise<T>;
+  } = {}): Promise<DownloadedFullWorkbookBackup> {
+    const runCapture = options.runCapture ?? (<T>(capture: () => Promise<T>) => capture());
+    const { captured, path } = await runCapture(async () => {
+      const { workbookId, workbookName } = await this.dependencies.getWorkbookContext();
+      const captured = await this.capture(workbookName);
+      if (!workbookId) return { captured, path: null };
+      const path = toBackupPath(workbookId, captured.id);
+      await this.dependencies.getWorkspace().writeBase64File(path, bytesToBase64(captured.bytes), XLSX_MIME_TYPE);
+      return { captured, path };
     });
 
-    const path = toBackupPath(scoped.workbookId, backupId);
-    const workspace = this.dependencies.getWorkspace();
+    const { id, createdAt, bytes } = captured;
+    if (path === null) {
+      this.dependencies.saveFile(new Blob([bytes.slice()], { type: XLSX_MIME_TYPE }), `${id}.xlsx`);
+    } else {
+      await this.dependencies.getWorkspace().beginDownload().download(path);
+    }
+    return { id, createdAt, sizeBytes: bytes.byteLength, kept: path !== null };
+  }
 
-    await workspace.writeBase64File(path, bytesToBase64(bytes), XLSX_MIME_TYPE);
-
-    return {
-      id: backupId,
-      path,
-      createdAt,
-      sizeBytes: bytes.byteLength,
-    };
+  private async capture(workbookName: string | null): Promise<CapturedWorkbook> {
+    const bytes = await this.dependencies.captureWorkbookBytes();
+    const createdAt = this.dependencies.now();
+    const id = createBackupId({ workbookName, at: createdAt, suffix: this.dependencies.createSuffix() });
+    return { id, createdAt, bytes };
   }
 
   async downloadLatestForCurrentWorkbook(): Promise<ManualFullWorkbookBackup | null> {
-    const workbookContext = await this.dependencies.getWorkbookContext();
-    const scoped = assertWorkbookIdentity(workbookContext);
+    return this.withDownload(async () => {
+      const workbookContext = await this.dependencies.getWorkbookContext();
+      const scoped = assertWorkbookIdentity(workbookContext);
 
-    const backups = await this.listForWorkbookId(scoped.workbookId, 1);
-    const latest = backups[0];
-
-    if (!latest) {
-      return null;
-    }
-
-    const workspace = this.dependencies.getWorkspace();
-    await workspace.downloadFile(latest.path);
-    return latest;
+      const backups = await this.listForWorkbookId(scoped.workbookId, 1);
+      return backups[0] ?? null;
+    });
   }
 
   async downloadByIdForCurrentWorkbook(backupId: string): Promise<ManualFullWorkbookBackup | null> {
-    const workbookContext = await this.dependencies.getWorkbookContext();
-    const scoped = assertWorkbookIdentity(workbookContext);
-
-    const trimmedBackupId = backupId.trim();
+    const trimmedBackupId = backupId.trim().replace(/^#/, "");
     if (trimmedBackupId.length === 0) {
       return null;
     }
 
-    const backups = await this.listForWorkbookId(scoped.workbookId);
-    const match = backups.find((backup) => backup.id === trimmedBackupId);
+    return this.withDownload(async () => {
+      const workbookContext = await this.dependencies.getWorkbookContext();
+      const scoped = assertWorkbookIdentity(workbookContext);
 
-    if (!match) {
-      return null;
-    }
-
-    const workspace = this.dependencies.getWorkspace();
-    await workspace.downloadFile(match.path);
-    return match;
+      const backups = await this.listForWorkbookId(scoped.workbookId);
+      return backups.find((backup) => backup.id === trimmedBackupId) ?? null;
+    });
   }
 
-  async clearForCurrentWorkbook(): Promise<number> {
+  async clearForCurrentWorkbook(confirm: (count: number) => Promise<boolean> = () => Promise.resolve(true)): Promise<number> {
     const workbookContext = await this.dependencies.getWorkbookContext();
     const scoped = assertWorkbookIdentity(workbookContext);
 
     const backups = await this.listForWorkbookId(scoped.workbookId);
-    if (backups.length === 0) {
+    if (backups.length === 0 || !await confirm(backups.length)) {
       return 0;
     }
 

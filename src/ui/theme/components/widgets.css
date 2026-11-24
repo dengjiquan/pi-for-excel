@@ -1,7 +1,3 @@
-/* ═══════════════════════════════════════════════════════
-   6b. WIDGET SLOT — inline extension widgets around input
-   ═══════════════════════════════════════════════════════ */
-
 .pi-widget-slot {
   display: flex;
   flex-direction: column;
@@ -44,13 +40,13 @@
 
 .pi-ext-widget-header--toggle:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--pi-green-lighter);
+  box-shadow: 0 0 0 2px var(--alpha-10);
 }
 
 .pi-ext-widget-title {
   font-family: var(--font-sans);
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.01em;
 }
 
@@ -76,5 +72,3 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-
-

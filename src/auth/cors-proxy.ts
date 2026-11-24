@@ -1,15 +1,3 @@
-/**
- * Fetch interceptor for dev + production.
- *
- * Dev:
- * - rewrites external URLs to Vite's local reverse proxies (/api-proxy/*, /oauth-proxy/*)
- *
- * Production:
- * - does NOT assume any local reverse proxy exists
- * - optionally routes *OAuth/token* endpoints through a user-configured CORS proxy
- *   (<proxy>/?url=<target>) so browser OAuth flows work in Office webviews.
- */
-
 import { getAppStorage } from "../storage/local/app-storage.js";
 
 import {
@@ -19,24 +7,15 @@ import {
 import { rewriteDevProxyUrl } from "./dev-rewrites.js";
 import type { SettingsReader } from "../storage/local/settings-store.js";
 
-/** The original, un-patched fetch — use for requests that should bypass the proxy */
 export let originalFetch: typeof window.fetch;
 
-type ProxySettingsCache = {
-  checkedAt: number;
-  enabled: boolean;
-  url?: string;
-};
+type ProxySettingsCache =
+  | { kind: "empty" }
+  | { kind: "reading"; result: Promise<string | undefined> }
+  | { kind: "ready"; checkedAt: number; url: string | undefined };
 
-const proxyCache: ProxySettingsCache = {
-  checkedAt: 0,
-  enabled: false,
-};
-
-function parseProxyEnabled(value: unknown): boolean {
-  // Preserve the legacy persisted contract: any truthy value enabled proxying.
-  return Boolean(value);
-}
+let proxyCache: ProxySettingsCache = { kind: "empty" };
+let installed = false;
 
 export async function readCorsProxySettings(
   settings: SettingsReader,
@@ -47,7 +26,7 @@ export async function readCorsProxySettings(
       settings.get("proxy.url"),
     ]);
     return {
-      enabled: parseProxyEnabled(enabled),
+      enabled: Boolean(enabled),
       url: typeof url === "string" ? url.trim() : "",
     };
   } catch {
@@ -55,51 +34,40 @@ export async function readCorsProxySettings(
   }
 }
 
-async function getEnabledProxyUrl(
-  injectedSettings?: SettingsReader,
-): Promise<string | undefined> {
-  // OAuth flows are infrequent, but fetch() is frequent; cache for a short time.
-  const now = Date.now();
-  if (now - proxyCache.checkedAt < 3000) {
-    return proxyCache.enabled ? proxyCache.url : undefined;
+function getEnabledProxyUrl(injectedSettings?: SettingsReader): Promise<string | undefined> {
+  if (proxyCache.kind === "reading") return proxyCache.result;
+  if (proxyCache.kind === "ready" && Date.now() - proxyCache.checkedAt < 3000) {
+    return Promise.resolve(proxyCache.url);
   }
 
-  proxyCache.checkedAt = now;
-
-  let settings = injectedSettings;
-  if (!settings) {
-    try {
-      settings = getAppStorage().settings;
-    } catch {
-      proxyCache.enabled = false;
-      delete proxyCache.url;
-      return undefined;
+  const result = (async () => {
+    let settings = injectedSettings;
+    if (!settings) {
+      try {
+        settings = getAppStorage().settings;
+      } catch {
+        return undefined;
+      }
     }
-  }
-
-  const stored = await readCorsProxySettings(settings);
-  proxyCache.enabled = stored.enabled;
-  if (!proxyCache.enabled) {
-    delete proxyCache.url;
-    return undefined;
-  }
-
-  const candidateUrl = stored.url.length > 0 ? stored.url : DEFAULT_PROXY_URL;
-
-  // Guardrails: validate proxy URL (and fail fast for mixed-content HTTP proxies).
-  // This may throw and should surface to the caller.
-  const validated = validateOfficeProxyUrl(candidateUrl);
-  proxyCache.url = validated;
-  return validated;
+    const stored = await readCorsProxySettings(settings);
+    return stored.enabled
+      ? validateOfficeProxyUrl(stored.url || DEFAULT_PROXY_URL)
+      : undefined;
+  })().then((url) => {
+    proxyCache = { kind: "ready", checkedAt: Date.now(), url };
+    return url;
+  }, (error: unknown) => {
+    proxyCache = { kind: "empty" };
+    throw error;
+  });
+  proxyCache = { kind: "reading", result };
+  return result;
 }
 
 function looksLikeOAuthOrTokenEndpoint(url: string): boolean {
-  // Proxy only endpoints that are known to be blocked by CORS in browsers.
-  // Keep this conservative so normal fetch() calls aren't routed unexpectedly.
   try {
     const u = new URL(url);
 
-    // Anthropic OAuth token exchange / refresh
     if (
       (u.hostname === "console.anthropic.com" || u.hostname === "platform.claude.com") &&
       u.pathname.startsWith("/v1/oauth/token")
@@ -107,20 +75,15 @@ function looksLikeOAuthOrTokenEndpoint(url: string): boolean {
       return true;
     }
 
-    // GitHub device flow + token exchange (supports enterprise domains too)
     if (u.pathname === "/login/device/code") return true;
     if (u.pathname === "/login/oauth/access_token") return true;
 
-    // GitHub Copilot token endpoint (github.com or GHE)
     if (u.pathname.includes("/copilot_internal/")) return true;
 
-    // OpenAI auth endpoints (not all are browser-friendly)
     if (u.hostname === "auth.openai.com" && u.pathname.startsWith("/oauth/")) return true;
 
-    // Google OAuth token endpoint
     if (u.hostname === "oauth2.googleapis.com") return true;
 
-    // Google Cloud Code Assist onboarding/auth-adjacent endpoints
     if (u.hostname === "cloudcode-pa.googleapis.com" && u.pathname.startsWith("/v1internal")) return true;
     if (u.hostname === "daily-cloudcode-pa.sandbox.googleapis.com" && u.pathname.startsWith("/v1internal")) return true;
 
@@ -137,10 +100,9 @@ function stripAnthropicBrowserHeader(init?: RequestInit): RequestInit | undefine
   return { ...init, headers };
 }
 
-/**
- * Install the fetch interceptor. Call once at boot.
- */
 export function installFetchInterceptor(settings?: SettingsReader): void {
+  if (installed) return;
+  installed = true;
   originalFetch = window.fetch.bind(window);
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -150,13 +112,11 @@ export function installFetchInterceptor(settings?: SettingsReader): void {
         ? input.toString()
         : input.url;
 
-    // Relative URLs: never rewrite
     if (!/^https?:\/\//i.test(url)) {
       return originalFetch(input, init);
     }
 
-    // Dev: Vite reverse proxies
-    if (import.meta.env.DEV) {
+    if (import.meta.env?.DEV) {
       const rewritten = rewriteDevProxyUrl(url);
       if (!rewritten) return originalFetch(input, init);
 
@@ -173,7 +133,6 @@ export function installFetchInterceptor(settings?: SettingsReader): void {
       return originalFetch(input, newInit);
     }
 
-    // Production: proxy OAuth/token endpoints through user-configured CORS proxy.
     if (looksLikeOAuthOrTokenEndpoint(url)) {
       const proxyUrl = await getEnabledProxyUrl(settings);
       if (proxyUrl) {

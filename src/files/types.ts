@@ -1,10 +1,3 @@
-/**
- * Workspace file subsystem shared types.
- *
- * The persisted records (workbook tags, audit entries) and their enums are
- * `Static<>` of the schemas in `./persisted-schemas.ts`.
- */
-
 import type { WorkspaceBackendKind, WorkspaceFileWorkbookTag } from "./persisted-schemas.js";
 
 export type {
@@ -45,6 +38,7 @@ export interface WorkspaceBackendStatus {
   label: string;
   nativeSupported: boolean;
   nativeConnected: boolean;
+  nativeBlockedByFrame?: boolean;
   nativeDirectoryName?: string;
 }
 

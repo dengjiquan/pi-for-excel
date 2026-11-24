@@ -15,10 +15,12 @@ import {
   closeOverlayById,
   createOverlayDialog,
   createOverlayHeader,
-  NESTED_OVERLAY_Z_INDEX,
 } from "./overlay-dialog.js";
 import { requestTextInputDialog } from "./text-input-dialog.js";
 import { showToast } from "./toast.js";
+import { copyText } from "./copy-text.js";
+import { saveBlobAsFile } from "../utils/download.js";
+import { isEmbeddedAppleWebView } from "../utils/platform.js";
 import { t } from "../language/index.js";
 
 export interface FilesDialogDetailActionFileRef {
@@ -44,6 +46,7 @@ export interface CreateFilesDialogDetailActionsOptions {
   fileRef: FilesDialogDetailActionFileRef;
   workspace: FilesDialogDetailActionsWorkspace;
   auditContext: FilesWorkspaceAuditContext;
+  onMutationStateChange: (pending: boolean) => void;
   onAfterRename: (nextPath: string, locationKind: WorkspaceFileLocationKind) => Promise<void>;
   onAfterDelete: () => Promise<void>;
 }
@@ -62,7 +65,6 @@ function closeWindowSafely(windowHandle: Window | null): void {
   try {
     windowHandle.close();
   } catch {
-    // Ignore close errors.
   }
 }
 
@@ -92,8 +94,6 @@ function openBlobInNewTab(blob: Blob, pendingWindow: Window | null): void {
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    // Best-effort — anchor click may also silently fail in WebView.
-    // We can't verify whether it worked, so no error toast here.
   }
 
   setTimeout(() => {
@@ -101,27 +101,10 @@ function openBlobInNewTab(blob: Blob, pendingWindow: Window | null): void {
   }, 60_000);
 }
 
-/**
- * Copy text content to clipboard — reliable in Office WebView where
- * window.open / blob URLs silently fail.
- */
 async function copyTextToClipboard(text: string, fileName: string): Promise<void> {
-  await navigator.clipboard.writeText(text);
-  showToast(t("files-dialog-actions.toast.copied", { fileName }));
-}
-
-/**
- * Download via data URI — works in WebView where blob URLs may not.
- */
-function downloadViaDataUri(text: string, fileName: string, mimeType: string): void {
-  const dataUri = `data:${mimeType};charset=utf-8,${encodeURIComponent(text)}`;
-  const anchor = document.createElement("a");
-  anchor.href = dataUri;
-  anchor.download = fileName;
-  anchor.style.display = "none";
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+  if (await copyText(text) === "copied") {
+    showToast(t("files-dialog-actions.toast.copied", { fileName }));
+  }
 }
 
 async function editTextFileInDialog(options: {
@@ -135,7 +118,6 @@ async function editTextFileInDialog(options: {
     overlayId: FILES_TEXT_VIEWER_OVERLAY_ID,
     cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--l pi-files-text-viewer",
     restoreFocusOnClose: false,
-    zIndex: NESTED_OVERLAY_Z_INDEX,
   });
   const { header } = createOverlayHeader({
     title: options.file.name,
@@ -260,12 +242,8 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
   const isBuiltIn = isFilesDialogBuiltInDoc(options.file);
 
   if (options.file.kind === "text") {
-    // Built-in docs: use clipboard + data-URI download instead of
-    // window.open / blob URLs which silently fail in the Office WebView.
-    // This add-in always runs inside the Office WebView (loaded via
-    // manifest.xml into Excel's sidebar), so this path covers all
-    // production usage. Dev-server testing in a browser is unaffected
-    // because built-in docs are only available via the workspace.
+    // Built-in docs: copy and download instead of opening a browser tab,
+    // which silently fails in the Office WebView.
     const primaryButton = document.createElement("button");
     primaryButton.type = "button";
     primaryButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-overlay-btn--compact";
@@ -311,10 +289,9 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
           locationKind: options.fileRef.locationKind,
         });
         if (result.text === undefined) throw new Error("Could not read file.");
-        downloadViaDataUri(
-          result.text,
+        saveBlobAsFile(
+          new Blob([result.text], { type: resolveSafeBlobUrlMimeType(options.file.mimeType || "text/plain") }),
           options.file.name,
-          resolveSafeBlobUrlMimeType(options.file.mimeType || "text/plain"),
         );
       })().catch((error: unknown) => {
         showToast(t("files-dialog-actions.toast.downloadFailed", { error: getErrorMessage(error) }));
@@ -323,12 +300,22 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
 
     actions.append(primaryButton, downloadButton);
   } else {
-    // Non-built-in files: use the standard blob URL approach.
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "pi-overlay-btn pi-overlay-btn--primary pi-overlay-btn--compact";
     openButton.textContent = t("files-dialog-actions.open");
     openButton.addEventListener("click", () => {
+      // Excel for Mac's WKWebView cannot open a blob in any window, and a
+      // failed attempt also cancels a download in the same task: save instead.
+      if (isEmbeddedAppleWebView()) {
+        void options.workspace.downloadFile(options.file.path, {
+          locationKind: options.fileRef.locationKind,
+        }).then(
+          () => showToast(t("files-dialog-actions.toast.savedInstead", { fileName: options.file.name })),
+          (error: Error) => showToast(t("files-dialog-actions.toast.openFailed", { error: getErrorMessage(error) })),
+        );
+        return;
+      }
       void openFileInBrowser({
         file: options.file,
         fileRef: options.fileRef,
@@ -384,14 +371,18 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
         return;
       }
 
-      await options.workspace.renameFile(options.file.path, nextPath, {
-        audit: options.auditContext,
-        locationKind: options.fileRef.locationKind,
-      });
+      options.onMutationStateChange(true);
+      try {
+        await options.workspace.renameFile(options.file.path, nextPath, {
+          audit: options.auditContext,
+          locationKind: options.fileRef.locationKind,
+        });
 
-      showToast(t("files-dialog-actions.toast.renamed", { path: nextPath }));
-
-      await options.onAfterRename(nextPath, options.fileRef.locationKind);
+        showToast(t("files-dialog-actions.toast.renamed", { path: nextPath }));
+        await options.onAfterRename(nextPath, options.fileRef.locationKind);
+      } finally {
+        options.onMutationStateChange(false);
+      }
     })().catch((error: unknown) => {
       showToast(t("files-dialog-actions.toast.renameFailed", { error: getErrorMessage(error) }));
     });
@@ -419,14 +410,18 @@ export function createFilesDialogDetailActions(options: CreateFilesDialogDetailA
         return;
       }
 
-      await options.workspace.deleteFile(options.file.path, {
-        audit: options.auditContext,
-        locationKind: options.fileRef.locationKind,
-      });
+      options.onMutationStateChange(true);
+      try {
+        await options.workspace.deleteFile(options.file.path, {
+          audit: options.auditContext,
+          locationKind: options.fileRef.locationKind,
+        });
 
-      showToast(t("files-dialog-actions.toast.deleted", { name: options.file.name }));
-
-      await options.onAfterDelete();
+        showToast(t("files-dialog-actions.toast.deleted", { name: options.file.name }));
+        await options.onAfterDelete();
+      } finally {
+        options.onMutationStateChange(false);
+      }
     })().catch((error: unknown) => {
       showToast(t("files-dialog-actions.toast.deleteFailed", { error: getErrorMessage(error) }));
     });

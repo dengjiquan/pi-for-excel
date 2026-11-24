@@ -20,7 +20,6 @@ import type {
 } from "../src/workbook/recovery-states.ts";
 import {
   createInMemorySettingsStore,
-  findSnapshotById,
   withoutUndefined,
 } from "./fixtures/recovery-log.ts";
 
@@ -444,7 +443,7 @@ void test("chart update can be restored through workbook_history and records aud
   };
   let id = 0;
   const recovery = new WorkbookRecoveryLog({
-    getSettingsStore: () => Promise.resolve(settings),
+    getStore: () => Promise.resolve(settings.recovery),
     getWorkbookContext: () => Promise.resolve(workbookContext),
     now: () => 1_700_000_000_000 + id,
     createId: () => `chart-snapshot-${id += 1}`,
@@ -544,7 +543,7 @@ void test("workbook recovery log persists and restores chart checkpoints", async
   let appliedState: RecoveryChartState | null = null;
 
   const log = new WorkbookRecoveryLog({
-    getSettingsStore: () => Promise.resolve(settingsStore),
+    getStore: () => Promise.resolve(settingsStore.recovery),
     getWorkbookContext: () => Promise.resolve(workbookContext),
     now: () => 1700000000100,
     createId,
@@ -552,8 +551,6 @@ void test("workbook recovery log persists and restores chart checkpoints", async
     applyChartSnapshot: (address, state) => {
       appliedAddress = address;
       appliedState = state;
-      // Simulate a restore that renamed the chart: the post-restore identity
-      // differs from the checkpoint address.
       return Promise.resolve({ state: currentState, address: "Sheet1!Sales (restored)" });
     },
   });
@@ -574,21 +571,20 @@ void test("workbook recovery log persists and restores chart checkpoints", async
   assert.equal(appliedAddress, "Sheet1!Sales");
   assert.deepEqual(withoutUndefined(appliedState), withoutUndefined(restoredState));
 
-  const snapshots = await log.listForCurrentWorkbook(10);
   const inverse = restored.inverseSnapshotId
-    ? findSnapshotById(snapshots, restored.inverseSnapshotId)
+    ? await log.read(restored.inverseSnapshotId)
     : null;
 
   assert.ok(inverse);
   assert.equal(inverse.snapshotKind, "chart_state");
   assert.deepEqual(withoutUndefined(inverse.chartState), withoutUndefined(currentState));
-  // The inverse must live at the post-restore identity so that restoring the
-  // rollback can find the chart after a rename-restore.
   assert.equal(inverse.address, "Sheet1!Sales (restored)");
 });
 
 void test("chart_absent restore can skip inverse snapshot when recreation would be impossible", async () => {
   const settingsStore = createInMemorySettingsStore();
+  const ids: string[] = [];
+  const rangeRestores: string[] = [];
   const workbookContext: WorkbookContext = {
     workbookId: "url_sha256:charts-create-workbook",
     workbookName: "Charts.xlsx",
@@ -602,14 +598,29 @@ void test("chart_absent restore can skip inverse snapshot when recreation would 
   };
 
   const log = new WorkbookRecoveryLog({
-    getSettingsStore: () => Promise.resolve(settingsStore),
+    getStore: () => Promise.resolve(settingsStore.recovery),
     getWorkbookContext: () => Promise.resolve(workbookContext),
-    now: () => 1700000000200,
-    createId: () => "snap-create-chart",
-    applySnapshot: () => Promise.resolve({ values: [[1]], formulas: [[1]] }),
+    now: () => 1700000000200 + ids.length,
+    createId: () => {
+      const id = `snap-${ids.length + 1}`;
+      ids.push(id);
+      return id;
+    },
+    applySnapshot: (address) => {
+      rangeRestores.push(address);
+      return Promise.resolve({ values: [[1]], formulas: [[1]] });
+    },
     applyChartSnapshot: () => Promise.resolve({ state: null, address: "Sheet1!New Chart" }),
   });
 
+  await log.append({
+    toolName: "write_cells",
+    toolCallId: "tc-older-write",
+    address: "Sheet1!A1",
+    changedCount: 1,
+    beforeValues: [["before"]],
+    beforeFormulas: [["before"]],
+  });
   const appended = await log.appendChart({
     toolName: "charts",
     toolCallId: "tc-create-recovery",
@@ -619,8 +630,13 @@ void test("chart_absent restore can skip inverse snapshot when recreation would 
   });
 
   assert.ok(appended);
-  const restored = await log.restore(appended.id);
+  const restored = await log.restoreLatestForCurrentWorkbook();
+  assert.equal(restored.restoredSnapshotId, appended.id);
   assert.equal(restored.inverseSnapshotId, null);
+
+  const next = await log.restoreLatestForCurrentWorkbook();
+  assert.equal(next.address, "Sheet1!A1");
+  assert.deepEqual(rangeRestores, ["Sheet1!A1"]);
 });
 
 void test("chart rename restore round-trips through the inverse address", async () => {
@@ -632,18 +648,14 @@ void test("chart rename restore round-trips through the inverse address", async 
 
   const targetState = createChartState("Sales");
 
-  // Restore the pre-rename checkpoint: chart goes back to "Sales".
   const applied = await withFakeExcel(context, () => applyChartState("Sheet1!Sales Chart", targetState));
 
   assert.equal(chart.name, "Sales");
   assert.ok(applied.state);
   assert.equal(applied.state.kind, "chart_present");
   assert.equal(applied.state.name, "Sales Chart");
-  // Inverse must be addressed at the post-restore identity, not the stale one.
   assert.equal(applied.address, "Sheet1!Sales");
 
-  // Restoring the rollback backup at its recorded address must find the chart
-  // and rename it forward again.
   const rolledBack = await withFakeExcel(context, () => applyChartState(applied.address, applied.state as RecoveryChartState));
 
   assert.equal(chart.name, "Sales Chart");
@@ -663,7 +675,6 @@ void test("chart_absent restore deletes by stable id, surviving rename and name 
     chartId: created.id,
   };
 
-  // The created chart is renamed, and an unrelated chart takes its old name.
   created.name = "Quarterly";
   const impostor = sheet.charts.add("Pie", new FakeRange("D1:E4"));
   impostor.name = "New Chart";
@@ -690,7 +701,6 @@ void test("chart_absent restore fails safely when a stored id cannot be verified
     chartId: survivor.id,
   };
 
-  // Simulate a host that cannot read chart ids during restore.
   const brokenLoad = (path?: string): void => {
     if (typeof path === "string" && path.includes("items/id")) {
       throw new Error("Chart.id is not supported on this host.");
@@ -727,4 +737,3 @@ void test("chart_absent restore with a missing id deletes nothing", async () => 
   assert.equal(survivor.deleted, false, "a different chart holding the name must not be deleted");
   assert.equal(sheet.charts.items.length, 1);
 });
-

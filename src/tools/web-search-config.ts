@@ -1,7 +1,3 @@
-/**
- * Web-search configuration shared by tool + settings UI.
- */
-
 import {
   loadConnectionStoreDocument,
   loadConnectionStoreDocumentForUpdate,
@@ -30,19 +26,17 @@ export interface WebSearchProviderInfo {
   searchEndpoint: string;
   apiKeyLabel: string;
   apiKeyHelp: string;
-  /** When true the provider works without an API key (key is optional for higher limits). */
-  apiKeyOptional?: boolean;
 }
 
 export const WEB_SEARCH_PROVIDER_INFO: Record<WebSearchProvider, WebSearchProviderInfo> = {
   jina: {
     id: "jina",
     title: "Jina Search (default)",
-    shortDescription: "Fast web search API with free tier.",
+    shortDescription: "Fast web search API. Needs a free API key from jina.ai.",
     signupUrl: "https://jina.ai",
     searchEndpoint: "https://s.jina.ai/",
     apiKeyLabel: "Jina API key",
-    apiKeyHelp: "Free tier available at jina.ai.",
+    apiKeyHelp: "Required. Get a free key at jina.ai.",
   },
   firecrawl: {
     id: "firecrawl",
@@ -324,9 +318,6 @@ export async function loadWebSearchProviderConfig(
     fallback: legacyApiKeys,
   });
 
-  // Prefer an explicitly saved provider. Otherwise, if any key-required provider
-  // has a key, infer that provider so existing users aren't silently switched to
-  // the zero-config default after an upgrade.
   const provider = parseProvider(providerRaw)
     ?? (apiKeys.firecrawl ? "firecrawl" : apiKeys.serper ? "serper" : apiKeys.brave ? "brave" : apiKeys.tavily ? "tavily" : DEFAULT_WEB_SEARCH_PROVIDER);
 
@@ -384,11 +375,6 @@ export function getApiKeyForProvider(
   return normalizeOptionalString(config.apiKeys[provider]);
 }
 
-/** Returns true when the provider cannot work without an API key. */
-export function isApiKeyRequired(provider: WebSearchProvider): boolean {
-  return WEB_SEARCH_PROVIDER_INFO[provider].apiKeyOptional !== true;
-}
-
 function hasRepeatedLongSegment(value: string): boolean {
   const minimumSegmentLength = 12;
   const maxSegmentLength = Math.floor(value.length / 2);
@@ -407,14 +393,6 @@ function hasRepeatedLongSegment(value: string): boolean {
   return false;
 }
 
-/**
- * Quick format check for an API key before saving. Returns `null` when the key
- * looks plausible, or a human-readable warning string when it looks wrong.
- *
- * This is intentionally loose — it catches obvious mistakes (empty, whitespace,
- * too short, wrong prefix) without risking false rejections if a provider
- * tweaks their format.
- */
 export function checkApiKeyFormat(provider: WebSearchProvider, apiKey: string): string | null {
   const key = apiKey.trim();
 

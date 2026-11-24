@@ -4,8 +4,8 @@ import { test } from "node:test";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, Usage } from "@earendil-works/pi-ai";
 
-import { commandRegistry, type SlashCommand } from "../src/commands/types.ts";
 import { createActionQueue } from "../src/taskpane/action-queue.ts";
+import { createTabState, type TabActivity } from "../src/taskpane/tab-state.ts";
 import { failOnUnexpectedStream } from "./fail-on-unexpected-stream.ts";
 
 class TestAgent extends Agent {
@@ -72,10 +72,7 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   };
 }
 
-async function waitForCondition(
-  predicate: () => boolean,
-  timeoutMs = 1500,
-): Promise<void> {
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1500): Promise<void> {
   const start = Date.now();
 
   while (!predicate()) {
@@ -86,24 +83,6 @@ async function waitForCondition(
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 5);
     });
-  }
-}
-
-async function withRegisteredCommand(
-  command: SlashCommand,
-  run: () => Promise<void>,
-): Promise<void> {
-  const previous = commandRegistry.get(command.name);
-  commandRegistry.register(command);
-
-  try {
-    await run();
-  } finally {
-    if (previous) {
-      commandRegistry.register(previous);
-    } else {
-      commandRegistry.unregister(command.name);
-    }
   }
 }
 
@@ -146,99 +125,81 @@ void test("queued prompt survives compact replaceMessages and runs after compact
   const compactFinished = createDeferred();
 
   const executionOrder: string[] = [];
-  const busyIndicators: Array<{ label: string | null; hint: string | null }> =
-    [];
-  const queueSnapshots: Array<
-    Array<{ type: "prompt" | "command"; label: string; text: string }>
-  > = [];
+  const activities: Array<{ label: string; hint: string | null } | null> = [];
+  const queueSnapshots: Array<Array<{ type: "prompt" | "command"; label: string; text: string }>> = [];
 
-  await withRegisteredCommand(
-    {
-      name: "compact",
-      description: "compact",
-      source: "builtin",
-      execute: async () => {
-        executionOrder.push("compact:start");
-        compactStarted.resolve();
+  const queue = createActionQueue({
+    agent,
+    autoCompactEnabled: false,
+    runCompact: async () => {
+      executionOrder.push("compact:start");
+      compactStarted.resolve();
 
-        await compactGate.promise;
+      await compactGate.promise;
 
-        // Simulate compaction replacing message history while a prompt is queued.
-        agent.state.messages = [
-          createUserMessage("compaction summary", Date.now()),
-        ];
+      agent.state.messages = [
+        createUserMessage("compaction summary", Date.now()),
+      ];
 
-        executionOrder.push("compact:end");
-        compactFinished.resolve();
+      executionOrder.push("compact:end");
+      compactFinished.resolve();
+    },
+    tab: Object.assign(createTabState(), {
+      setActivity: (activity: TabActivity | null) => {
+        activities.push(activity);
       },
+    }),
+    queueDisplay: {
+      setActionQueue: (items) => {
+        queueSnapshots.push(items.map((item) => ({ ...item })));
+      },
+      drainQueuedMessages: () => [],
+      removeQueuedMessage: () => {},
+      setRowHandlers: () => {},
+      lastEditableRow: () => null,
     },
-    async () => {
-      const queue = createActionQueue({
-        agent,
-        autoCompactEnabled: false,
-        runCompact: async () => {},
-        sidebar: {
-          setBusyIndicator: (label, hint) => {
-            busyIndicators.push({ label, hint: hint ?? null });
-          },
-        },
-        queueDisplay: {
-          setActionQueue: (items) => {
-            queueSnapshots.push(items.map((item) => ({ ...item })));
-          },
-        },
-      });
+  });
 
-      agent.onPrompt = (text) => {
-        executionOrder.push(`prompt:${text}`);
-      };
+  agent.onPrompt = (text) => {
+    executionOrder.push(`prompt:${text}`);
+  };
 
-      queue.enqueueCommand("compact", "");
+  queue.enqueueCommand("compact", "");
 
-      await compactStarted.promise;
-      assert.equal(queue.isBusy(), true);
+  await compactStarted.promise;
+  assert.equal(queue.isBusy(), true);
 
-      queue.enqueuePrompt("after compact");
+  queue.enqueuePrompt("after compact");
 
-      compactGate.resolve();
+  compactGate.resolve();
 
-      await compactFinished.promise;
-      await waitForCondition(
-        () => agent.promptCalls.length === 1 && !queue.isBusy(),
-      );
+  await compactFinished.promise;
+  await waitForCondition(() => agent.promptCalls.length === 1 && !queue.isBusy());
 
-      assert.deepEqual(agent.promptCalls, ["after compact"]);
-      assert.deepEqual(executionOrder, [
-        "compact:start",
-        "compact:end",
-        "prompt:after compact",
-      ]);
+  assert.deepEqual(agent.promptCalls, ["after compact"]);
+  assert.deepEqual(executionOrder, [
+    "compact:start",
+    "compact:end",
+    "prompt:after compact",
+  ]);
 
-      assert.equal(busyIndicators[0]?.label, "Compacting context…");
-      assert.equal(
-        busyIndicators[0]?.hint,
-        "Send messages and the AI will see them after compaction",
-      );
-      assert.equal(busyIndicators[busyIndicators.length - 1]?.label, null);
+  assert.deepEqual(activities[0], {
+    label: "Compacting context…",
+    hint: "Send messages and Pi will see them after compaction",
+  });
+  assert.equal(activities[activities.length - 1], null);
 
-      const queuedPromptWasShown = queueSnapshots.some((snapshot) =>
-        snapshot.some(
-          (item) => item.type === "prompt" && item.text === "after compact",
-        ),
-      );
-      assert.equal(queuedPromptWasShown, true);
-
-      queue.shutdown();
-    },
+  const queuedPromptWasShown = queueSnapshots.some((snapshot) =>
+    snapshot.some((item) => item.type === "prompt" && item.text === "after compact")
   );
+  assert.equal(queuedPromptWasShown, true);
+
+  queue.shutdown();
 });
 
 void test("ordered queue runs compact, prompt, then compact", async () => {
   const agent = new TestAgent();
-  const compactRuns: Array<{
-    start: ReturnType<typeof createDeferred>;
-    gate: ReturnType<typeof createDeferred>;
-  }> = [
+  const compactRuns: Array<{ start: ReturnType<typeof createDeferred>; gate: ReturnType<typeof createDeferred> }> = [
     { start: createDeferred(), gate: createDeferred() },
     { start: createDeferred(), gate: createDeferred() },
   ];
@@ -246,66 +207,48 @@ void test("ordered queue runs compact, prompt, then compact", async () => {
   let compactRunIndex = 0;
   const executionOrder: string[] = [];
 
-  await withRegisteredCommand(
-    {
-      name: "compact",
-      description: "compact",
-      source: "builtin",
-      execute: async () => {
-        const current = compactRunIndex;
-        compactRunIndex += 1;
+  const queue = createActionQueue({
+    agent,
+    autoCompactEnabled: false,
+    runCompact: async () => {
+      const current = compactRunIndex;
+      compactRunIndex += 1;
 
-        executionOrder.push(`compact:${current + 1}:start`);
-        compactRuns[current]?.start.resolve();
-        await compactRuns[current]?.gate.promise;
-        executionOrder.push(`compact:${current + 1}:end`);
-      },
+      executionOrder.push(`compact:${current + 1}:start`);
+      compactRuns[current]?.start.resolve();
+      await compactRuns[current]?.gate.promise;
+      executionOrder.push(`compact:${current + 1}:end`);
     },
-    async () => {
-      const queue = createActionQueue({
-        agent,
-        autoCompactEnabled: false,
-        runCompact: async () => {},
-        sidebar: {
-          setBusyIndicator: () => {
-            // not needed in this test
-          },
-        },
-        queueDisplay: {
-          setActionQueue: () => {
-            // not needed in this test
-          },
-        },
-      });
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null },
+  });
 
-      agent.onPrompt = (text) => {
-        executionOrder.push(`prompt:${text}`);
-      };
+  agent.onPrompt = (text) => {
+    executionOrder.push(`prompt:${text}`);
+  };
 
-      queue.enqueueCommand("compact", "");
-      queue.enqueuePrompt("middle prompt");
-      queue.enqueueCommand("compact", "");
+  queue.enqueueCommand("compact", "");
+  queue.enqueuePrompt("middle prompt");
+  queue.enqueueCommand("compact", "");
 
-      await compactRuns[0].start.promise;
-      compactRuns[0].gate.resolve();
+  await compactRuns[0].start.promise;
+  compactRuns[0].gate.resolve();
 
-      await waitForCondition(() => agent.promptCalls.includes("middle prompt"));
-      await compactRuns[1].start.promise;
-      compactRuns[1].gate.resolve();
+  await waitForCondition(() => agent.promptCalls.includes("middle prompt"));
+  await compactRuns[1].start.promise;
+  compactRuns[1].gate.resolve();
 
-      await waitForCondition(() => !queue.isBusy());
+  await waitForCondition(() => !queue.isBusy());
 
-      assert.deepEqual(executionOrder, [
-        "compact:1:start",
-        "compact:1:end",
-        "prompt:middle prompt",
-        "compact:2:start",
-        "compact:2:end",
-      ]);
+  assert.deepEqual(executionOrder, [
+    "compact:1:start",
+    "compact:1:end",
+    "prompt:middle prompt",
+    "compact:2:start",
+    "compact:2:end",
+  ]);
 
-      queue.shutdown();
-    },
-  );
+  queue.shutdown();
 });
 
 void test("prompt ending in context overflow triggers compact-and-retry once", async () => {
@@ -322,7 +265,6 @@ void test("prompt ending in context overflow triggers compact-and-retry once", a
   };
 
   agent.onPrompt = (text) => {
-    // Simulate a run that ends in a provider context-overflow error.
     agent.state.messages = [
       createUserMessage(text, 1),
       toolResult,
@@ -334,8 +276,7 @@ void test("prompt ending in context overflow triggers compact-and-retry once", a
         model: model.id,
         usage: EMPTY_USAGE,
         stopReason: "error",
-        errorMessage:
-          "Requested token count exceeds the model's maximum context length of 65536 tokens",
+        errorMessage: "Requested token count exceeds the model's maximum context length of 65536 tokens",
         timestamp: 3,
       },
     ];
@@ -347,22 +288,11 @@ void test("prompt ending in context overflow triggers compact-and-retry once", a
     autoCompactEnabled: true,
     runCompact: () => {
       compactRuns += 1;
-      agent.state.messages = [
-        createUserMessage("compaction summary", 4),
-        toolResult,
-      ];
+      agent.state.messages = [createUserMessage("compaction summary", 4), toolResult];
       return Promise.resolve();
     },
-    sidebar: {
-      setBusyIndicator: () => {
-        // no-op
-      },
-    },
-    queueDisplay: {
-      setActionQueue: () => {
-        // no-op
-      },
-    },
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null },
   });
 
   queue.enqueuePrompt("analyze this data");
@@ -371,7 +301,6 @@ void test("prompt ending in context overflow triggers compact-and-retry once", a
 
   assert.equal(compactRuns, 1);
   assert.deepEqual(agent.promptCalls, ["analyze this data"]);
-  // Failed assistant message was removed from the retry context.
   assert.equal(
     agent.state.messages.some((m) => m.role === "assistant"),
     false,
@@ -386,21 +315,51 @@ void test("shutdown uninstalls the mid-turn prepareNextTurn hook", () => {
     agent,
     autoCompactEnabled: true,
     runCompact: async () => {},
-    sidebar: {
-      setBusyIndicator: () => {
-        // no-op
-      },
-    },
-    queueDisplay: {
-      setActionQueue: () => {
-        // no-op
-      },
-    },
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null },
   });
 
   assert.equal(typeof agent.prepareNextTurn, "function");
   queue.shutdown();
   assert.equal(agent.prepareNextTurn, undefined);
+});
+
+void test("a prompt queued while a retry waits for the agent still runs after the retry", async () => {
+  const model = createSmallContextModel();
+  const agent = new TestAgent(model);
+  agent.state.messages = [
+    createUserMessage("first", 1),
+    {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: EMPTY_USAGE,
+      stopReason: "error",
+      errorMessage: "upstream unavailable",
+      timestamp: 2,
+    },
+  ];
+  const idle = createDeferred();
+  agent.onWaitForIdle = () => idle.promise;
+  const queue = createActionQueue({
+    agent,
+    autoCompactEnabled: false,
+    runCompact: async () => {},
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null },
+  });
+
+  assert.equal(queue.retry(), true);
+  queue.enqueuePrompt("second");
+  agent.onWaitForIdle = undefined;
+  idle.resolve();
+
+  await waitForCondition(() => !queue.isBusy());
+  assert.equal(agent.continueCalls, 1);
+  assert.deepEqual(agent.promptCalls, ["second"]);
+  queue.shutdown();
 });
 
 void test("queued prompt preserves pasted images", async () => {
@@ -409,20 +368,14 @@ void test("queued prompt preserves pasted images", async () => {
     agent,
     autoCompactEnabled: false,
     runCompact: async () => {},
-    sidebar: { setBusyIndicator: () => {} },
-    queueDisplay: { setActionQueue: () => {} },
+    tab: createTabState(),
+    queueDisplay: { setActionQueue: () => {}, drainQueuedMessages: () => [], removeQueuedMessage: () => {}, setRowHandlers: () => {}, lastEditableRow: () => null }
   });
-  const image: ImageContent = {
-    type: "image",
-    data: "aGVsbG8=",
-    mimeType: "image/png",
-  };
+  const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
 
   queue.enqueuePrompt("What is in this image?", [image]);
 
-  await waitForCondition(
-    () => agent.promptCalls.length === 1 && !queue.isBusy(),
-  );
+  await waitForCondition(() => agent.promptCalls.length === 1 && !queue.isBusy());
   assert.deepEqual(agent.promptImages, [[image]]);
   queue.shutdown();
 });

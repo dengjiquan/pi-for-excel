@@ -1,18 +1,14 @@
-/**
- * Settings section for custom OpenAI-compatible gateways.
- */
-
 import type { Models } from "@earendil-works/pi-ai";
 import { getAppStorage } from "../../storage/local/app-storage.js";
 
 import {
   DEFAULT_OPENAI_GATEWAY_CONTEXT_WINDOW,
+  DEFAULT_OPENAI_GATEWAY_MAX_TOKENS,
   deleteOpenAiGatewayConfig,
   formatGatewayHeaders,
   listOpenAiGatewayConfigs,
   parseGatewayHeaderText,
   saveOpenAiGatewayConfig,
-  type GatewayApiChoice,
   type OpenAiGatewayConfig,
 } from "../../auth/custom-gateways.js";
 import { requestConfirmationDialog } from "../../ui/confirm-dialog.js";
@@ -20,6 +16,7 @@ import {
   createButton,
   createConfigInput,
   createConfigRow,
+  createToggleRow,
 } from "../../ui/extensions-hub-components.js";
 import { createOverlaySectionTitle } from "../../ui/overlay-dialog.js";
 import { showToast } from "../../ui/toast.js";
@@ -28,10 +25,6 @@ import { t } from "../../language/index.js";
 interface BuildCustomGatewaySectionOptions {
   models?: Pick<Models, "getModels">;
   onProvidersChanged: () => void;
-  /**
-   * Include the section's own title + hint. Defaults to true; the settings
-   * gateway page supplies its own page header instead.
-   */
   includeHeading?: boolean;
 }
 
@@ -93,36 +86,42 @@ function createGatewayCard(args: {
 
   const endpoint = document.createElement("p");
   endpoint.className = "pi-settings-gateway-item__meta";
-  endpoint.textContent = t("custom-gateway.gatewayEndpoint", {
-    url: args.gateway.endpointUrl,
-  });
+  endpoint.textContent = t("custom-gateway.gatewayEndpoint", { url: args.gateway.endpointUrl });
 
   const model = document.createElement("p");
   model.className = "pi-settings-gateway-item__meta";
-  model.textContent = t("custom-gateway.gatewayModel", {
-    id: args.gateway.modelId,
-  });
+  model.textContent = t("custom-gateway.gatewayModel", { id: args.gateway.modelId });
 
   const contextWindow = document.createElement("p");
   contextWindow.className = "pi-settings-gateway-item__meta";
-  contextWindow.textContent = t("custom-gateway.gatewayContextWindow", {
-    tokens: formatTokenCount(args.gateway.contextWindow),
-  });
+  contextWindow.textContent = t("custom-gateway.gatewayContextWindow", { tokens: formatTokenCount(args.gateway.contextWindow) });
+
+  const maxTokens = document.createElement("p");
+  maxTokens.className = "pi-settings-gateway-item__meta";
+  maxTokens.textContent = t("custom-gateway.gatewayMaxTokens", { tokens: formatTokenCount(args.gateway.maxTokens) });
 
   const keyState = document.createElement("p");
   keyState.className = "pi-settings-gateway-item__meta";
-  keyState.textContent =
-    args.gateway.apiKey.length > 0
-      ? t("custom-gateway.gatewayApiKeyConfigured")
-      : t("custom-gateway.gatewayApiKeyNone");
+  keyState.textContent = args.gateway.apiKey.length > 0 ? t("custom-gateway.gatewayApiKeyConfigured") : t("custom-gateway.gatewayApiKeyNone");
 
-  card.append(topRow, endpoint, model, contextWindow, keyState);
+  const connection = document.createElement("p");
+  connection.className = "pi-settings-gateway-item__meta";
+  connection.textContent = args.gateway.connectDirectly
+    ? t("custom-gateway.gatewayConnectionDirect")
+    : t("custom-gateway.gatewayConnectionProxy");
+
+  card.append(topRow, endpoint, model, contextWindow, maxTokens, keyState, connection);
   return card;
+}
+
+export interface CustomGatewaySection {
+  section: HTMLElement;
+  hasUnsavedChanges: () => boolean;
 }
 
 export async function buildCustomGatewaySection(
   options: BuildCustomGatewaySectionOptions,
-): Promise<HTMLElement> {
+): Promise<CustomGatewaySection> {
   const section = document.createElement("section");
   section.className = "pi-overlay-section pi-settings-section";
   section.dataset.settingsAnchor = "custom-gateways";
@@ -157,6 +156,14 @@ export async function buildCustomGatewaySection(
   contextWindowInput.step = "1";
   contextWindowInput.inputMode = "numeric";
 
+  const maxTokensInput = createConfigInput({
+    placeholder: String(DEFAULT_OPENAI_GATEWAY_MAX_TOKENS),
+    type: "number",
+  });
+  maxTokensInput.min = "1";
+  maxTokensInput.step = "1";
+  maxTokensInput.inputMode = "numeric";
+
   const apiKeyInput = createConfigInput({
     placeholder: t("custom-gateway.apiKeyPlaceholder"),
     type: "password",
@@ -181,6 +188,11 @@ export async function buildCustomGatewaySection(
     apiSelect.appendChild(option);
   }
 
+  const connectDirectlyToggle = createToggleRow({
+    label: t("custom-gateway.connectDirectlyLabel"),
+    sublabel: t("custom-gateway.connectDirectlyHint"),
+  });
+
   const errorText = document.createElement("p");
   errorText.className = "pi-overlay-hint pi-overlay-text-warning";
   errorText.hidden = true;
@@ -204,14 +216,16 @@ export async function buildCustomGatewaySection(
     createConfigRow(t("custom-gateway.configLabelName"), nameInput),
     createConfigRow(t("custom-gateway.configLabelEndpoint"), endpointInput),
     createConfigRow(t("custom-gateway.configLabelModel"), modelInput),
-    createConfigRow(t("custom-gateway.configLabelApi"), apiSelect),
-    createConfigRow(
-      t("custom-gateway.configLabelContextWindow"),
-      contextWindowInput,
+    createConfigRow(t("custom-gateway.configLabelContextWindow"), contextWindowInput),
+    createHint(
+      t("custom-gateway.contextWindowHint"),
     ),
-    createHint(t("custom-gateway.contextWindowHint")),
+    createConfigRow(t("custom-gateway.configLabelMaxTokens"), maxTokensInput),
+    createHint(t("custom-gateway.maxTokensHint")),
     createConfigRow(t("custom-gateway.configLabelApiKey"), apiKeyInput),
     createConfigRow(t("custom-gateway.configLabelHeaders"), headersInput),
+    createConfigRow(t("custom-gateway.configLabelApi"), apiSelect),
+    connectDirectlyToggle.root,
     errorText,
     formActions,
   );
@@ -223,6 +237,13 @@ export async function buildCustomGatewaySection(
   const listHost = document.createElement("div");
   listHost.className = "pi-settings-gateway-list";
 
+  let mutation: "idle" | "saving" | "deleting" = "idle";
+  const setMutation = (next: typeof mutation): void => {
+    mutation = next;
+    for (const control of section.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>("input, button, select, textarea")) {
+      control.disabled = next !== "idle";
+    }
+  };
   let editingGatewayId: string | null = null;
   let gateways: OpenAiGatewayConfig[] = [];
 
@@ -237,32 +258,52 @@ export async function buildCustomGatewaySection(
     errorText.textContent = message;
   };
 
+  const readFormValues = (): string => JSON.stringify([
+    nameInput.value,
+    endpointInput.value,
+    modelInput.value,
+    contextWindowInput.value,
+    maxTokensInput.value,
+    apiKeyInput.value,
+    headersInput.value,
+    apiSelect.value,
+    connectDirectlyToggle.input.checked,
+  ]);
+  let savedFormValues = "";
+
   const resetForm = (): void => {
     editingGatewayId = null;
     nameInput.value = "";
     endpointInput.value = "";
     modelInput.value = "";
     contextWindowInput.value = "";
+    maxTokensInput.value = "";
     apiKeyInput.value = "";
     headersInput.value = "";
     apiSelect.value = "auto";
+    connectDirectlyToggle.input.checked = false;
     cancelButton.hidden = true;
     saveButton.textContent = t("custom-gateway.saveGateway");
     setError(null);
+    savedFormValues = readFormValues();
   };
 
   const startEditing = (gateway: OpenAiGatewayConfig): void => {
+    if (mutation !== "idle") return;
     editingGatewayId = gateway.id;
     nameInput.value = gateway.displayName;
     endpointInput.value = gateway.endpointUrl;
     modelInput.value = gateway.modelId;
     contextWindowInput.value = String(gateway.contextWindow);
+    maxTokensInput.value = String(gateway.maxTokens);
     apiKeyInput.value = gateway.apiKey;
     headersInput.value = formatGatewayHeaders(gateway.headers);
     apiSelect.value = gateway.apiMode;
+    connectDirectlyToggle.input.checked = gateway.connectDirectly;
     cancelButton.hidden = false;
     saveButton.textContent = t("custom-gateway-settings.update-gateway");
     setError(null);
+    savedFormValues = readFormValues();
     nameInput.focus();
   };
 
@@ -279,92 +320,93 @@ export async function buildCustomGatewaySection(
     }
 
     for (const gateway of gateways) {
-      listHost.appendChild(
-        createGatewayCard({
-          gateway,
-          onEdit: startEditing,
-          onDelete: (targetGateway) => {
-            void (async () => {
-              try {
-                const confirmed = await requestConfirmationDialog({
-                  title: t("custom-gateway.deleteConfirmTitle"),
-                  message: t("custom-gateway.deleteConfirmMsg", {
-                    name: targetGateway.displayName,
-                  }),
-                  confirmLabel: t("custom-gateway.deleteButton"),
-                  confirmButtonTone: "danger",
-                  restoreFocusOnClose: false,
-                });
+      listHost.appendChild(createGatewayCard({
+        gateway,
+        onEdit: startEditing,
+        onDelete: (targetGateway) => {
+          if (mutation !== "idle") return;
+          setMutation("deleting");
+          void (async () => {
+            try {
+              const confirmed = await requestConfirmationDialog({
+                title: t("custom-gateway.deleteConfirmTitle"),
+                message: t("custom-gateway.deleteConfirmMsg", { name: targetGateway.displayName }),
+                confirmLabel: t("custom-gateway.deleteButton"),
+                confirmButtonTone: "danger",
+                restoreFocusOnClose: false,
+              });
 
-                if (!confirmed) {
-                  return;
-                }
-
-                await deleteOpenAiGatewayConfig(
-                  getAppStorage().customProviders,
-                  targetGateway.id,
-                );
-                await reloadGateways();
-                renderList();
-                options.onProvidersChanged();
-                showToast(
-                  t("custom-gateway.deletedGateway", {
-                    name: targetGateway.displayName,
-                  }),
-                );
-
-                if (editingGatewayId === targetGateway.id) {
-                  resetForm();
-                }
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : String(error);
-                showToast(t("custom-gateway.toast.deleteFailed", { message }));
+              if (!confirmed) {
+                return;
               }
-            })();
-          },
-        }),
-      );
+
+              await deleteOpenAiGatewayConfig(getAppStorage().customProviders, targetGateway.id);
+              await reloadGateways();
+              renderList();
+              options.onProvidersChanged();
+              showToast(t("custom-gateway.deletedGateway", { name: targetGateway.displayName }));
+
+              if (editingGatewayId === targetGateway.id) {
+                resetForm();
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              showToast(t("custom-gateway.toast.deleteFailed", { message }));
+            } finally {
+              setMutation("idle");
+            }
+          })();
+        },
+      }));
     }
   };
 
   cancelButton.addEventListener("click", () => {
-    resetForm();
+    if (mutation === "idle") resetForm();
   });
 
   saveButton.addEventListener("click", () => {
+    if (mutation !== "idle") return;
+    const savingGatewayId = editingGatewayId;
+    setMutation("saving");
     void (async () => {
       setError(null);
-      saveButton.disabled = true;
-      cancelButton.disabled = true;
 
       try {
         const rawContextWindow = contextWindowInput.value.trim();
-        const contextWindow =
-          rawContextWindow.length > 0 ? Number(rawContextWindow) : undefined;
+        const contextWindow = rawContextWindow.length > 0
+          ? Number(rawContextWindow)
+          : undefined;
+        const rawMaxTokens = maxTokensInput.value.trim();
+        const maxTokens = rawMaxTokens.length > 0
+          ? Number(rawMaxTokens)
+          : undefined;
+
         const headers = parseGatewayHeaderText(headersInput.value);
         const hasHeaders = Object.keys(headers).length > 0;
+        const apiChoice =
+          apiSelect.value === "openai-completions" || apiSelect.value === "openai-responses"
+            ? apiSelect.value
+            : "auto";
 
-        const saved = await saveOpenAiGatewayConfig(
-          getAppStorage().customProviders,
-          {
-            ...(editingGatewayId ? { id: editingGatewayId } : {}),
-            displayName: nameInput.value,
-            endpointUrl: endpointInput.value,
-            modelId: modelInput.value,
-            apiKey: apiKeyInput.value,
-            ...(contextWindow !== undefined ? { contextWindow } : {}),
-            ...(hasHeaders ? { headers } : {}),
-            api: apiSelect.value as GatewayApiChoice,
-          },
-          options.models,
-        );
+        const saved = await saveOpenAiGatewayConfig(getAppStorage().customProviders, {
+          ...(savingGatewayId ? { id: savingGatewayId } : {}),
+          displayName: nameInput.value,
+          endpointUrl: endpointInput.value,
+          modelId: modelInput.value,
+          apiKey: apiKeyInput.value,
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
+          ...(maxTokens !== undefined ? { maxTokens } : {}),
+          connectDirectly: connectDirectlyToggle.input.checked,
+          ...(hasHeaders ? { headers } : {}),
+          api: apiChoice,
+        }, options.models);
 
         await reloadGateways();
         renderList();
         options.onProvidersChanged();
         showToast(
-          editingGatewayId
+          savingGatewayId
             ? t("custom-gateway.updatedGateway", { name: saved.displayName })
             : t("custom-gateway.savedGateway", { name: saved.displayName }),
         );
@@ -374,19 +416,19 @@ export async function buildCustomGatewaySection(
         const message = error instanceof Error ? error.message : String(error);
         setError(message);
       } finally {
-        saveButton.disabled = false;
-        cancelButton.disabled = false;
+        setMutation("idle");
       }
     })();
   });
 
   await reloadGateways();
   renderList();
+  savedFormValues = readFormValues();
 
   content.append(formCard, listTitle, listHost);
   if (options.includeHeading !== false) {
     section.append(title, hint);
   }
   section.append(content);
-  return section;
+  return { section, hasUnsavedChanges: () => readFormValues() !== savedFormValues };
 }

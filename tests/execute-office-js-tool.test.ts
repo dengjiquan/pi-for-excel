@@ -2,14 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createExecuteOfficeJsTool } from "../src/tools/execute-office-js.ts";
-import {
-  buildBorderInstructions,
-  normalizeBorderParams,
-} from "../src/tools/format-cells-borders.ts";
-import {
-  applyExcelCellStyle,
-  EXCEL_BUILT_IN_CELL_STYLES,
-} from "../src/tools/format-cells-cell-style.ts";
 
 function firstText(result: { content: Array<{ type: string; text: string }> }): string {
   const block = result.content[0];
@@ -37,7 +29,7 @@ void test("execute_office_js runs code and serializes result", async () => {
   const text = firstText(result);
   assert.match(text, /Executed Office\.js: Recalculate dashboard totals/u);
   assert.match(text, /```json/u);
-  assert.match(text, /"ok": true/u);
+  assert.match(text, /\{"ok":true,"sheet":"Sheet1","changedCells":4\}/u);
 });
 
 void test("execute_office_js blocks nested Excel.run usage", async () => {
@@ -77,42 +69,53 @@ void test("execute_office_js reports non-serializable result payloads", async ()
   assert.match(text, /Result is not JSON-serializable/u);
 });
 
-void test("format_cells border shorthand none is normalized and clears all edges", () => {
-  const borderParams = normalizeBorderParams({
-    borders: "BordersNone",
-  });
+void test("execute_office_js on a protected sheet is an error that names the protection", async () => {
+  const { FakeExcelHost, OfficeError, withFakeExcel } = await import("./fixtures/excel-write-host.ts");
+  const host = new FakeExcelHost(["Sheet1", "Locked"]);
+  host.sheet("Locked").protect();
+  await withFakeExcel(host, async () => {
+    const tool = createExecuteOfficeJsTool({
+      runCode: () => Promise.reject(new OfficeError("AccessDenied", "You cannot perform the requested operation.", "Range.values")),
+    });
+    const result = await tool.execute("ojs-protected", { explanation: "Write to Locked", code: "return 1;" });
 
-  const instructions = buildBorderInstructions(borderParams, {}, undefined);
-
-  assert.deepEqual(borderParams, {
-    shorthand: "none",
-  });
-
-  assert.deepEqual(instructions, {
-    operations: [
-      { edge: "EdgeTop", weight: "none" },
-      { edge: "EdgeBottom", weight: "none" },
-      { edge: "EdgeLeft", weight: "none" },
-      { edge: "EdgeRight", weight: "none" },
-      { edge: "InsideHorizontal", weight: "none" },
-      { edge: "InsideVertical", weight: "none" },
-    ],
-    appliedText: "none borders",
+    assert.equal(result.isError, true);
+    assert.match(firstText(result), /Protected sheet\(s\): "Locked"\. Excel refused the change.*Review → Unprotect Sheet/u);
+    assert.doesNotMatch(firstText(result), /You cannot perform the requested operation/u);
   });
 });
 
-void test("format_cells rejects invalid border values instead of falling back", () => {
-  assert.throws(
-    () => normalizeBorderParams({ borders: "remove-all" }),
-    /Invalid borders/u,
-  );
-});
+void test("execute_office_js after a timeout: the code's later Excel calls never reach Excel, and the result says so", async () => {
+  const { FakeExcelHost, withFakeExcel } = await import("./fixtures/excel-write-host.ts");
+  const { runMutation } = await import("../src/tools/mutation/run-mutation.ts");
+  const host = new FakeExcelHost();
+  await withFakeExcel(host, async () => {
+    const fakeRun = Reflect.get(globalThis, "Excel") as { run: (callback: (context: unknown) => Promise<unknown>) => Promise<unknown> };
+    Reflect.set(globalThis, "Excel", {
+      run: (callback: (context: unknown) => Promise<unknown>) => Promise.race([
+        fakeRun.run(callback),
+        new Promise((_, reject) => { setTimeout(() => {
+          reject(Object.assign(new Error("Excel did not answer within 60 s."), { code: "excel_timeout", outcomeUnknown: true }));
+        }, 30); }),
+      ]),
+    });
+    host.delaySync = { at: 1, ms: 80 };
+    const tool = createExecuteOfficeJsTool({
+      runCode: () => runMutation(async (context) => {
+        const sheet = context.workbook.worksheets.getItem("Sheet1");
+        sheet.getRange("A1").values = [["first"]];
+        await context.sync();
+        sheet.getRange("A2").values = [["second"]];
+        await context.sync();
+        return 1;
+      }),
+    });
+    const result = await tool.execute("ojs-timeout", { explanation: "two steps", code: "return 1;" });
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
 
-void test("format_cells applies an Excel built-in Cell Style to every target area", () => {
-  const ranges = [{ style: "Normal" }, { style: "Normal" }];
-
-  applyExcelCellStyle(ranges, "Input");
-
-  assert.deepEqual(ranges, [{ style: "Input" }, { style: "Input" }]);
-  assert.ok(EXCEL_BUILT_IN_CELL_STYLES.includes("WarningText"));
+    assert.equal(result.isError, true);
+    assert.match(firstText(result), /Pi cannot stop Office\.js code once it runs\. It blocked this code's later Excel calls/u);
+    assert.equal(host.sheet("Sheet1").value("A1"), "first");
+    assert.equal(host.sheet("Sheet1").value("A2"), "");
+  });
 });

@@ -28,12 +28,6 @@ function serializeToolParameters(parameters: unknown): string {
   }
 }
 
-/**
- * Build a stable fingerprint for runtime tool metadata.
- *
- * We intentionally exclude function identity (`execute`) so refresh passes that
- * rebuild tool objects without schema changes can be no-ops.
- */
 export function createRuntimeToolFingerprint(tools: readonly AgentTool[]): string {
   if (tools.length === 0) {
     return "";
@@ -50,12 +44,6 @@ export function createRuntimeToolFingerprint(tools: readonly AgentTool[]): strin
   return hashString(parts.join("\u001e"));
 }
 
-/**
- * Decide whether a runtime refresh pass should assign `agent.state.tools = ...`.
- *
- * We update tools when either metadata changed (fingerprint delta) or when
- * extension-owned tool behavior changed without metadata deltas (revision delta).
- */
 export function shouldApplyRuntimeToolUpdate(args: {
   previousFingerprint: string;
   nextFingerprint: string;
@@ -112,33 +100,6 @@ export function isLikelyCorsErrorMessage(msg: string): boolean {
   if (m.includes("cors requests are not allowed")) return true;
 
   return false;
-}
-
-export function createAsyncCoalescer(task: () => Promise<void>): () => Promise<void> {
-  let inFlight: Promise<void> | null = null;
-  let rerunRequested = false;
-
-  const run = async (): Promise<void> => {
-    do {
-      rerunRequested = false;
-      await task();
-    } while (rerunRequested);
-  };
-
-  return async (): Promise<void> => {
-    if (inFlight) {
-      rerunRequested = true;
-      await inFlight;
-      return;
-    }
-
-    inFlight = run();
-    try {
-      await inFlight;
-    } finally {
-      inFlight = null;
-    }
-  };
 }
 
 export async function awaitCredentialRestoreForStartup(

@@ -1,15 +1,9 @@
-/**
- * Dev-only background verification bridge.
- *
- * Enabled only when the Vite dev build provides both:
- * - VITE_PI_BACKGROUND_VERIFY_URL (for example https://localhost:3157)
- * - VITE_PI_BACKGROUND_VERIFY_TOKEN
- *
- * The taskpane initiates all network traffic to a tokened loopback server.
- * This lets agents verify the real Excel host and real taskpane while Excel
- * remains in the background; no raw GUI input is required.
- */
-
+import { Type } from "typebox";
+import { Value } from "typebox/value";
+import { INTEGRATION_IDS } from "../integrations/catalog.js";
+import { dispatchIntegrationsChanged } from "../integrations/events.js";
+import { setIntegrationEnabledInScope } from "../integrations/store.js";
+import { StringEnum } from "../tools/string-enum.js";
 import { getAppStorage } from "../storage/local/app-storage.js";
 import { getErrorMessage } from "../utils/errors.js";
 import { closeOverlayById } from "../ui/overlay-dialog.js";
@@ -35,6 +29,7 @@ type CoreBridgeCommandType =
   | "clearRange"
   | "workbookWriteProbe"
   | "configureProxy"
+  | "configureIntegration"
   | "selectModel"
   | "submitPrompt"
   | "submitInput"
@@ -70,6 +65,10 @@ interface BridgeStopHandle {
 }
 
 const DEFAULT_POLL_DELAY_MS = 750;
+const configureIntegrationSchema = Type.Object({
+  integrationId: StringEnum(INTEGRATION_IDS),
+  enabled: Type.Boolean(),
+}, { additionalProperties: false });
 
 function envValue(name: keyof ImportMetaEnv): string {
   const value: unknown = import.meta.env[name];
@@ -166,7 +165,7 @@ function serializeError(error: unknown): JsonRecord {
 }
 
 function isRuntimeBusy(runtime: SessionRuntime | null): boolean {
-  return runtime ? runtime.agent.state.isStreaming || runtime.actionQueue.isBusy() : false;
+  return runtime?.actionQueue.isBusy() ?? false;
 }
 
 function latestAssistantSummary(runtime: SessionRuntime): JsonRecord | null {
@@ -429,10 +428,6 @@ async function submitInput(payload: unknown, options: BridgeOptions): Promise<Js
   };
 }
 
-/**
- * Raw host identity sources side by side, so a Save As / reopen can be checked
- * against what the host reports. Dev-only: the values are local paths.
- */
 async function runDocumentIdentityProbe(options: BridgeOptions): Promise<JsonRecord> {
   if (typeof Office === "undefined") {
     throw new Error("Office global is unavailable; the taskpane is not running inside an Office host.");
@@ -812,6 +807,26 @@ async function executeCommand(command: BridgeCommand, options: BridgeOptions): P
       return await workbookWriteProbe(command.payload);
     case "configureProxy":
       return await configureProxy(command.payload);
+    case "configureIntegration": {
+      if (!Value.Check(configureIntegrationSchema, command.payload)) {
+        throw new Error("configureIntegration requires a known integrationId and boolean enabled.");
+      }
+      const runtime = options.getActiveRuntime();
+      if (!runtime || isRuntimeBusy(runtime)) throw new Error("An idle active chat is required.");
+      const { workbookId } = await options.getWorkbookContext();
+      await setIntegrationEnabledInScope({
+        settings: getAppStorage().settings,
+        scope: "session",
+        identifier: runtime.persistence.getSessionId(),
+        integrationId: command.payload.integrationId,
+        enabled: command.payload.enabled,
+        knownIntegrationIds: INTEGRATION_IDS,
+        applyDefaultsWhenUnconfigured: workbookId === null,
+      });
+      dispatchIntegrationsChanged({ reason: "scope" });
+      await runtime.refreshCapabilities();
+      return { configured: true, sessionId: runtime.persistence.getSessionId(), ...command.payload };
+    }
     case "selectModel":
       return await selectModel(command.payload, options);
     case "submitPrompt":

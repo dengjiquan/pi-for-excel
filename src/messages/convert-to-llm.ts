@@ -1,12 +1,6 @@
 /**
- * convertToLlm() for the Excel taskpane agent.
- *
- * Standard conversion (attachments, artifact filtering) is first-party
- * (vendored from pi-web-ui 0.75.3 during the UI ownership migration —
- * see docs/ui-ownership.md), extended with:
- * - custom compaction summary message support
- * - model-facing shaping of older large tool results (scaled to the active
- *   model's context window)
+ * Vendored from @earendil-works/pi-web-ui 0.75.3 (MIT, © Mario Zechner,
+ * https://github.com/badlogic/pi-mono).
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -14,17 +8,12 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { Message } from "@earendil-works/pi-ai";
 
 import { effectiveRecentToolResultsToKeep } from "../context/window-budgets.js";
+import { autoContextToUserMessage } from "./auto-context.js";
+import { interruptedResponseToLlm } from "./interrupted-response.js";
 import { convertAttachments, isArtifactMessage, isUserMessageWithAttachments } from "./attachments.js";
-import { compactionSummaryToUserMessage } from "./compaction.js";
+import { compactionSummaryToUserMessage, getCompactedToolCallIds } from "./compaction.js";
 import { shapeToolResultsForLlm } from "./tool-result-shaping.js";
 
-/**
- * Standard AgentMessage → LLM Message conversion:
- * - artifact messages are UI/session-only and filtered out
- * - user-with-attachments becomes a plain user message with content blocks
- * - system/user/assistant/toolResult pass through
- * - unknown custom roles are dropped
- */
 function convertStandardMessagesToLlm(messages: AgentMessage[]): Message[] {
   const converted: Message[] = [];
 
@@ -71,8 +60,11 @@ export function createConvertToLlm(options: {
     const normalized: AgentMessage[] = [];
 
     for (const message of messages) {
+      if (message.role === "interruptedResponse") {
+        normalized.push(...interruptedResponseToLlm(message));
+        continue;
+      }
       if (message.role === "archivedMessages") {
-        // UI-only history bucket, never sent to the model.
         continue;
       }
 
@@ -81,11 +73,17 @@ export function createConvertToLlm(options: {
         continue;
       }
 
+      if (message.role === "autoContext") {
+        normalized.push(autoContextToUserMessage(message));
+        continue;
+      }
+
       normalized.push(message);
     }
 
     const shaped = shapeToolResultsForLlm(normalized, {
       recentToolResultsToKeep: effectiveRecentToolResultsToKeep(options.getContextWindow?.()),
+      compactToolCallIds: getCompactedToolCallIds(messages),
     });
     return convertStandardMessagesToLlm(shaped);
   };

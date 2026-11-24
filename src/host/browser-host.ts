@@ -1,5 +1,3 @@
-/** Browser/UI-gallery host used when no spreadsheet host is ready. */
-
 import { settingsBackedSessionStorage } from "./session-storage.js";
 import {
   createUnknownWorkbookContext,
@@ -15,6 +13,7 @@ import type {
 export class BrowserHost implements SpreadsheetHost {
   readonly kind = "browser";
   readonly displayName = "Browser";
+  readonly servesOneDocument = false;
   readonly sessionStorage: SpreadsheetHostSessionStorage = settingsBackedSessionStorage;
   readonly documentInstance = null;
 

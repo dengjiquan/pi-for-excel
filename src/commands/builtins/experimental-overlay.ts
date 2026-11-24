@@ -1,7 +1,3 @@
-/**
- * Experimental features section builder.
- */
-
 import {
   getExperimentalFeatureSnapshots,
   setExperimentalFeatureEnabled,
@@ -13,7 +9,6 @@ import { t } from "../../language/index.js";
 
 const ADVANCED_SECURITY_FEATURE_IDS = new Set<ExperimentalFeatureSnapshot["id"]>([
   "remote_extension_urls",
-  "extension_permission_gates",
   "extension_sandbox_runtime",
 ]);
 
@@ -39,9 +34,13 @@ function buildFeatureRow(feature: ExperimentalFeatureSnapshot): HTMLElement {
       setExperimentalFeatureEnabled(feature.id, checked);
 
       const suffix = feature.wiring === "flag-only"
-        ? " (flag saved; feature not wired yet)"
+        ? t("experimental.toast.flagSavedSuffix")
         : "";
-      showToast(`${feature.title}: ${checked ? t("experimental.enabled") : t("experimental.disabled")}${suffix}`);
+      showToast(t("experimental.toast.featureState", {
+        title: feature.title,
+        state: t(checked ? "experimental.state.enabled" : "experimental.state.disabled"),
+        suffix,
+      }));
     },
   });
   toggleRow.root.classList.add("pi-experimental-row__toggle-row");
@@ -117,8 +116,6 @@ export function buildExperimentalFeatureContent(): HTMLDivElement {
       features: experimentalFeatures,
     }));
   }
-
-  // Python bridge configuration is in Extensions → Connections → Bridges.
 
   if (advancedSecurityFeatures.length > 0) {
     content.appendChild(buildFeatureSection({

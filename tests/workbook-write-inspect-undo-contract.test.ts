@@ -45,8 +45,12 @@ function parseRange(address: string): ParsedRange {
   return { startCol: start.col, startRow: start.row, endCol: end.col, endRow: end.row };
 }
 
+const NULL_OBJECT = { isNullObject: true, load: (_properties?: string) => undefined };
+
 class RangeStoreRange {
   readonly address: string;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
   readonly rowCount: number;
   readonly columnCount: number;
   readonly numberFormat: unknown[][];
@@ -57,13 +61,22 @@ class RangeStoreRange {
     this.store = store;
     this.address = address.includes("!") ? address.slice(address.indexOf("!") + 1) : address;
     this.parsed = parseRange(this.address);
+    this.rowIndex = this.parsed.startRow;
+    this.columnIndex = this.parsed.startCol;
     this.rowCount = this.parsed.endRow - this.parsed.startRow + 1;
     this.columnCount = this.parsed.endCol - this.parsed.startCol + 1;
     this.numberFormat = Array.from({ length: this.rowCount }, () =>
       Array.from({ length: this.columnCount }, () => "General"));
   }
 
+  readonly hasSpill = false;
+  readonly dataValidation = { valid: true, load: (_properties?: string): void => {} };
+
   load(_properties?: string | string[]): void {}
+
+  getTables(_fullyContained?: boolean): { items: Array<{ name: string }>; load: (properties?: string) => void } {
+    return { items: [], load: () => {} };
+  }
 
   get values(): unknown[][] {
     return this.store.readGrid(this.parsed, "value");
@@ -74,7 +87,31 @@ class RangeStoreRange {
   }
 
   get formulas(): unknown[][] {
-    return this.store.readGrid(this.parsed, "formula");
+    const values = this.store.readGrid(this.parsed, "value");
+    return this.store.readGrid(this.parsed, "formula")
+      .map((row, r) => row.map((formula, c) => formula === "" ? values[r]?.[c] ?? "" : formula));
+  }
+
+  get formulasR1C1(): unknown[][] {
+    return this.formulas;
+  }
+
+  get text(): string[][] {
+    return this.values.map((row) => row.map((value) => (typeof value === "string" || typeof value === "number" ? String(value) : "")));
+  }
+
+  readonly format = { protection: { locked: true, load: (_properties?: string) => undefined } };
+
+  getMergedAreasOrNullObject(): typeof NULL_OBJECT {
+    return NULL_OBJECT;
+  }
+
+  getSpecialCellsOrNullObject(): typeof NULL_OBJECT {
+    return NULL_OBJECT;
+  }
+
+  getSpillingToRangeOrNullObject(): typeof NULL_OBJECT {
+    return NULL_OBJECT;
   }
 }
 
@@ -87,10 +124,32 @@ class RangeStoreSheet {
     this.store = store;
   }
 
+  readonly isNullObject = false;
+  readonly protection = { protected: false, load: (_properties?: string) => undefined };
+  readonly tables = { items: [] as unknown[], load: (_properties?: string) => undefined };
+  readonly autoFilter = {
+    enabled: false,
+    isDataFiltered: false,
+    load: (_properties?: string) => undefined,
+    getRangeOrNullObject: () => NULL_OBJECT,
+  };
+
   load(_properties?: string | string[]): void {}
 
   getRange(address: string): RangeStoreRange {
     return new RangeStoreRange(this.store, address);
+  }
+
+  getRangeByIndexes(rowIndex: number, columnIndex: number, rowCount: number, columnCount: number): RangeStoreRange {
+    const letter = (col: number): string => String.fromCharCode(65 + col);
+    return new RangeStoreRange(
+      this.store,
+      `${letter(columnIndex)}${rowIndex + 1}:${letter(columnIndex + columnCount - 1)}${rowIndex + rowCount}`,
+    );
+  }
+
+  getUsedRangeOrNullObject(): typeof NULL_OBJECT {
+    return NULL_OBJECT;
   }
 }
 
@@ -99,8 +158,11 @@ class RangeStore {
   readonly sheet = new RangeStoreSheet(this);
   readonly context = {
     workbook: {
+      application: { calculationMode: "Automatic", load: (_properties?: string) => undefined },
       worksheets: {
         getActiveWorksheet: (): RangeStoreSheet => this.sheet,
+        getItemOrNullObject: (name: string): RangeStoreSheet | typeof NULL_OBJECT =>
+          name === this.sheet.name ? this.sheet : NULL_OBJECT,
         getItem: (name: string): RangeStoreSheet => {
           if (name !== this.sheet.name) throw new Error(`Worksheet not found: ${name}`);
           return this.sheet;
@@ -133,7 +195,6 @@ class RangeStore {
         const value = values[rowOffset]?.[colOffset] ?? null;
         const formula = typeof value === "string" && value.startsWith("=") ? value : "";
         this.cells.set(this.key(parsed.startRow + rowOffset, parsed.startCol + colOffset), {
-          // This narrow double does not calculate formulas; Excel/WPS acceptance must verify values.
           value: formula ? null : value,
           formula,
         });
@@ -171,6 +232,17 @@ class RecoveringAuditSettingsStore {
 
   delete(key: string): Promise<void> {
     this.values.delete(key);
+    return Promise.resolve();
+  }
+
+  update<T, U>(key: string, parse: (raw: unknown) => T, change: (current: T) => U | undefined): Promise<void> {
+    if (key === "workbook.change-audit.v1" && this.failAuditRead) {
+      this.failAuditRead = false;
+      return Promise.reject(new Error("seeded audit read failure"));
+    }
+    const next = change(parse(this.values.get(key) ?? null));
+    if (next === undefined) this.values.delete(key);
+    else this.values.set(key, next);
     return Promise.resolve();
   }
 
@@ -224,7 +296,7 @@ void test("committed write succeeds and creates recovery when the initial audit 
   });
   let id = 0;
   const recovery = new WorkbookRecoveryLog({
-    settings: recoverySettings,
+    getStore: () => Promise.resolve(recoverySettings.recovery),
     getWorkbookContext: workbookContext,
     createId: () => `snapshot-${id += 1}`,
     now: () => 1_700_000_000_000 + id,
@@ -279,7 +351,7 @@ void test("committed write succeeds and creates recovery when the initial audit 
 void test("committed write reports recovery unavailable instead of replacing unread checkpoints", async () => {
   const store = new RangeStore();
   const recoverySettings = createRecoveringInMemorySettingsStore();
-  recoverySettings.seed(RECOVERY_SETTING_KEY, {
+  await recoverySettings.seed(RECOVERY_SETTING_KEY, {
     version: 1,
     snapshots: [{
       id: "existing-checkpoint",
@@ -301,7 +373,7 @@ void test("committed write reports recovery unavailable instead of replacing unr
   });
   let id = 0;
   const recovery = new WorkbookRecoveryLog({
-    settings: recoverySettings,
+    getStore: () => Promise.resolve(recoverySettings.recovery),
     getWorkbookContext: workbookContext,
     createId: () => `new-checkpoint-${id += 1}`,
     now: () => 1_700_000_000_000 + id,
@@ -320,7 +392,7 @@ void test("committed write reports recovery unavailable instead of replacing unr
     });
     assert.match(firstText(first), /Written to/u);
     assert.equal(first.details.recovery?.status, "not_available");
-    assert.match(firstText(first), /backup not created/iu);
+    assert.match(firstText(first), /backup could not be saved.*cannot be reverted/iu);
     assert.match(firstText(await read.execute("read-first-write", {
       range: "Sheet1!A1",
       mode: "csv",
@@ -334,12 +406,12 @@ void test("committed write reports recovery unavailable instead of replacing unr
   });
 
   const reloaded = new WorkbookRecoveryLog({
-    settings: recoverySettings,
+    getStore: () => Promise.resolve(recoverySettings.recovery),
     getWorkbookContext: workbookContext,
   });
   const persistedIds = (await reloaded.list()).map((snapshot) => snapshot.id);
   assert.equal(persistedIds.includes("existing-checkpoint"), true);
-  assert.equal(persistedIds.includes("new-checkpoint-1"), true);
+  assert.equal(persistedIds.length, 2);
 });
 
 void test("user can write, inspect, reject overwrite, and restore through workbook tools", async () => {
@@ -353,7 +425,7 @@ void test("user can write, inspect, reject overwrite, and restore through workbo
   });
   let id = 0;
   const recovery = new WorkbookRecoveryLog({
-    getSettingsStore: () => Promise.resolve(settings),
+    getStore: () => Promise.resolve(settings.recovery),
     getWorkbookContext: workbookContext,
     createId: () => `snapshot-${id += 1}`,
     now: () => 1_700_000_000_000 + id,
@@ -386,6 +458,9 @@ void test("user can write, inspect, reject overwrite, and restore through workbo
     assert.equal(initialWrite.details.address, "Sheet1!A1:B2");
     assert.equal(initialWrite.details.changes?.changedCount, 4);
     assert.equal(initialWrite.details.recovery?.status, "checkpoint_created");
+    const backupId = initialWrite.details.recovery?.snapshotId;
+    assert.ok(backupId);
+    assert.ok(firstText(initialWrite).includes(`Backup saved: \`${backupId}\``));
 
     const listed = await history.execute("history-list", { action: "list" });
     assert.equal(listed.details.count, 1);
@@ -419,7 +494,7 @@ void test("user can write, inspect, reject overwrite, and restore through workbo
       snapshot_id: overwriteSnapshotId,
     });
     assert.match(firstText(restored), /Restored backup/u);
-    assert.equal(restored.details.address, "Sheet1!A1:A1");
+    assert.equal(restored.details.address, "Sheet1!A1");
     assert.equal(restored.details.restoredSnapshotId, overwriteSnapshotId);
     const readRestored = await read.execute("read-restored", { range: "Sheet1!A1", mode: "csv" });
     assert.match(firstText(readRestored), /Name/u);
@@ -443,6 +518,22 @@ void test("user can write, inspect, reject overwrite, and restore through workbo
     const formulaRestored = await read.execute("read-formula-restored", { range: "Sheet1!C1" });
     assert.match(firstText(formulaRestored), /C1: =A2\+B2/u);
 
+    const laterWrite = await write.execute("write-later", { start_cell: "Sheet1!D1", values: [[5]] });
+    const laterSnapshotId = laterWrite.details.recovery?.snapshotId;
+    assert.ok(laterSnapshotId);
+    store.applySnapshot("Sheet1!D1", [["user edit"]]);
+    const refused = await history.execute("restore-over-edit", { action: "restore", snapshot_id: laterSnapshotId });
+    assert.equal(refused.details.error, "later_edits");
+    assert.match(firstText(refused), /Sheet1!D1: user edit/u);
+    assert.match(firstText(await read.execute("read-kept-edit", { range: "Sheet1!D1", mode: "csv" })), /user edit/u);
+    const forced = await history.execute("restore-over-edit-confirmed", {
+      action: "restore",
+      snapshot_id: laterSnapshotId,
+      overwrite_later_edits: true,
+    });
+    assert.match(firstText(forced), /Restored backup/u);
+    assert.doesNotMatch(firstText(await read.execute("read-overwritten-edit", { range: "Sheet1!D1", mode: "csv" })), /user edit/u);
+
     const snapshotBeforeWrongWorkbook = overwritten.details.recovery?.snapshotId;
     assert.ok(snapshotBeforeWrongWorkbook);
     workbookId = "url_sha256:other-book";
@@ -461,9 +552,6 @@ void test("user can write, inspect, reject overwrite, and restore through workbo
   assert.equal(auditEntries.some((entry) => entry.toolCallId === "write-blocked" && entry.blocked), true);
 });
 
-// The agent loop converts a thrown tool error into an `isError` tool result, so the
-// public contract for an unsupported host capability is a typed rejection with a
-// stable code, not a success-shaped result carrying error text.
 void test("unsupported workbook capability fails with a typed error the agent loop reports as an error result", async () => {
   const tools = composeCoreToolsForHost((name: CoreToolName) => {
     if (name === "workbook_history") return createWorkbookHistoryTool();

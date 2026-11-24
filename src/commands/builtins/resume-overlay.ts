@@ -1,15 +1,6 @@
-/**
- * Resume-session overlay.
- */
-
 import type { SessionData, SessionMetadata } from "../../storage/local/types.js";
 import { getAppStorage } from "../../storage/local/app-storage.js";
 
-import {
-  getCrossWorkbookResumeConfirmMessage,
-  getResumeTargetLabel,
-  type ResumeDialogTarget,
-} from "./resume-target.js";
 import { formatRelativeDate } from "./overlay-relative-date.js";
 import {
   closeOverlayById,
@@ -51,7 +42,10 @@ function buildResumeListItem(session: SessionMetadata): HTMLButtonElement {
 
   const meta = document.createElement("span");
   meta.className = "pi-resume-item__meta";
-  meta.textContent = t("resume.sessionMeta", { count: session.messageCount || 0, date: formatRelativeDate(session.lastModified) });
+  const date = formatRelativeDate(session.lastModified);
+  meta.textContent = session.messageCount === 1
+    ? t("resume.sessionMetaOne", { date })
+    : t("resume.sessionMeta", { count: session.messageCount || 0, date });
 
   button.append(title, meta);
   return button;
@@ -103,25 +97,18 @@ function buildWorkbookFilterRow(opts: {
   return row;
 }
 
+export type ResumeOpenResult = { outcome: "opened" | "replaced" | "focused"; title: string } | null;
+
 export async function showResumeDialog(opts: {
-  defaultTarget?: ResumeDialogTarget;
-  onOpenInNewTab: (sessionData: SessionData) => Promise<void>;
-  onReplaceCurrent: (sessionData: SessionData) => Promise<void>;
-  getRecentlyClosedItems?: () => readonly ResumeRecentlyClosedItem[];
-  onReopenRecentlyClosed?: (item: ResumeRecentlyClosedItem) => Promise<boolean>;
+  onOpenSession: (sessionData: SessionData) => Promise<ResumeOpenResult>;
+  getRecentlyClosedItems: () => readonly ResumeRecentlyClosedItem[];
+  onReopenRecentlyClosed: (item: ResumeRecentlyClosedItem) => Promise<boolean>;
 }): Promise<void> {
   const storage = getAppStorage();
-  const allSessions = await storage.sessions.getAllMetadata();
+  const allSessions = (await storage.sessions.getAllMetadata())
+    .filter((session) => session.messageCount !== 0);
 
-  const getRecentlyClosedItems = (): ResumeRecentlyClosedItem[] => {
-    if (!opts.getRecentlyClosedItems) {
-      return [];
-    }
-
-    return [...opts.getRecentlyClosedItems()];
-  };
-
-  if (allSessions.length === 0 && getRecentlyClosedItems().length === 0) {
+  if (allSessions.length === 0 && opts.getRecentlyClosedItems().length === 0) {
     showToast(t("resume.noPreviousSessions"));
     return;
   }
@@ -146,13 +133,14 @@ export async function showResumeDialog(opts: {
   }
 
   let showAllWorkbooks = workbookId === null;
-  let selectedTarget: ResumeDialogTarget = opts.defaultTarget ?? "new_tab";
 
   const dialog = createOverlayDialog({
     overlayId: RESUME_OVERLAY_ID,
     cardClassName: "pi-welcome-card pi-overlay-card pi-overlay-card--m pi-resume-dialog",
   });
 
+  let disposed = false;
+  dialog.addCleanup(() => { disposed = true; });
   const closeOverlay = dialog.close;
 
   const { header } = createOverlayHeader({
@@ -161,22 +149,6 @@ export async function showResumeDialog(opts: {
     title: t("resume.title"),
     subtitle: t("resume.subtitle"),
   });
-
-  const targetControls = document.createElement("div");
-  targetControls.className = "pi-resume-target-controls";
-
-  const openInNewTabButton = document.createElement("button");
-  openInNewTabButton.type = "button";
-  openInNewTabButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-resume-target-btn";
-  openInNewTabButton.textContent = t("resume.openInNewTab");
-
-  const replaceCurrentButton = document.createElement("button");
-  replaceCurrentButton.type = "button";
-  replaceCurrentButton.className = "pi-overlay-btn pi-overlay-btn--ghost pi-resume-target-btn";
-  replaceCurrentButton.textContent = t("resume.replaceCurrent");
-
-  const targetHint = document.createElement("div");
-  targetHint.className = "pi-resume-target-hint";
 
   const body = document.createElement("div");
   body.className = "pi-overlay-body pi-resume-body";
@@ -212,31 +184,7 @@ export async function showResumeDialog(opts: {
   savedSection.append(savedTitle, list);
   body.append(recentSection, savedSection);
 
-  const syncTargetButtons = () => {
-    const isNewTab = selectedTarget === "new_tab";
-
-    openInNewTabButton.classList.toggle("is-active", isNewTab);
-    replaceCurrentButton.classList.toggle("is-active", !isNewTab);
-
-    openInNewTabButton.setAttribute("aria-pressed", String(isNewTab));
-    replaceCurrentButton.setAttribute("aria-pressed", String(!isNewTab));
-    targetHint.textContent = t("resume.defaultActionHint", { action: getResumeTargetLabel(selectedTarget) });
-  };
-
-  openInNewTabButton.addEventListener("click", () => {
-    selectedTarget = "new_tab";
-    syncTargetButtons();
-  });
-
-  replaceCurrentButton.addEventListener("click", () => {
-    selectedTarget = "replace_current";
-    syncTargetButtons();
-  });
-
-  targetControls.append(openInNewTabButton, replaceCurrentButton);
-
-  dialog.card.append(header, targetControls, targetHint);
-  syncTargetButtons();
+  dialog.card.append(header);
 
   if (workbookId) {
     dialog.card.appendChild(
@@ -267,7 +215,7 @@ export async function showResumeDialog(opts: {
   };
 
   const getVisibleRecentlyClosed = (): ResumeRecentlyClosedItem[] => {
-    const items = getRecentlyClosedItems();
+    const items = [...opts.getRecentlyClosedItems()];
     if (showAllWorkbooks || workbookId === null) {
       return items;
     }
@@ -276,22 +224,6 @@ export async function showResumeDialog(opts: {
   };
 
   let recentlyClosedById = new Map<string, ResumeRecentlyClosedItem>();
-
-  const reopenRecentlyClosedEntry = async (item: ResumeRecentlyClosedItem): Promise<boolean> => {
-    if (opts.onReopenRecentlyClosed) {
-      return opts.onReopenRecentlyClosed(item);
-    }
-
-    const sessionData = await storage.sessions.loadSession(item.sessionId);
-    if (!sessionData) {
-      showToast(t("resume.couldNotReopen"));
-      return false;
-    }
-
-    await opts.onOpenInNewTab(sessionData);
-    showToast(t("resume.toast.reopened", { title: sessionData.title || t("session.untitled") }));
-    return true;
-  };
 
   const renderLists = (): void => {
     const sessions = getVisibleSessions().slice(0, 30);
@@ -326,8 +258,8 @@ export async function showResumeDialog(opts: {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
 
-    const item = target.closest<HTMLElement>(".pi-resume-item");
-    if (!item) return;
+    const item = target.closest<HTMLButtonElement>(".pi-resume-item");
+    if (!item || item.disabled || disposed) return;
 
     const id = item.dataset.id;
     if (!id) return;
@@ -337,64 +269,67 @@ export async function showResumeDialog(opts: {
       ? RESUME_ITEM_KIND_RECENTLY_CLOSED
       : RESUME_ITEM_KIND_SESSION;
 
+    const items = dialog.overlay.querySelectorAll<HTMLButtonElement>(".pi-resume-item");
+    for (const button of items) button.disabled = true;
+    dialog.card.setAttribute("aria-busy", "true");
     void (async () => {
-      if (kind === RESUME_ITEM_KIND_RECENTLY_CLOSED) {
-        const recentId = item.dataset.recentId;
-        if (!recentId) {
-          showToast(t("resume.sessionNotInRecentlyClosed"));
-          renderLists();
+      try {
+        if (kind === RESUME_ITEM_KIND_RECENTLY_CLOSED) {
+          const recentId = item.dataset.recentId;
+          const recentEntry = recentId ? recentlyClosedById.get(recentId) : undefined;
+          if (!recentEntry) {
+            showToast(t("resume.sessionNotInRecentlyClosed"));
+            renderLists();
+            return;
+          }
+
+          const reopened = await opts.onReopenRecentlyClosed(recentEntry);
+          if (disposed) return;
+          if (reopened) closeOverlay();
+          else renderLists();
           return;
         }
 
-        const recentEntry = recentlyClosedById.get(recentId);
-        if (!recentEntry) {
-          showToast(t("resume.sessionNotInRecentlyClosed"));
-          renderLists();
-          return;
+        if (workbookId) {
+          const linkedWorkbookId = await getSessionWorkbookId(storage.settings, id);
+          if (disposed) return;
+          if (linkedWorkbookId && linkedWorkbookId !== workbookId) {
+            const proceed = await requestConfirmationDialog({
+              title: t("resume.confirm.anotherWorkbookTitle"),
+              message: t("resume.crossWorkbookNewTab"),
+              confirmLabel: t("resume.confirm.resumeAnyway"),
+              cancelLabel: t("confirm.cancel"),
+              restoreFocusOnClose: false,
+            });
+            if (!proceed || disposed) return;
+          }
         }
 
-        const reopened = await reopenRecentlyClosedEntry(recentEntry);
-        if (reopened) {
+        const sessionData = await storage.sessions.loadSession(id);
+        if (disposed) return;
+        if (!sessionData) {
+          showToast(t("resume.sessionNotFound"));
           closeOverlay();
           return;
         }
 
-        renderLists();
-        return;
-      }
+        const opened = await opts.onOpenSession(sessionData);
+        if (!opened || disposed) return;
 
-      const targetMode = selectedTarget;
-
-      if (workbookId) {
-        const linkedWorkbookId = await getSessionWorkbookId(storage.settings, id);
-        if (linkedWorkbookId && linkedWorkbookId !== workbookId) {
-          const proceed = await requestConfirmationDialog({
-            title: t("resume.confirm.anotherWorkbookTitle"),
-            message: getCrossWorkbookResumeConfirmMessage(targetMode),
-            confirmLabel: t("resume.confirm.resumeAnyway"),
-            cancelLabel: t("confirm.cancel"),
-            restoreFocusOnClose: false,
-          });
-          if (!proceed) return;
-        }
-      }
-
-      const sessionData = await storage.sessions.loadSession(id);
-      if (!sessionData) {
-        showToast(t("resume.sessionNotFound"));
         closeOverlay();
-        return;
+        if (opened.outcome === "focused") {
+          showToast(t("init.alreadyOpen", { title: opened.title }));
+          return;
+        }
+        showToast(opened.outcome === "replaced"
+          ? t("resume.toast.resumedCurrent", { title: opened.title })
+          : t("resume.toast.resumedNew", { title: opened.title }));
+      } catch {
+        if (!disposed) showToast(t("init.couldNotReopenSession"));
+      } finally {
+        for (const button of items) button.disabled = false;
+        dialog.card.removeAttribute("aria-busy");
       }
-
-      if (targetMode === "replace_current") {
-        await opts.onReplaceCurrent(sessionData);
-      } else {
-        await opts.onOpenInNewTab(sessionData);
-      }
-
-      closeOverlay();
-      const resumedMode = targetMode === "replace_current" ? "current tab" : "new tab";
-      showToast(t("resume.toast.resumedIn", { mode: resumedMode, title: sessionData.title || t("session.untitled") }));
     })();
   });
 

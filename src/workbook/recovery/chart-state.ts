@@ -1,6 +1,5 @@
-/** Chart-state capture/apply for workbook recovery snapshots. */
-
 import { excelRun } from "../../excel/helpers.js";
+import { runMutation } from "../../tools/mutation/run-mutation.js";
 import { cloneRecoveryChartState } from "./clone.js";
 import type {
   RecoveryChartApplyResult,
@@ -144,35 +143,37 @@ async function findChartByName(
   return match;
 }
 
-/**
- * Locate a chart by its stable Office.js id across all sheets. Rename-proof:
- * the id survives chart renames, so this never confuses the target with an
- * unrelated chart that reused its name. Throws when the host cannot load
- * chart ids; callers must fail safely rather than degrade to name matching
- * (name matching is reserved for legacy states with no captured id).
- */
+type ChartIdLookup =
+  | { kind: "found"; target: ChartTarget }
+  | { kind: "not-found" }
+  | { kind: "ids-unavailable" };
+
 async function findChartById(
   context: Excel.RequestContext,
   chartId: string,
-): Promise<ChartTarget | null> {
+): Promise<ChartIdLookup> {
   const sheets = context.workbook.worksheets;
-  sheets.load("items/name");
-  await context.sync();
+  try {
+    sheets.load("items/name");
+    await context.sync();
 
-  for (const sheet of sheets.items) {
-    sheet.charts.load("items/id");
+    for (const sheet of sheets.items) {
+      sheet.charts.load("items/id");
+    }
+    await context.sync();
+  } catch {
+    return { kind: "ids-unavailable" };
   }
-  await context.sync();
 
   for (const sheet of sheets.items) {
     for (const chart of sheet.charts.items) {
       if (chart.id === chartId) {
-        return { sheet, chart };
+        return { kind: "found", target: { sheet, chart } };
       }
     }
   }
 
-  return null;
+  return { kind: "not-found" };
 }
 
 async function findChartByNameOrNull(
@@ -283,35 +284,31 @@ export async function applyChartState(
   address: string,
   targetState: RecoveryChartState,
 ): Promise<RecoveryChartApplyResult> {
-  return excelRun<RecoveryChartApplyResult>(async (context) => {
+  return runMutation<RecoveryChartApplyResult>(async (context) => {
     const parsedAddress = parseQualifiedChartName(address);
     const currentSheetName = parsedAddress.sheetName ?? targetState.sheetName;
     const currentChartName = parsedAddress.chartName || targetState.name;
 
     if (targetState.kind === "chart_absent") {
       if (targetState.chartId) {
-        let target: ChartTarget | null;
-        try {
-          target = await findChartById(context, targetState.chartId);
-        } catch {
-          // The id was captured at create time, so a host that cannot read
-          // ids now is anomalous. Never degrade to mutable-name deletion —
-          // that is exactly the wrong-chart risk the id exists to prevent.
-          throw new Error(
-            `Could not verify the created chart's identity by id; nothing was deleted. ` +
-            `Delete chart "${currentChartName}" manually if it still exists.`,
-          );
-        }
-
-        if (target) {
-          target.chart.delete();
-          await context.sync();
+        const lookup = await findChartById(context, targetState.chartId);
+        switch (lookup.kind) {
+          case "ids-unavailable":
+            throw new Error(
+              `Could not verify the created chart's identity by id; nothing was deleted. ` +
+              `Delete chart "${currentChartName}" manually if it still exists.`,
+            );
+          case "found":
+            lookup.target.chart.delete();
+            await context.sync();
+            break;
+          case "not-found":
+            break;
         }
 
         return { state: null, address };
       }
 
-      // Legacy states without a captured id: unique-name match only.
       const target = await findChartByNameOrNull(context, currentChartName, currentSheetName);
       if (target) {
         target.chart.delete();
@@ -334,8 +331,6 @@ export async function applyChartState(
     applyChartPresentState(target.chart, targetState);
     await context.sync();
 
-    // The restore may have renamed the chart back to targetState.name, so the
-    // inverse snapshot must be addressed at the post-restore identity.
     return {
       state: cloneRecoveryChartState(currentState),
       address: chartAddress(currentState.sheetName, targetState.name),

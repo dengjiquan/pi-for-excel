@@ -85,7 +85,6 @@ function parseAuthorizationInput(input: string): ParsedAuthorizationInput {
       url.searchParams.get("state"),
     );
   } catch {
-    // not a URL
   }
 
   if (value.includes("#")) {
@@ -130,9 +129,10 @@ function parseTokenPayload(payload: unknown): TokenPayload | null {
   return tokenPayload;
 }
 
-async function exchangeAuthorizationCode(code: string, verifier: string): Promise<TokenPayload> {
+async function exchangeAuthorizationCode(code: string, verifier: string, signal?: AbortSignal): Promise<TokenPayload> {
   const response = await fetch(TOKEN_URL, {
     method: "POST",
+    signal: signal ?? null,
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
     },
@@ -237,17 +237,6 @@ export function isOpenAICodexCredentialRefreshRequired(error: unknown): boolean 
 
 const REQUIRED_SCOPES = SCOPE.split(" ");
 
-/**
- * Check whether the access token JWT itself proves the required scopes were
- * granted (`scp` array or space-delimited `scope`/`scp` string claim).
- *
- * Credentials imported from pi's `auth.json` (via the dev-only `/__pi-auth`
- * endpoint) or restored from older storage never carry the
- * `codexOAuthVersion`/`scopes` marker fields — those are only written by this
- * module's own login/refresh flows. Without this check, every externally
- * sourced Codex credential would be rejected as stale even when the
- * underlying grant already includes the connector scopes.
- */
 function accessTokenHasRequiredScopes(accessToken: unknown): boolean {
   if (typeof accessToken !== "string") {
     return false;
@@ -328,6 +317,7 @@ export async function loginOpenAICodexInBrowser(
   callbacks.onProgress?.("Preparing OpenAI login…");
   const flow = await createAuthorizationFlow();
 
+  callbacks.signal?.throwIfAborted();
   callbacks.onAuth({
     url: flow.url,
     instructions:
@@ -345,6 +335,7 @@ export async function loginOpenAICodexInBrowser(
     placeholder: "http://localhost:1455/auth/callback?code=...&state=...",
   });
 
+  callbacks.signal?.throwIfAborted();
   const parsed = parseAuthorizationInput(input);
   if (parsed.state && parsed.state !== flow.state) {
     throw new Error("OpenAI login failed: OAuth state mismatch");
@@ -355,7 +346,9 @@ export async function loginOpenAICodexInBrowser(
   }
 
   callbacks.onProgress?.("Exchanging code for tokens…");
-  const tokens = await exchangeAuthorizationCode(parsed.code, flow.verifier);
+  callbacks.signal?.throwIfAborted();
+  const tokens = await exchangeAuthorizationCode(parsed.code, flow.verifier, callbacks.signal);
+  callbacks.signal?.throwIfAborted();
 
   const accountId = getAccountId(tokens.accessToken);
   if (!accountId) {

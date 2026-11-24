@@ -1,10 +1,6 @@
-/* ── Settings shell (navigable page stack) ─────────────────────────
-   Shell chrome: header with back/title/close, scrollable body, sticky
-   footer. Row primitives: groups, nav rows, control rows, segmented
-   control. See src/ui/settings-shell.ts and src/ui/settings-rows.ts. */
-
 .pi-set-shell {
-  max-height: 82vh;
+  height: min(680px, 86vh);
+  max-height: 86vh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -135,16 +131,11 @@
   padding-top: 10px;
 }
 
-/* ── Page-specific adjustments ── */
-
-/* Rules page: the shell body already scrolls, so the conventions editor
-   must not introduce a nested scroll region. */
 .pi-conventions-container--page {
   max-height: none;
   overflow-y: visible;
 }
 
-/* Rules page footer: counter on the left, Cancel/Save on the right. */
 .pi-rules-page__footer {
   margin-top: 0;
   flex-direction: row;
@@ -152,8 +143,6 @@
   justify-content: space-between;
   gap: 10px;
 }
-
-/* ── Groups ── */
 
 .pi-set-group {
   display: flex;
@@ -166,7 +155,7 @@
   padding: 0 2px;
   font-family: var(--font-sans);
   font-size: var(--text-xs);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--muted-foreground);
@@ -184,8 +173,6 @@
 .pi-set-group__list > * + * {
   border-top: 1px solid var(--alpha-6);
 }
-
-/* ── Rows ── */
 
 .pi-set-row {
   display: flex;
@@ -255,8 +242,6 @@
 }
 
 .pi-set-row__value {
-  /* Keep short value previews ("2 connected", "On") intact; the label
-     column truncates instead. */
   flex-shrink: 0;
   max-width: 45%;
   font-size: var(--text-sm);
@@ -299,13 +284,15 @@
   outline: none;
 }
 
+.dark .pi-set-row__select {
+  background: var(--muted);
+}
+
 .pi-set-row__select:focus,
 .pi-set-row__select:focus-visible {
   border-color: var(--green-alpha-25);
   box-shadow: 0 0 0 2px var(--pi-green-lighter);
 }
-
-/* ── Segmented control ── */
 
 .pi-set-segmented {
   display: flex;

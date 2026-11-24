@@ -1,11 +1,9 @@
-/**
- * skills — list/read bundled Agent Skills (SKILL.md), with optional external discovery.
- */
-
 import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
 import { filterAgentSkillsByEnabledState } from "../skills/activation-store.js";
+import { t } from "../language/index.js";
+import { approveGuidanceChange, showGuidanceUndo, type GuidanceChangeDependencies } from "./guidance-change.js";
 import type { AgentSkillDefinition } from "../skills/types.js";
 import type { SkillReadCache } from "../skills/read-cache.js";
 import type {
@@ -16,6 +14,7 @@ import type {
   SkillsToolDetails,
   SkillsUninstallDetails,
 } from "./tool-details.js";
+import { isStop } from "./tool-stopped.js";
 
 const schema = Type.Object({
   action: Type.Union([
@@ -70,6 +69,14 @@ async function defaultLoadExternalSkills(): Promise<AgentSkillDefinition[]> {
   return loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
 }
 
+async function defaultLoadInstalledSkills(): Promise<AgentSkillDefinition[]> {
+  const [{ getFilesWorkspace }, { loadExternalAgentSkillsFromWorkspace }] = await Promise.all([
+    import("../files/workspace.js"),
+    import("../skills/external-store.js"),
+  ]);
+  return loadExternalAgentSkillsFromWorkspace(getFilesWorkspace());
+}
+
 async function defaultLoadDisabledSkillNames(): Promise<Set<string>> {
   if (typeof window === "undefined") {
     return new Set();
@@ -104,12 +111,13 @@ async function defaultDispatchSkillsChanged(reason: "catalog" | "activation"): P
   dispatchSkillsChanged({ reason });
 }
 
-export interface SkillsToolDependencies {
+export interface SkillsToolDependencies extends GuidanceChangeDependencies {
   getSessionId?: () => string | null;
   readCache?: SkillReadCache;
   catalog?: SkillsToolCatalog;
   isExternalDiscoveryEnabled?: () => boolean | Promise<boolean>;
   loadExternalSkills?: () => Promise<AgentSkillDefinition[]>;
+  loadInstalledSkills?: () => Promise<AgentSkillDefinition[]>;
   loadDisabledSkillNames?: () => Promise<Set<string>>;
   installExternalSkill?: (args: { name: string; markdown: string }) => Promise<{ name: string; location: string }>;
   uninstallExternalSkill?: (args: { name: string }) => Promise<boolean>;
@@ -294,10 +302,11 @@ export function createSkillsTool(
       "List/read Agent Skills (SKILL.md), and install/uninstall external skills. "
       + "Use this to load or manage task-specific workflows on demand.",
     parameters: schema,
-    execute: async (_toolCallId: string, params: Params): Promise<AgentToolResult<SkillsToolDetails>> => {
+    execute: async (_toolCallId: string, params: Params, signal: AbortSignal | undefined): Promise<AgentToolResult<SkillsToolDetails>> => {
       const catalog = dependencies.catalog ?? await getDefaultCatalog();
       const isExternalDiscoveryEnabled = dependencies.isExternalDiscoveryEnabled ?? defaultIsExternalDiscoveryEnabled;
       const loadExternalSkills = dependencies.loadExternalSkills ?? defaultLoadExternalSkills;
+      const loadInstalledSkills = dependencies.loadInstalledSkills ?? dependencies.loadExternalSkills ?? defaultLoadInstalledSkills;
       const loadDisabledSkillNames = dependencies.loadDisabledSkillNames ?? defaultLoadDisabledSkillNames;
       const installExternalSkill = dependencies.installExternalSkill ?? defaultInstallExternalSkill;
       const uninstallExternalSkill = dependencies.uninstallExternalSkill ?? defaultUninstallExternalSkill;
@@ -352,6 +361,11 @@ export function createSkillsTool(
         }
 
         try {
+          const previous = (await loadInstalledSkills()).filter((skill) =>
+            skill.name.toLowerCase() === requestedName.toLowerCase()
+            && skill.location.startsWith("skills/external/"));
+          await approveGuidanceChange(dependencies, "skills", t("guidance.skills.installPreview", { name: requestedName, text: markdown }), signal);
+          signal?.throwIfAborted();
           const installed = await installExternalSkill({
             name: requestedName,
             markdown,
@@ -359,6 +373,14 @@ export function createSkillsTool(
 
           readCache?.clearAll();
           await dispatchSkillsChanged("catalog");
+          showGuidanceUndo(t("guidance.skills.installed", { name: installed.name }), async () => {
+            const latest = (await loadInstalledSkills()).find((skill) => skill.location === installed.location);
+            if (latest?.markdown !== markdown) throw new Error("Skill changed since this update.");
+            await uninstallExternalSkill({ name: installed.name });
+            for (const skill of previous) await installExternalSkill({ name: skill.name, markdown: skill.markdown });
+            readCache?.clearAll();
+            await dispatchSkillsChanged("catalog");
+          });
 
           const text = `Installed external skill: \`${installed.name}\` (${installed.location}).`;
           return {
@@ -369,6 +391,7 @@ export function createSkillsTool(
             }),
           };
         } catch (error) {
+          if (isStop(error, signal)) throw error;
           const reason = error instanceof Error ? error.message : String(error);
           const message = `Failed to install skill \`${requestedName}\`: ${reason}`;
           return {
@@ -386,11 +409,22 @@ export function createSkillsTool(
 
       if (params.action === "uninstall") {
         try {
+          const previous = (await loadInstalledSkills()).filter((skill) =>
+            skill.name.toLowerCase() === requestedName.toLowerCase()
+            && skill.location.startsWith("skills/external/"));
+          await approveGuidanceChange(dependencies, "skills", t("guidance.skills.uninstallPreview", { name: requestedName, text: previous.map((skill) => skill.markdown).join("\n\n") }), signal);
+          signal?.throwIfAborted();
           const removed = await uninstallExternalSkill({ name: requestedName });
 
           if (removed) {
             readCache?.clearAll();
             await dispatchSkillsChanged("catalog");
+            showGuidanceUndo(t("guidance.skills.uninstalled", { name: requestedName }), async () => {
+              if ((await loadInstalledSkills()).some((skill) => skill.name.toLowerCase() === requestedName.toLowerCase())) throw new Error("Skill changed since this update.");
+              for (const skill of previous) await installExternalSkill({ name: skill.name, markdown: skill.markdown });
+              readCache?.clearAll();
+              await dispatchSkillsChanged("catalog");
+            });
           }
 
           const text = removed
@@ -405,6 +439,7 @@ export function createSkillsTool(
             }),
           };
         } catch (error) {
+          if (isStop(error, signal)) throw error;
           const reason = error instanceof Error ? error.message : String(error);
           const message = `Failed to uninstall skill \`${requestedName}\`: ${reason}`;
           return {

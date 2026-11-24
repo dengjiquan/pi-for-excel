@@ -41,7 +41,6 @@ class MemoryStorageBackend implements StorageBackend {
 
   get<T = unknown>(storeName: string, key: string): Promise<T | null> {
     const value = this.store(storeName).get(key);
-    // This boundary mirrors IndexedDB: callers own the requested persisted type.
     return Promise.resolve(value === undefined ? null : structuredClone(value) as T);
   }
 
@@ -74,7 +73,6 @@ class MemoryStorageBackend implements StorageBackend {
         ? rightModified.localeCompare(leftModified)
         : leftModified.localeCompare(rightModified);
     });
-    // This boundary mirrors IndexedDB: callers own the requested persisted type.
     return Promise.resolve(values as T[]);
   }
 
@@ -162,7 +160,7 @@ async function createRuntime(
     agent,
     sessions,
     settings,
-    models,
+    resolveModel: (persisted) => models.getModel(persisted.provider, persisted.id),
     autoRestoreLatest,
     spreadsheetHost: {
       getWorkbookContext: () => workbookContextError
@@ -193,7 +191,10 @@ async function promptAndWaitForSave(runtime: RuntimeHarness, prompt: string): Pr
 
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const saved = await runtime.sessions.loadSession(sessionId);
-    if (saved?.messages.length === 2) return sessionId;
+    if (saved?.messages.length === 2) {
+      await runtime.controller.saveSession();
+      return sessionId;
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
 
@@ -398,10 +399,11 @@ void test("database identity and persisted store/key formats stay stable", async
   assert.equal(config.dbName, APP_STORAGE_DATABASE_NAME);
   assert.equal(APP_STORAGE_DATABASE_NAME, "pi-for-excel");
   assert.equal(config.version, APP_STORAGE_DATABASE_VERSION);
-  assert.equal(APP_STORAGE_DATABASE_VERSION, 2);
+  assert.equal(APP_STORAGE_DATABASE_VERSION, 3);
   assert.deepEqual(
     config.stores.map((store) => store.name),
-    ["settings", "provider-keys", "sessions", "sessions-metadata", "custom-providers", "model-catalogs"],
+    ["settings", "provider-keys", "sessions", "sessions-metadata", "custom-providers", "model-catalogs",
+      "recovery-metadata", "recovery-payloads", "recovery-state"],
   );
   assert.deepEqual(config.stores.find((store) => store.name === "sessions"), {
     name: "sessions",

@@ -1,13 +1,7 @@
-/**
- * Escape-key guard helpers.
- *
- * When transient UI (menus, popovers, dialogs, overlays) is open,
- * Esc should dismiss that UI instead of aborting the active agent turn.
- */
-
 const OVERLAY_ESCAPE_OWNER_SELECTORS = [
-  ".pi-welcome-overlay[data-claims-escape='true']",
+  ".pi-overlay[data-claims-escape='true']",
   ".pi-utilities-menu",
+  ".pi-session-tab-context-menu",
   ".pi-status-popover",
   "#pi-command-menu",
   "agent-model-selector",
@@ -95,10 +89,6 @@ export function doesExtensionWidgetClaimEscape(target?: EventTarget | null): boo
   return doesSelectorSetClaimEscape(target, WIDGET_ESCAPE_OWNER_SELECTORS);
 }
 
-/**
- * Used by streaming abort handlers where both overlays and extension widgets
- * should consume Escape before aborting the active turn.
- */
 export function doesUiClaimStreamingEscape(target?: EventTarget | null): boolean {
   return doesOverlayClaimEscape(target) || doesExtensionWidgetClaimEscape(target);
 }

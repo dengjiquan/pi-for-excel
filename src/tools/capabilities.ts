@@ -236,9 +236,6 @@ export function chooseToolDisclosureBundle(prompt: string): ActiveToolDisclosure
     }
   }
 
-  // Mixed-intent requests (e.g. "insert a row and highlight it") need tools
-  // across categories. Fall back to full for the first call so continuation
-  // stripping doesn't block capabilities in the same turn.
   if (matchedBundles.length > 1) return "full";
   const [matchedBundle] = matchedBundles;
   if (matchedBundle !== undefined) return matchedBundle;
@@ -261,6 +258,7 @@ export const AUXILIARY_UI_TOOL_NAMES = [
   "fetch_page",
   "mcp",
   "files",
+  "extensions_manager",
   "python_transform_range",
   "execute_office_js",
   "execute_wps_js",
@@ -302,6 +300,7 @@ export const TOOL_UI_METADATA = {
   fetch_page: { renderer: true, humanizer: true },
   mcp: { renderer: true, humanizer: true },
   files: { renderer: true, humanizer: true },
+  extensions_manager: { renderer: true, humanizer: true },
   python_transform_range: { renderer: true, humanizer: true },
   execute_office_js: { renderer: true, humanizer: true },
   execute_wps_js: { renderer: true, humanizer: true },

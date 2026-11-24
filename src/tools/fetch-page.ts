@@ -1,7 +1,3 @@
-/**
- * fetch_page — fetch a webpage URL and extract readable markdown content.
- */
-
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static, type TSchema } from "typebox";
 
@@ -14,6 +10,7 @@ import {
   isLikelyProxyConnectionError,
   resolveOutboundRequestUrl,
 } from "./external-fetch.js";
+import { isStop } from "./tool-stopped.js";
 
 const FETCH_PAGE_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_CHARS = 12_000;
@@ -49,7 +46,6 @@ export interface FetchPageToolDetails {
   proxyBaseUrl?: string;
   contentType?: string;
   error?: string;
-  /** `true` when the failure is due to the local CORS proxy being unreachable. */
   proxyDown?: boolean;
 }
 
@@ -454,6 +450,7 @@ export function createFetchPageTool(
           }),
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         const message = getErrorMessage(error);
         const proxyDown = isLikelyProxyConnectionError(message, usedProxyBaseUrl);
         const displayMessage = proxyDown
@@ -462,6 +459,7 @@ export function createFetchPageTool(
 
         return {
           content: [{ type: "text", text: displayMessage }],
+          isError: true,
           details: createFetchPageDetails({
             ok: false,
             url: targetUrl,

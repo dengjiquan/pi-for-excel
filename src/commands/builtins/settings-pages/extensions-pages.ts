@@ -1,11 +1,3 @@
-/**
- * Extensions pages — Connections, Plugins, and Skills.
- *
- * Thin page adapters over the existing tab renderers
- * (`extensions-hub-connections/plugins/skills`), with per-page busy
- * handling and live-refresh subscriptions scoped to the page lifecycle.
- */
-
 import { getAppStorage } from "../../../storage/local/app-storage.js";
 
 import { dispatchIntegrationsChanged } from "../../../integrations/events.js";
@@ -33,6 +25,7 @@ function createPageMutationHelper(args: {
   deps: ExtensionsHubDependencies;
   isDisposed: () => boolean;
   refresh: () => Promise<void>;
+  keepBusyDuringRefresh?: boolean;
 }): PageMutationHelper {
   let busy = false;
 
@@ -49,9 +42,13 @@ function createPageMutationHelper(args: {
       } catch (err) {
         showToast(t("extensions-hub.toast.error", { error: err instanceof Error ? err.message : String(err) }));
       } finally {
-        busy = false;
-        if (!args.isDisposed()) {
-          await args.refresh();
+        if (!args.keepBusyDuringRefresh) busy = false;
+        try {
+          if (!args.isDisposed()) await args.refresh();
+        } catch (err) {
+          if (!args.isDisposed()) showToast(t("extensions-hub.toast.error", { error: err instanceof Error ? err.message : String(err) }));
+        } finally {
+          busy = false;
         }
       }
     },
@@ -101,6 +98,12 @@ export function createConnectionsPage(): SettingsShellPage {
           deps,
           isBusy: helper.isBusy,
           runMutation: helper.runMutation,
+          canCommit: () => {
+            if (lifecycle.isDisposed()) return false;
+            if (!hasActiveSecretInput()) return true;
+            refreshController.requestRefresh();
+            return false;
+          },
         });
       };
 
@@ -108,13 +111,14 @@ export function createConnectionsPage(): SettingsShellPage {
         deps,
         isDisposed: lifecycle.isDisposed,
         refresh,
+        keepBusyDuringRefresh: true,
       });
 
-      // Live refresh on background state changes, deferred while a
-      // connection secret input has focus so edits are not wiped.
       const hasActiveSecretInput = (): boolean => {
         const active = document.activeElement;
-        return active instanceof HTMLInputElement && container.contains(active);
+        return active instanceof HTMLInputElement
+          && active.type !== "checkbox" && active.type !== "radio"
+          && container.contains(active);
       };
 
       const refreshController = createDeferredConnectionsRefreshController({
@@ -173,13 +177,23 @@ export function createPluginsPage(): SettingsShellPage {
       ctx.body.appendChild(container);
 
       let busy = false;
+      const runExclusive = async (action: () => Promise<void>): Promise<boolean> => {
+        if (busy || lifecycle.isDisposed()) return false;
+        busy = true;
+        try {
+          await action();
+        } finally {
+          busy = false;
+        }
+        return true;
+      };
 
       const refresh = (): void => {
         if (lifecycle.isDisposed()) return;
         renderPluginsTab({
           container,
           manager: deps.extensionManager,
-          isBusy: () => busy,
+          runExclusive,
           onChanged: async () => {
             if (deps.onChanged) await deps.onChanged();
           },
@@ -193,9 +207,6 @@ export function createPluginsPage(): SettingsShellPage {
         unsubExtension();
       });
 
-      // renderPluginsTab drives its own mutations through the manager; the
-      // busy flag only guards re-entrant clicks during manager updates.
-      busy = false;
       refresh();
     },
   };

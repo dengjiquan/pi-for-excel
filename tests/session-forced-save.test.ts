@@ -74,7 +74,11 @@ class MemoryStorageBackend implements StorageBackend {
   }
 }
 
-async function createRuntime(backend: StorageBackend, autoRestoreLatest = false) {
+async function createRuntime(
+  backend: StorageBackend,
+  autoRestoreLatest = false,
+  onSavedAsCopy?: (args: { fromSessionId: string; toSessionId: string; title: string }) => void,
+) {
   const { sessions, settings } = initAppStorage("session-forced-save-test", backend);
   const faux = fauxProvider();
   const models = createModels();
@@ -87,7 +91,7 @@ async function createRuntime(backend: StorageBackend, autoRestoreLatest = false)
     agent,
     sessions,
     settings,
-    models,
+    resolveModel: (persisted) => models.getModel(persisted.provider, persisted.id),
     autoRestoreLatest,
     spreadsheetHost: {
       getWorkbookContext: () => Promise.resolve({
@@ -97,8 +101,9 @@ async function createRuntime(backend: StorageBackend, autoRestoreLatest = false)
       }),
       sessionStorage: settingsBackedSessionStorage,
     },
+    ...(onSavedAsCopy ? { onSavedAsCopy } : {}),
   });
-  return { agent, persistence };
+  return { agent, persistence, sessions };
 }
 
 void test("a forced save before the first assistant response survives a taskpane restart", async () => {
@@ -117,4 +122,102 @@ void test("a forced save before the first assistant response survives a taskpane
   const afterRestart = await createRuntime(backend, true);
   assert.equal(afterRestart.persistence.getSessionId(), sessionId);
   assert.match(JSON.stringify(afterRestart.agent.state.messages), /waiting for the first answer/u);
+});
+
+void test("one session open in two taskpanes keeps both conversations", async () => {
+  const backend = new MemoryStorageBackend();
+  const paneA = await createRuntime(backend);
+  paneA.agent.state.messages.push({ role: "user", content: "first turn", timestamp: 1 });
+  await paneA.persistence.saveSession({ force: true });
+  const sharedId = paneA.persistence.getSessionId();
+
+  const copies: string[] = [];
+  const paneB = await createRuntime(backend, false, ({ toSessionId }) => copies.push(toSessionId));
+  const loaded = await paneB.sessions.get(sharedId);
+  assert.ok(loaded);
+  await paneB.persistence.applyLoadedSession(loaded);
+
+  paneA.agent.state.messages.push({ role: "user", content: "Write 11 in K1", timestamp: 2 });
+  paneB.agent.state.messages.push({ role: "user", content: "Write 22 in K2", timestamp: 3 });
+  await paneA.persistence.saveSession({ force: true });
+  await paneB.persistence.saveSession({ force: true });
+
+  assert.match(JSON.stringify((await paneA.sessions.get(sharedId))?.messages), /Write 11 in K1/u);
+  assert.equal(copies.length, 1);
+  assert.equal(paneB.persistence.getSessionId(), copies[0]);
+  const copy = await paneB.sessions.get(copies[0] ?? "");
+  assert.match(JSON.stringify(copy?.messages), /Write 22 in K2/u);
+  assert.doesNotMatch(JSON.stringify(copy?.messages), /Write 11 in K1/u);
+
+  paneB.agent.state.messages.push({ role: "user", content: "next", timestamp: 4 });
+  await paneB.persistence.saveSession({ force: true });
+  assert.equal(copies.length, 1);
+  paneA.persistence.dispose();
+  paneB.persistence.dispose();
+});
+
+class HeldWriteBackend extends MemoryStorageBackend {
+  private held: { gate: Promise<void>; arrived: () => void } | null = null;
+
+  hold(): { arrived: Promise<void>; release: () => void } {
+    let release: () => void = () => {};
+    let arrived: () => void = () => {};
+    const arrival = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.held = {
+      gate: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+      arrived,
+    };
+    return {
+      arrived: arrival,
+      release: () => {
+        this.held = null;
+        release();
+      },
+    };
+  }
+
+  override async transaction<T>(
+    storeNames: string[],
+    mode: "readonly" | "readwrite",
+    operation: (tx: StorageTransaction) => Promise<T>,
+  ): Promise<T> {
+    const held = this.held;
+    if (mode === "readwrite" && held) {
+      held.arrived();
+      await held.gate;
+    }
+    return super.transaction(storeNames, mode, operation);
+  }
+}
+
+void test("a session opened in a tab while that tab's last save is still writing keeps saving as itself", async () => {
+  const backend = new HeldWriteBackend();
+  const other = await createRuntime(backend);
+  other.agent.state.messages.push({ role: "user", content: "the other conversation", timestamp: 1 });
+  await other.persistence.saveSession({ force: true });
+  const loaded = await other.sessions.get(other.persistence.getSessionId());
+  assert.ok(loaded);
+  other.persistence.dispose();
+
+  const copies: string[] = [];
+  const tab = await createRuntime(backend, false, ({ toSessionId }) => copies.push(toSessionId));
+  tab.agent.state.messages.push({ role: "user", content: "blank tab draft turn", timestamp: 2 });
+  const write = backend.hold();
+  const earlierSave = tab.persistence.saveSession({ force: true });
+  await write.arrived;
+  const opening = tab.persistence.applyLoadedSession(loaded);
+  write.release();
+  await Promise.all([earlierSave, opening]);
+
+  tab.agent.state.messages.push({ role: "user", content: "continue the other conversation", timestamp: 3 });
+  await tab.persistence.saveSession({ force: true });
+
+  assert.deepEqual(copies, []);
+  assert.equal(tab.persistence.getSessionId(), loaded.id);
+  assert.match(JSON.stringify((await tab.sessions.get(loaded.id))?.messages), /continue the other conversation/u);
+  tab.persistence.dispose();
 });

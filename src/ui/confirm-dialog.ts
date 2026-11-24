@@ -3,7 +3,6 @@ import {
   createOverlayButton,
   createOverlayDialog,
   createOverlayHeader,
-  NESTED_OVERLAY_Z_INDEX,
 } from "./overlay-dialog.js";
 import { CONFIRM_DIALOG_OVERLAY_ID } from "./overlay-ids.js";
 import { t } from "../language/index.js";
@@ -33,17 +32,11 @@ function canRenderConfirmationDialog(): boolean {
   return document.body instanceof HTMLElement;
 }
 
-function getConfirmButtonClassName(
-  tone: ConfirmButtonTone | undefined,
-): string {
-  return tone === "danger"
-    ? "pi-overlay-btn--danger"
-    : "pi-overlay-btn--primary";
+function getConfirmButtonClassName(tone: ConfirmButtonTone | undefined): string {
+  return tone === "danger" ? "pi-overlay-btn--danger" : "pi-overlay-btn--primary";
 }
 
-export function requestConfirmationDialog(
-  options: ConfirmDialogOptions,
-): Promise<boolean> {
+export function requestConfirmationDialog(options: ConfirmDialogOptions): Promise<boolean> {
   if (!canRenderConfirmationDialog()) {
     return Promise.reject(new Error(getConfirmationUiUnavailableError()));
   }
@@ -54,13 +47,8 @@ export function requestConfirmationDialog(
   return new Promise((resolve) => {
     const dialog = createOverlayDialog({
       overlayId,
-      cardClassName:
-        options.cardClassName ??
-        "pi-welcome-card pi-overlay-card pi-overlay-card--s",
-      ...(options.restoreFocusOnClose !== undefined
-        ? { restoreFocusOnClose: options.restoreFocusOnClose }
-        : {}),
-      zIndex: NESTED_OVERLAY_Z_INDEX,
+      cardClassName: options.cardClassName ?? "pi-welcome-card pi-overlay-card pi-overlay-card--s",
+      ...(options.restoreFocusOnClose !== undefined ? { restoreFocusOnClose: options.restoreFocusOnClose } : {}),
     });
 
     let settled = false;

@@ -1,9 +1,6 @@
 /**
- * Store for chat sessions (data and metadata).
- * Uses two object stores: sessions (full data) and sessions-metadata (lightweight).
- *
  * Vendored from @earendil-works/pi-web-ui 0.75.3 (MIT, © Mario Zechner,
- * https://github.com/badlogic/pi-mono). See docs/ui-ownership.md.
+ * https://github.com/badlogic/pi-mono).
  */
 
 import type { AgentState } from "@earendil-works/pi-agent-core";
@@ -21,10 +18,6 @@ export class SessionsStore extends Store {
     };
   }
 
-  /**
-   * Additional config for sessions-metadata store.
-   * Must be included when creating the backend.
-   */
   static getMetadataConfig(): StoreConfig {
     return {
       name: "sessions-metadata",
@@ -38,8 +31,30 @@ export class SessionsStore extends Store {
       ["sessions", "sessions-metadata"],
       "readwrite",
       async (tx) => {
-        await tx.set("sessions", data.id, data);
-        await tx.set("sessions-metadata", metadata.id, metadata);
+        await Promise.all([
+          tx.set("sessions", data.id, data),
+          tx.set("sessions-metadata", metadata.id, metadata),
+        ]);
+      },
+    );
+  }
+
+  async saveIfUnchanged(
+    data: SessionData,
+    metadata: SessionMetadata,
+    baseRevision: string | undefined,
+  ): Promise<boolean> {
+    return this.getBackend().transaction(
+      ["sessions", "sessions-metadata"],
+      "readwrite",
+      async (tx) => {
+        const stored = await tx.get<SessionMetadata>("sessions-metadata", metadata.id);
+        if (stored && stored.revision !== baseRevision) return false;
+        await Promise.all([
+          tx.set("sessions", data.id, data),
+          tx.set("sessions-metadata", metadata.id, metadata),
+        ]);
+        return true;
       },
     );
   }
@@ -53,7 +68,6 @@ export class SessionsStore extends Store {
   }
 
   async getAllMetadata(): Promise<SessionMetadata[]> {
-    // Use the lastModified index to get sessions sorted by most recent first
     return this.getBackend().getAllFromIndex<SessionMetadata>(
       "sessions-metadata",
       "lastModified",
@@ -66,8 +80,7 @@ export class SessionsStore extends Store {
       ["sessions", "sessions-metadata"],
       "readwrite",
       async (tx) => {
-        await tx.delete("sessions", id);
-        await tx.delete("sessions-metadata", id);
+        await Promise.all([tx.delete("sessions", id), tx.delete("sessions-metadata", id)]);
       },
     );
   }
@@ -78,7 +91,6 @@ export class SessionsStore extends Store {
       metadata.title = title;
       await this.getBackend().set("sessions-metadata", id, metadata);
     }
-    // Also update in full session data
     const data = await this.get(id);
     if (data) {
       data.title = title;
@@ -94,14 +106,13 @@ export class SessionsStore extends Store {
     return this.getBackend().requestPersistence();
   }
 
-  // Alias methods for backward compatibility
   async saveSession(
     id: string,
     state: AgentState,
     metadata: SessionMetadata | undefined,
     title?: string,
-  ): Promise<void> {
-    // If metadata is provided, use it; otherwise create it from state
+    revisions?: { base: string | undefined; next: string },
+  ): Promise<boolean> {
     const meta: SessionMetadata = metadata ?? {
       id,
       title: title ?? "",
@@ -126,13 +137,23 @@ export class SessionsStore extends Store {
     const data: SessionData = {
       id,
       title: title ?? meta.title,
+      ...(meta.titleChosen !== undefined ? { titleChosen: meta.titleChosen } : {}),
+      ...(meta.titleGenerationAttempted !== undefined ? { titleGenerationAttempted: meta.titleGenerationAttempted } : {}),
       model,
       thinkingLevel: state.thinkingLevel,
       messages: state.messages,
       createdAt: meta.createdAt,
-      lastModified: new Date().toISOString(),
+      lastModified: meta.lastModified,
     };
-    await this.save(data, meta);
+    if (!revisions) {
+      await this.save(data, meta);
+      return true;
+    }
+    return this.saveIfUnchanged(
+      { ...data, revision: revisions.next },
+      { ...meta, revision: revisions.next },
+      revisions.base,
+    );
   }
 
   async loadSession(id: string): Promise<SessionData | null> {

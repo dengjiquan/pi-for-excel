@@ -2,40 +2,47 @@ function isTaskpaneInitPayloadShape(value: unknown): value is Record<string, unk
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Taskpane initialization.
- *
- * Contains the bulk of app wiring (storage, auth restore, runtime manager,
- * sidebar mount, slash commands, keyboard shortcuts).
- */
-
-import { html, render } from "lit";
+import { Value } from "typebox/value";
+import { describeOfficeJsChanges, readTurnBackups, summarizeTurnChanges, turnChangeActionSchema, undoTurnChanges } from "../messages/turn-changes.js";
+import { createOverlayDialog, createOverlayHeader } from "../ui/overlay-dialog.js";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getCurrentSystemMessage, toToolDeclaration } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, getCurrentSystemMessage, toToolDeclaration } from "@earendil-works/pi-ai";
 import { getAppStorage } from "../storage/local/app-storage.js";
 import type { SessionData } from "../storage/local/types.js";
 
 import { createOfficeStreamFn } from "../auth/stream-proxy.js";
+import { commandRegistry } from "../commands/types.js";
 import {
   DEFAULT_PROXY_URL,
-  PROXY_HELPER_DOCS_URL,
-  isLoopbackProxyUrl,
   validateOfficeProxyUrl,
 } from "../auth/proxy-validation.js";
 import { restoreCredentials } from "../auth/restore.js";
+import { createOAuthRefresher } from "../auth/oauth-refresh.js";
+import { getOAuthProvider } from "../auth/oauth-provider-registry.js";
 import { invalidateBlueprint } from "../context/blueprint.js";
-import { ChangeTracker } from "../context/change-tracker.js";
+import { onCellEditWait } from "../excel/helpers.js";
+import { ChangeTracker, type PiWriteWindow } from "../context/change-tracker.js";
 import {
   PI_EXPERIMENTAL_FEATURE_CHANGED_EVENT,
   PI_EXPERIMENTAL_TOOL_CONFIG_CHANGED_EVENT,
 } from "../experiments/events.js";
 import { createConvertToLlm } from "../messages/convert-to-llm.js";
 import { installImageInputNormalization } from "../messages/image-input-limits.js";
+import { enableForkBranding } from "../language/fork-branding.js";
 import { effectiveToolOutputLimits } from "../context/window-budgets.js";
 import { findTrailingContextOverflowError } from "../compaction/overflow-recovery.js";
+import { createTabState } from "./tab-state.js";
+import { getErrorMessage } from "../utils/errors.js";
+import { describeTurnFailure } from "./turn-error.js";
+import { createDraftStore } from "./draft-store.js";
+import { showSubscriptionWarning } from "./subscription-warning.js";
+import { runNativeWebSearch, supportsNativeWebSearch } from "../tools/native-web-search.js";
+import { getApiKeyForProvider, loadWebSearchProviderConfig } from "../tools/web-search-config.js";
+import { PI_AI_VERSION } from "@earendil-works/pi-ai/utils/version";
+import { submitComposerText } from "./keyboard-shortcuts/editor-actions.js";
 import { readAutoCompactionEnabled } from "../compaction/settings.js";
 import { runCompactCommand } from "../commands/builtins/export.js";
-import { getFilesWorkspace } from "../files/workspace.js";
+import { describeImportRenames, getFilesWorkspace } from "../files/workspace.js";
 import { ConnectionManager } from "../connections/manager.js";
 import { createAllTools } from "../tools/index.js";
 import { collectRequiredConnectionIds } from "../tools/connection-requirements.js";
@@ -53,13 +60,12 @@ import {
   buildOfficeJsExecuteApprovalMessage,
   buildPythonBridgeApprovalMessage,
 } from "../tools/experimental-tool-gates.js";
+import { withStopResults } from "../tools/tool-stopped.js";
 import {
-  buildMutationApprovalMessage,
   withWorkbookCoordinator,
 } from "../tools/with-workbook-coordinator.js";
 import { registerBuiltins } from "../commands/builtins.js";
 import { ExtensionRuntimeManager } from "../extensions/runtime-manager.js";
-import type { ResumeDialogTarget } from "../commands/builtins/resume-target.js";
 import {
   configureSettingsPages,
   openSettings,
@@ -79,11 +85,6 @@ import {
   PI_EXECUTION_MODE_CHANGED_EVENT,
   type ExecutionMode,
 } from "../execution/mode.js";
-import {
-  getStoredModelSwitchBehavior,
-  setStoredModelSwitchBehavior,
-  type ModelSwitchBehavior,
-} from "../models/switch-behavior.js";
 import { getResolvedConventions } from "../conventions/store.js";
 import {
   buildIntegrationPromptEntries,
@@ -109,7 +110,6 @@ import { PI_SKILLS_CHANGED_EVENT } from "../skills/events.js";
 import { createSkillReadCache } from "../skills/read-cache.js";
 import { initLanguage, t } from "../language/index.js";
 import { initAppStorage } from "../storage/init-app-storage.js";
-import { renderError } from "../ui/loading.js";
 import { showFilesWorkspaceDialog } from "../ui/files-dialog.js";
 
 import {
@@ -117,10 +117,13 @@ import {
   moveCursorToEnd,
 } from "../ui/input-focus.js";
 import { requestConfirmationDialog } from "../ui/confirm-dialog.js";
-import { TOOL_APPROVAL_OVERLAY_ID } from "../ui/overlay-ids.js";
-import { showActionToast, showToast } from "../ui/toast.js";
+import { requestTextInputDialog } from "../ui/text-input-dialog.js";
+import { dismissToast, showActionToast, showToast, type ActionToastHandle } from "../ui/toast.js";
+import { formatBytes } from "../files/mime.js";
 import { PiSidebar } from "../ui/pi-sidebar.js";
-import { createProxyBanner } from "../ui/proxy-banner.js";
+import { createProxyBannerController } from "../ui/proxy-banner.js";
+import { announce } from "../ui/announcer.js";
+import { mountBanner } from "../ui/banner.js";
 import { setActiveProviders } from "../models/active-providers.js";
 import { BrowserModelRuntime } from "../models/browser-model-runtime.js";
 import {
@@ -130,34 +133,48 @@ import {
 import { promptForProviderConnection } from "../ui/api-key-dialog.js";
 import { openModelSelectorDialog } from "../ui/model-selector-dialog.js";
 import { getCurrentSpreadsheetHost } from "../host/index.js";
-import { createWorkbookCoordinator } from "../workbook/coordinator.js";
+import { createWorkbookCoordinator, getSessionLockState } from "../workbook/coordinator.js";
 import { formatWorkbookLabel, type WorkbookContext } from "../workbook/context.js";
+import { createRecoveryScopeResolver } from "../workbook/recovery-scope.js";
 import {
   getManualFullWorkbookBackupStore,
   ManualFullWorkbookBackupStore,
+  type DownloadedFullWorkbookBackup,
   type ManualFullWorkbookBackup,
 } from "../workbook/manual-full-backup.js";
 import {
   getWorkbookRecoveryLog,
   WorkbookRecoveryLog,
-  type WorkbookRecoverySnapshot,
+  type WorkbookRecoveryRestorePreview,
 } from "../workbook/recovery-log.js";
+import { formatRelativeDate } from "../commands/builtins/overlay-relative-date.js";
 import {
   getWorkbookChangeAuditLog,
   WorkbookChangeAuditLog,
 } from "../audit/workbook-change-audit.js";
-import { readRetentionLimit, writeRetentionLimit } from "../workbook/recovery/log-store.js";
+import type { RecoveryMetadata } from "../workbook/recovery/log-store.js";
+import { PI_BACKUP_SAVE_FAILED_EVENT } from "../tools/mutation/finalize.js";
+import { requestApproval } from "../ui/approval-dialog.js";
+import { humanizeToolInput } from "../ui/humanize-params.js";
+import { describePendingToolCall, toolActionVerb } from "../ui/tool-rows.js";
 import {
-  WorkbookSaveBoundaryMonitor,
-  startWorkbookSaveBoundaryPolling,
-} from "../workbook/save-boundary-monitor.js";
+  BackupIdentityMonitor,
+  startBackupIdentityPolling,
+} from "../workbook/backup-identity-monitor.js";
 
-import { createContextInjector } from "./context-injection.js";
+import { createAutoContext } from "./context-injection.js";
 import { getThinkingLevels, installKeyboardShortcuts } from "./keyboard-shortcuts.js";
 import { createQueueDisplay } from "./queue-display.js";
 import { createActionQueue } from "./action-queue.js";
 import { maybeStartBackgroundVerificationBridge } from "./background-verification-bridge.js";
-import { RecentlyClosedStack, type RecentlyClosedItem } from "./recently-closed.js";
+import {
+  RecentlyClosedStack,
+  loadRecentlyClosed,
+  saveRecentlyClosed,
+  type RecentlyClosedItem,
+} from "./recently-closed.js";
+import { createWorkbookIdentityFollower } from "./workbook-identity-follower.js";
+import { moveSessionToWorkbook } from "../workbook/session-association.js";
 import { setupSessionPersistence } from "./sessions.js";
 import {
   loadWorkbookTabLayout,
@@ -174,88 +191,96 @@ import {
   STATUS_CONTEXT_WARNING_ATTR,
   STATUS_CONTEXT_WARNING_SEVERITY_ATTR,
 } from "./status-context.js";
-import { getProxyState, startProxyPolling } from "./proxy-status.js";
+import { getProxyState, isProxyBlockedByBrowser, startProxyPolling } from "./proxy-status.js";
 import {
   closeStatusPopover,
   toggleContextPopover,
+  toggleModePopover,
   toggleThinkingPopover,
 } from "./status-popovers.js";
 import { showWelcomeLogin } from "./welcome-login.js";
 import {
   ensureDefaultProxyUrl,
+  needsRemoteProxyWarning,
   readTaskpaneLanguage,
   readTaskpaneProxySettings,
 } from "./settings.js";
+import { trackTurns } from "./turn-tracker.js";
 import {
   SessionRuntimeManager,
   type CreateRuntimeOptions,
+  type OpenSessionTarget,
+  type RuntimeRunOutcome,
   type SessionRuntime,
 } from "./session-runtime-manager.js";
 import {
   awaitWithTimeout,
   createRuntimeToolFingerprint,
-  isLikelyCorsErrorMessage,
   shouldApplyRuntimeToolUpdate,
   isRuntimeAgentTool,
   normalizeRuntimeTools,
 } from "./runtime-utils.js";
 import { bindRuntimeSidebar } from "./runtime-sidebar-binding.js";
 import { doesOverlayClaimEscape } from "../utils/escape-guard.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
 
 const RUNTIME_SYSTEM_PROMPT_SECTION = "pi-for-excel-runtime";
-
-function showErrorBanner(errorRoot: HTMLElement, message: string): void {
-  render(renderError(message), errorRoot);
-}
-
-function clearErrorBanner(errorRoot: HTMLElement): void {
-  render(html``, errorRoot);
-}
+const RESTORE_TAB_CONCURRENCY = 4;
 
 export async function initTaskpane(opts: {
   appEl: HTMLElement;
   errorRoot: HTMLElement;
   autoResizeImages: boolean;
 }): Promise<void> {
-  const { appEl, errorRoot, autoResizeImages } = opts;
+  const { appEl, autoResizeImages } = opts;
 
-  const changeTracker = new ChangeTracker();
+  const changeTracker = new ChangeTracker({
+    onStructureChange: () => invalidateBlueprint(null),
+    getPiWriteAddresses: async (toolCallIds) => {
+      const wanted = new Set(toolCallIds);
+      const written = new Map<string, string[]>();
+      for (const entry of await getWorkbookChangeAuditLog().list(200)) {
+        if (!wanted.has(entry.toolCallId)) continue;
+        const address = entry.outputAddress ?? entry.inputAddress;
+        if (address) written.set(entry.toolCallId, [...(written.get(entry.toolCallId) ?? []), address]);
+      }
+      return written;
+    },
+  });
   const spreadsheetHost = getCurrentSpreadsheetHost();
 
-  // 1. Storage
   const { providerKeys, sessions, settings, customProviders, modelCatalogs } = initAppStorage();
 
-  // Initialize language from storage
-  initLanguage(await readTaskpaneLanguage(settings));
+  void getAppStorage().requestPersistence().then(
+    (persisted) => console.log(`[pi] Persistent storage: ${persisted ? "granted" : "not granted"}`),
+    (error: Error) => console.warn("[pi] Persistent storage request failed:", error),
+  );
 
-  // Seed a predictable proxy default for OAuth flows.
-  await ensureDefaultProxyUrl(settings, spreadsheetHost.kind);
+  const migrateLegacyConnectionStore = async (): Promise<void> => {
+    try {
+      await migrateLegacyWebSearchApiKeysToConnectionStore(settings);
+    } catch (error) {
+      console.warn("[pi] Failed to migrate legacy web-search API keys:", error);
+    }
 
-  // Migrate legacy web-search API keys to the connection store schema.
-  try {
-    await migrateLegacyWebSearchApiKeysToConnectionStore(settings);
-  } catch (error) {
-    console.warn("[pi] Failed to migrate legacy web-search API keys:", error);
-  }
+    try {
+      await migrateLegacyMcpTokensToConnectionStore(settings);
+    } catch (error) {
+      console.warn("[pi] Failed to migrate legacy MCP bearer tokens:", error);
+    }
+  };
 
-  // Migrate legacy MCP bearer tokens to the connection store schema.
-  try {
-    await migrateLegacyMcpTokensToConnectionStore(settings);
-  } catch (error) {
-    console.warn("[pi] Failed to migrate legacy MCP bearer tokens:", error);
-  }
+  const [language, proxySettings, autoCompactEnabled, executionModeController] = await Promise.all([
+    readTaskpaneLanguage(settings),
+    ensureDefaultProxyUrl(settings, spreadsheetHost.kind).then(() => readTaskpaneProxySettings(settings)),
+    readAutoCompactionEnabled(settings),
+    createExecutionModeController({ settings }),
+    migrateLegacyConnectionStore(),
+  ]);
+  initLanguage(language);
+  enableForkBranding();
 
-  // 1b. Auto-compaction (Pi defaults to enabled)
-  const autoCompactEnabled = await readAutoCompactionEnabled(settings);
-
-  // 1c. Security warning: remote proxies can see your prompts + credentials.
-  const initialProxySettings = await readTaskpaneProxySettings(settings);
-  if (
-    initialProxySettings.enabled &&
-    initialProxySettings.url !== null &&
-    initialProxySettings.url.length > 0 &&
-    !isLoopbackProxyUrl(initialProxySettings.url)
-  ) {
+  if (needsRemoteProxyWarning(proxySettings)) {
     showToast(t("init.securityWarning"));
   }
 
@@ -277,10 +302,12 @@ export async function initTaskpane(opts: {
     providerKeys,
     modelCatalogs,
     getProxyUrl: getConfiguredProxyUrl,
+    modelCatalogUrl: (providerId) => new URL(
+      `/model-catalog/${PI_AI_VERSION}/${encodeURIComponent(providerId)}`,
+      window.location.origin,
+    ).href,
   });
 
-  // 2. Resolve available providers through one owner. Static, custom,
-  // dynamically discovered and extension providers share its snapshot.
   let listModelRefreshRuntimes: () => readonly ModelRefreshRuntime[] = () => [];
   const modelRefreshOwner = new ModelRefreshOwner({
     modelRuntime,
@@ -294,6 +321,7 @@ export async function initTaskpane(opts: {
       console.warn("[models] Some provider catalogues could not be refreshed:", snapshot.providerErrors);
     }
     document.dispatchEvent(new Event("pi:models-changed"));
+    document.dispatchEvent(new CustomEvent("pi:status-update"));
   });
 
   document.addEventListener("pi:providers-changed", () => {
@@ -303,9 +331,8 @@ export async function initTaskpane(opts: {
       });
   });
 
-  // 2b. Cached catalogues are published before first paint. Remote discovery
-  // starts afterward; a late credential restore owns one follow-up refresh.
   const credentialRestorePromise = restoreCredentials(providerKeys, settings);
+  const oauthRefresher = createOAuthRefresher({ settings, providerKeys, getOAuthProvider });
   try {
     await awaitWithTimeout(
       "Provider lookup",
@@ -322,22 +349,23 @@ export async function initTaskpane(opts: {
     });
   }
 
-  // 3. Change tracker
   changeTracker.start().catch(() => {});
-
-  // 4. Shared runtime dependencies
-  // Workbook structure context is injected separately by transformContext.
 
   const streamFn = createOfficeStreamFn(
     getConfiguredProxyUrl,
     modelRuntime.models,
-    (providerId) => modelRuntime.shouldProxyProvider(providerId),
+    (providerId) => modelRuntime.providerRoute(providerId),
   );
 
   const workbookCoordinator = createWorkbookCoordinator();
 
-  // 5. Create and mount PiSidebar
   const sidebar = new PiSidebar();
+  onCellEditWait((waiting) => {
+    sidebar.setHostWaitIndicator(
+      waiting ? t("working.cellEdit") : null,
+      waiting ? t("working.cellEditHint") : null,
+    );
+  });
   sidebar.emptyHints = [
     {
       label: t("hint.explain.label"),
@@ -372,35 +400,10 @@ export async function initTaskpane(opts: {
     document.dispatchEvent(new CustomEvent("pi:status-update"));
   };
 
-  const executionModeController = await createExecutionModeController({
-    settings,
-    showToast,
-  });
-
   const getExecutionMode = (): ExecutionMode => executionModeController.getMode();
 
   const setExecutionMode = async (mode: ExecutionMode): Promise<void> => {
     await executionModeController.setMode(mode);
-  };
-
-  const toggleExecutionModeFromUi = async (): Promise<void> => {
-    await executionModeController.toggleFromUi();
-  };
-
-  const loadModelSwitchBehavior = async (): Promise<ModelSwitchBehavior> => {
-    try {
-      return await getStoredModelSwitchBehavior(settings);
-    } catch {
-      return "inPlace";
-    }
-  };
-
-  let modelSwitchBehavior: ModelSwitchBehavior = await loadModelSwitchBehavior();
-
-  const getModelSwitchBehavior = (): ModelSwitchBehavior => modelSwitchBehavior;
-
-  const setModelSwitchBehavior = async (nextBehavior: ModelSwitchBehavior): Promise<void> => {
-    modelSwitchBehavior = await setStoredModelSwitchBehavior(settings, nextBehavior);
   };
 
   const resolveWorkbookContext = async (): Promise<WorkbookContext> => {
@@ -424,43 +427,38 @@ export async function initTaskpane(opts: {
     sessionId: string;
     workbookId: string | null;
   }): Promise<string[]> => {
-    const configuredIntegrationIds = await resolveConfiguredIntegrationIds({
-      settings,
-      sessionId: args.sessionId,
-      workbookId: args.workbookId,
-      knownIntegrationIds: INTEGRATION_IDS,
-    });
-
-    const externalToolsEnabled = await getExternalToolsEnabled(settings);
+    const [configuredIntegrationIds, externalToolsEnabled] = await Promise.all([
+      resolveConfiguredIntegrationIds({
+        settings,
+        sessionId: args.sessionId,
+        workbookId: args.workbookId,
+        knownIntegrationIds: INTEGRATION_IDS,
+      }),
+      getExternalToolsEnabled(settings),
+    ]);
     return externalToolsEnabled ? configuredIntegrationIds : [];
   };
 
   const resolveAvailableSkills = async () => {
     const bundledSkills = listAgentSkills();
-
-    let mergedSkills = bundledSkills;
-
-    try {
-      const discoverableSkills = await loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace());
-      mergedSkills = mergeAgentSkillDefinitions(bundledSkills, discoverableSkills);
-    } catch (error) {
-      console.warn("[skills] Failed to load discoverable workspace skills:", error);
-    }
-
-    try {
-      const disabledSkillNames = await loadDisabledSkillNamesFromSettings(settings);
-      const enabledSkills = filterAgentSkillsByEnabledState({
-        skills: mergedSkills,
-        disabledSkillNames,
-      });
-      return buildAgentSkillPromptEntries(enabledSkills);
-    } catch (error) {
-      console.warn("[skills] Failed to load skill activation state:", error);
-      return buildAgentSkillPromptEntries(mergedSkills);
-    }
+    const [discoverableSkills, disabledSkillNames] = await Promise.all([
+      loadDiscoverableAgentSkillsFromWorkspace(getFilesWorkspace()).catch((error: unknown) => {
+        console.warn("[skills] Failed to load discoverable workspace skills:", error);
+        return null;
+      }),
+      loadDisabledSkillNamesFromSettings(settings).catch((error: unknown) => {
+        console.warn("[skills] Failed to load skill activation state:", error);
+        return null;
+      }),
+    ]);
+    const mergedSkills = discoverableSkills
+      ? mergeAgentSkillDefinitions(bundledSkills, discoverableSkills)
+      : bundledSkills;
+    return buildAgentSkillPromptEntries(disabledSkillNames
+      ? filterAgentSkillsByEnabledState({ skills: mergedSkills, disabledSkillNames })
+      : mergedSkills);
   };
 
-  // Probe local bridge services once at init. Snapshot is stable for the session.
   let localServicesSnapshot: LocalServiceEntry[] = [];
   let localServicesReady: Promise<void> = Promise.resolve();
 
@@ -469,16 +467,21 @@ export async function initTaskpane(opts: {
     activeIntegrationIds: readonly string[];
     requiredConnectionIds: readonly string[];
   }): Promise<string> => {
-    await localServicesReady;
-
-    const availableSkills = await resolveAvailableSkills();
-    const activeConnections = await connectionManager.listPromptEntries(args.requiredConnectionIds);
+    const rules = Promise.all([
+      getUserRules(settings),
+      getWorkbookRules(settings, args.workbookId),
+      getResolvedConventions(settings),
+    ]);
+    rules.catch(() => {});
+    const [availableSkills, activeConnections] = await Promise.all([
+      resolveAvailableSkills(),
+      connectionManager.listPromptEntries(args.requiredConnectionIds),
+      localServicesReady,
+    ]);
 
     try {
-      const userRules = await getUserRules(settings);
-      const workbookRules = await getWorkbookRules(settings, args.workbookId);
+      const [userRules, workbookRules, conventions] = await rules;
       setRulesActive(hasAnyRules({ userRules, workbookRules }));
-      const conventions = await getResolvedConventions(settings);
       const activeIntegrations = buildIntegrationPromptEntries(args.activeIntegrationIds);
       return buildSystemPrompt({
         userInstructions: userRules,
@@ -501,30 +504,75 @@ export async function initTaskpane(opts: {
     }
   };
 
+  const runOutcomes = new Map<string, RuntimeRunOutcome | null>();
   const runtimeManager = new SessionRuntimeManager({
     createRuntime: buildSessionRuntime,
     warnCapabilityRefresh: (error) => {
       console.warn("[pi] Failed to refresh runtime capabilities:", error);
     },
+    getRunOutcome: (runtime) => {
+      const outcome = runOutcomes.get(runtime.runtimeId) ?? null;
+      runOutcomes.delete(runtime.runtimeId);
+      return outcome;
+    },
+    onRunSettled: ({ outcome, wasActive, title }) => {
+      if (wasActive) {
+        if (outcome === "finished") announce(t("announce.finished"));
+        return;
+      }
+      announce(outcome === "failed"
+        ? t("announce.failedInTab", { title })
+        : t("announce.finishedInTab", { title }));
+    },
   });
-  const abortedAgents = new WeakSet<Agent>();
-  const recentlyClosed = new RecentlyClosedStack(10);
+  const draftStore = createDraftStore(settings);
+
+  const usesSharedUnidentifiedState = spreadsheetHost.kind === "browser";
+  const workbookScope = createRecoveryScopeResolver({ getWorkbookContext: resolveWorkbookContext });
+  const resolvePersistentWorkbookKey = async (
+    mode: "read" | "write",
+  ): Promise<{ workbookId: string | null } | null> => {
+    if (usesSharedUnidentifiedState) return { workbookId: await resolveWorkbookId() };
+    const scope = mode === "write" ? await workbookScope.resolveForAppend() : await workbookScope.resolveForRead();
+    return scope ? { workbookId: scope.workbookId } : null;
+  };
+
+  let recentlyClosedWritable = false;
+  let recentlyClosedWrites: Promise<void> = Promise.resolve();
+  const recentlyClosed = new RecentlyClosedStack(10, (items) => {
+    if (!recentlyClosedWritable) return;
+    recentlyClosedWrites = recentlyClosedWrites.then(async () => {
+      try {
+        const key = await resolvePersistentWorkbookKey("write");
+        if (key) await saveRecentlyClosed(settings, key.workbookId, items);
+      } catch (error) {
+        console.warn("[pi] Failed to persist recently closed tabs:", error);
+      }
+    });
+  });
+  try {
+    const key = await resolvePersistentWorkbookKey("read");
+    if (key) recentlyClosed.load(await loadRecentlyClosed(settings, key.workbookId));
+    recentlyClosedWritable = true;
+  } catch (error) {
+    console.warn("[pi] Failed to read recently closed tabs:", error);
+  }
 
   const getActiveRuntime = () => runtimeManager.getActiveRuntime();
   const getActiveAgent = () => getActiveRuntime()?.agent ?? null;
-  const getActiveQueueDisplay = () => getActiveRuntime()?.queueDisplay ?? null;
-  const getActiveActionQueue = () => getActiveRuntime()?.actionQueue ?? null;
   const getActiveLockState = () => getActiveRuntime()?.lockState ?? "idle";
 
   listModelRefreshRuntimes = () => runtimeManager.listRuntimes().map((runtime) => ({
     runtimeId: runtime.runtimeId,
     model: runtime.agent.state.model,
-    isBusy: runtime.agent.state.isStreaming || runtime.actionQueue.isBusy(),
+    isBusy: runtime.actionQueue.isBusy(),
     applyModel: (model, thinkingLevel) => {
+      const previous = runtime.agent.state.model;
       runtime.agent.state.model = model;
-      if (thinkingLevel !== undefined) {
-        runtime.agent.state.thinkingLevel = thinkingLevel;
+      if (previous.provider !== model.provider && modelRefreshOwner.snapshot().availableProviders.length > 0) {
+        showToast(t("init.modelSwapped", { model: model.name, provider: previous.provider }));
       }
+      runtime.agent.state.thinkingLevel = clampThinkingLevel(model, thinkingLevel ?? runtime.agent.state.thinkingLevel);
       document.dispatchEvent(new CustomEvent("pi:status-update"));
       if (runtime.runtimeId === getActiveRuntime()?.runtimeId) {
         requestAnimationFrame(() => sidebar.requestUpdate());
@@ -532,7 +580,10 @@ export async function initTaskpane(opts: {
     },
   }));
 
-  const workbookRecoveryLog = getWorkbookRecoveryLog(new WorkbookRecoveryLog({ settings }));
+  const workbookRecoveryLog = getWorkbookRecoveryLog(new WorkbookRecoveryLog());
+  void workbookRecoveryLog.initialize().catch(() => {
+    showToast(t("recovery.migrationDeferred"), { variant: "error", duration: 8000 });
+  });
   getWorkbookChangeAuditLog(new WorkbookChangeAuditLog({ settings }));
   const manualFullBackupStore = getManualFullWorkbookBackupStore(
     new ManualFullWorkbookBackupStore(),
@@ -544,40 +595,128 @@ export async function initTaskpane(opts: {
     sizeBytes: backup.sizeBytes,
   });
 
-  const saveBoundaryMonitor = new WorkbookSaveBoundaryMonitor({
-    clearBackupsForWorkbook: (workbookId) => workbookRecoveryLog.clearForWorkbook(workbookId),
-  });
-  const stopSaveBoundaryPolling = startWorkbookSaveBoundaryPolling({
-    monitor: saveBoundaryMonitor,
+  const stopBackupIdentityPolling = startBackupIdentityPolling({
+    monitor: new BackupIdentityMonitor({
+      rescopeBackups: (args) => workbookRecoveryLog.rescopeWorkbook(args),
+    }),
   });
 
   window.addEventListener("beforeunload", () => {
-    stopSaveBoundaryPolling();
+    stopBackupIdentityPolling();
   }, { once: true });
 
-  const restoreCheckpointById = async (snapshotId: string): Promise<void> => {
+  const runUserWorkbookOperation = async <T,>(toolName: string, operation: () => Promise<T>): Promise<T> => {
     const activeRuntime = getActiveRuntime();
     const sessionId = activeRuntime?.persistence.getSessionId() ?? crypto.randomUUID();
-
     const workbookId = await resolveWorkbookId();
-    const coordinatorWorkbookId = workbookId ?? "workbook:unknown";
 
-    const restored = await workbookCoordinator.runWrite(
+    const { result } = await workbookCoordinator.runWrite(
       {
-        workbookId: coordinatorWorkbookId,
+        workbookId: workbookId ?? "workbook:unknown",
         sessionId,
         opId: crypto.randomUUID(),
-        toolName: "workbook_history",
+        toolName,
       },
-      () => workbookRecoveryLog.restore(snapshotId),
+      operation,
     );
-
-    const address = restored.result.address;
-    showToast(t("init.revertedAddress", { address }));
+    return result;
   };
 
+  const restoreNotingTabs = async (snapshotId: string) => {
+    const window: PiWriteWindow = {
+      toolCallId: `restore:${snapshotId}`,
+      startedAt: Date.now(),
+      settledAt: Number.POSITIVE_INFINITY,
+    };
+    changeTracker.notePiWrite(window, { kind: "restore" });
+    try {
+      const result = await workbookRecoveryLog.restore(snapshotId);
+      window.address = result.address;
+      return result;
+    } finally {
+      window.settledAt = Date.now();
+    }
+  };
+
+  const formatBackupAge = (at: number): string => formatRelativeDate(new Date(at).toISOString());
+
+  const restoreAfterConfirmation = async (preview: WorkbookRecoveryRestorePreview): Promise<boolean> => {
+    const edits = preview.laterEdits;
+    if (edits && !await requestConfirmationDialog({
+      title: t("init.confirm.restoreOverEditsTitle"),
+      message: t("init.confirm.restoreOverEditsMessage", {
+        age: formatBackupAge(preview.at),
+        address: preview.address,
+        count: edits.count,
+        sample: edits.sample.map((cell) => `${cell.address} = ${cell.content}`).join("; ")
+          + (edits.count > edits.sample.length ? "; …" : ""),
+      }),
+      confirmLabel: t("init.confirm.restoreAnyway"),
+      cancelLabel: t("init.confirm.keepEdits"),
+      confirmButtonTone: "danger",
+      restoreFocusOnClose: true,
+    })) return false;
+
+    const restored = await runUserWorkbookOperation(
+      "workbook_history", () => restoreNotingTabs(preview.id),
+    );
+    const address = restored.address;
+    if (restored.inverseSnapshotError) {
+      showToast(t("init.revertedWithoutRollback", { address }), { duration: 8000, variant: "error" });
+      return true;
+    }
+    showToast(t("init.revertedAddress", { address, age: formatBackupAge(preview.at) }));
+    return true;
+  };
+
+  const undoingTurns = new Set<string>();
+  document.addEventListener("pi:turn-change-action", (event) => {
+    if (!(event instanceof CustomEvent)) return;
+    const raw: unknown = event.detail;
+    if (!Value.Check(turnChangeActionSchema, raw)) return;
+    const runtime = getActiveRuntime();
+    const summary = runtime?.agent.state.messages.find((message) => message.role === "turnChanges" && message.turnId === raw.summary.turnId);
+    if (!runtime || summary?.role !== "turnChanges") return;
+    if (raw.action === "review") {
+      const dialog = createOverlayDialog({ overlayId: "pi-turn-changes-review", cardClassName: "pi-overlay-card pi-overlay-card--s" });
+      const { header } = createOverlayHeader({ title: t("turnChanges.reviewTitle"), onClose: () => dialog.close() });
+      const body = document.createElement("div");
+      body.className = "pi-overlay-body";
+      if (summary.ranOfficeJs) {
+        const warning = document.createElement("p");
+        warning.textContent = describeOfficeJsChanges(summary);
+        body.append(warning);
+      }
+      for (const change of summary.changes) {
+        const row = document.createElement("p");
+        row.textContent = t("turnChanges.reviewChange", { address: change.address, count: change.changedCount });
+        const backup = document.createElement("p");
+        backup.textContent = change.backupIds.length > 0
+          ? t("turnChanges.reviewBackups", { ids: change.backupIds.join(", ") }) : t("turnChanges.partial");
+        body.append(row, backup);
+      }
+      dialog.card.append(header, body);
+      dialog.mount();
+      return;
+    }
+    if (undoingTurns.has(summary.turnId)) return;
+    undoingTurns.add(summary.turnId);
+    void undoTurnChanges(summary, async (id) => {
+      const preview = await runUserWorkbookOperation("workbook_history", () => workbookRecoveryLog.previewRestore(id));
+      return restoreAfterConfirmation(preview);
+    }).catch((error) => {
+      showToast(t("turnChanges.undoFailed", { error: getErrorMessage(error) }), { variant: "error" });
+    }).finally(() => {
+      undoingTurns.delete(summary.turnId);
+      sidebar.syncFromAgent();
+      void runtime.persistence.saveSession({ force: true }).catch(() => {
+        showToast(t("turnChanges.summaryFailed"), { variant: "error" });
+      });
+    });
+  });
+
   const toRecoveryCheckpointSummary = (
-    snapshot: WorkbookRecoverySnapshot,
+    snapshot: RecoveryMetadata,
   ): RecoveryCheckpointSummary => ({
     id: snapshot.id,
     at: snapshot.at,
@@ -593,22 +732,29 @@ export async function initTaskpane(opts: {
   };
 
   const snapshotRuntimeTabLayout = (): WorkbookTabLayout => {
-    const runtimes = runtimeManager.listRuntimes();
-    const activeRuntime = runtimeManager.getActiveRuntime();
+    const tabs = runtimeManager.snapshotTabs();
+    const tabNumbers: Record<string, number> = {};
+    for (const tab of tabs) {
+      tabNumbers[tab.sessionId] = tab.tabNumber;
+    }
 
     return {
-      sessionIds: runtimes.map((runtime) => runtime.persistence.getSessionId()),
-      activeSessionId: activeRuntime?.persistence.getSessionId() ?? null,
+      sessionIds: tabs.map((tab) => tab.sessionId),
+      activeSessionId: tabs.find((tab) => tab.isActive)?.sessionId ?? null,
+      tabNumbers,
+      nextTabNumber: runtimeManager.getNextTabNumber(),
     };
   };
 
   const tabLayoutPersistence = createTabLayoutPersistence({
     resolveWorkbookId,
-    saveLayout: async (workbookId, layout) => {
-      await saveWorkbookTabLayout(settings, workbookId, layout);
+    saveLayout: async (_workbookId, layout) => {
+      const key = await resolvePersistentWorkbookKey("write");
+      if (key) await saveWorkbookTabLayout(settings, key.workbookId, layout);
     },
     warn: (message, error) => {
       console.warn(message, error);
+      showToast(t("sessions.toast.layoutSaveFailed", { error: getErrorMessage(error) }));
     },
   });
 
@@ -637,19 +783,63 @@ export async function initTaskpane(opts: {
     }
   };
 
-  const focusChatInputSoon = (): void => {
+  const focusSoon = (focus: () => void): void => {
+    const focusedAtRequest = document.activeElement;
     requestAnimationFrame(() => {
-      focusChatInput();
+      const focused = document.activeElement;
+      if (focused !== focusedAtRequest && focused !== null && focused !== document.body) return;
+      focus();
     });
+  };
+
+  const focusChatInputSoon = (): void => {
+    focusSoon(focusChatInput);
   };
 
   document.addEventListener(PI_REQUEST_INPUT_FOCUS_EVENT, () => {
     focusChatInputSoon();
   });
 
-  bindRuntimeSidebar({ runtimeManager, sidebar });
+  bindRuntimeSidebar({
+    runtimeManager,
+    sidebar,
+    renderError: (message) => { sidebar.turnError = message; },
+  });
 
+  sidebar.addEventListener("pi-retry", () => {
+    const runtime = runtimeManager.getActiveRuntime();
+    if (runtime?.actionQueue.retry()) runtime.tab.setError(null);
+  });
+  sidebar.addEventListener("pi-fix-error", (event) => {
+    if (!(event instanceof CustomEvent) || typeof event.detail !== "string") return;
+    if (event.detail === "settings") void openSettings("connections");
+    else if (event.detail === "login" || event.detail === "model") {
+      void commandRegistry.get(event.detail)?.execute("");
+    }
+  });
+
+  let warningRevision = 0;
+  let warningSessionId: string | null = null;
+  const refreshSubscriptionWarning = (): void => {
+    const revision = ++warningRevision;
+    const runtime = getActiveRuntime();
+    const sessionId = runtime?.persistence.getSessionId() ?? null;
+    if (sessionId !== warningSessionId) sidebar.subscriptionWarning = false;
+    warningSessionId = sessionId;
+    if (!runtime) return;
+    const provider = runtime.agent.state.model.provider;
+    void providerKeys.get(provider).then(async (key) => {
+      const visible = await showSubscriptionWarning(settings, runtime.persistence.getSessionId(), provider, key ?? undefined);
+      if (revision === warningRevision) sidebar.subscriptionWarning = visible;
+    }).catch(() => undefined);
+  };
+  document.addEventListener("pi:model-changed", refreshSubscriptionWarning);
+  document.addEventListener("pi:models-changed", refreshSubscriptionWarning);
+  document.addEventListener("pi:subscription-warning-changed", refreshSubscriptionWarning);
+
+  let lastReconciledModelSignature = "";
   runtimeManager.subscribe((snapshot) => {
+    refreshSubscriptionWarning();
     if (snapshot.activeRuntimeId !== previousActiveRuntimeId) {
       previousActiveRuntimeId = snapshot.activeRuntimeId;
       document.dispatchEvent(new CustomEvent("pi:active-runtime-changed"));
@@ -661,11 +851,21 @@ export async function initTaskpane(opts: {
 
     maybePersistTabLayout();
     document.dispatchEvent(new CustomEvent("pi:status-update"));
+
+    const modelSignature = runtimeManager.listRuntimes()
+      .map((runtime) => `${runtime.runtimeId}:${runtime.agent.state.model.provider}/${runtime.agent.state.model.id}:${runtime.actionQueue.isBusy()}`)
+      .join("|");
+    if (modelSignature !== lastReconciledModelSignature) {
+      lastReconciledModelSignature = modelSignature;
+      modelRefreshOwner.reconcileRuntimes();
+    }
   });
 
   const refreshCapabilitiesForAllRuntimes = (): Promise<void> => {
     return runtimeManager.refreshCapabilities();
   };
+  document.addEventListener("pi:model-changed", () => { void refreshCapabilitiesForAllRuntimes(); });
+  document.addEventListener("pi:models-changed", () => { void refreshCapabilitiesForAllRuntimes(); });
 
   const reservedToolNames = new Set([
     ...createAllTools({ hostKind: spreadsheetHost.kind }).map((tool) => tool.name),
@@ -725,6 +925,10 @@ export async function initTaskpane(opts: {
     void refreshWorkbookState();
   });
 
+  document.addEventListener("pi:conventions-updated", () => {
+    void refreshCapabilitiesForAllRuntimes();
+  });
+
   document.addEventListener(PI_EXPERIMENTAL_FEATURE_CHANGED_EVENT, () => {
     void refreshCapabilitiesForAllRuntimes();
   });
@@ -741,13 +945,31 @@ export async function initTaskpane(opts: {
     void refreshCapabilitiesForAllRuntimes();
   });
 
+  if (typeof BroadcastChannel !== "undefined") {
+    const settingsChannel = new BroadcastChannel("pi-for-excel:settings-changed");
+    for (const eventName of [
+      "pi:rules-updated",
+      "pi:conventions-updated",
+      PI_SKILLS_CHANGED_EVENT,
+      PI_INTEGRATIONS_CHANGED_EVENT,
+    ]) {
+      document.addEventListener(eventName, () => {
+        settingsChannel.postMessage(eventName);
+      });
+    }
+    settingsChannel.addEventListener("message", () => {
+      void refreshWorkbookState();
+    });
+  }
+
   document.addEventListener(PI_EXECUTION_MODE_CHANGED_EVENT, () => {
     void refreshCapabilitiesForAllRuntimes();
   });
 
-  // Start bridge health probe now that refreshCapabilitiesForAllRuntimes is available.
-  // The first runtime prompt waits for this promise, preventing a first-turn
-  // gap where Local Services has not been populated yet.
+  document.addEventListener(PI_BACKUP_SAVE_FAILED_EVENT, () => {
+    showToast(t("init.backupSaveFailed"), { duration: 8000, variant: "error" });
+  });
+
   localServicesReady = probeLocalServices().then(
     (result) => {
       localServicesSnapshot = result;
@@ -776,15 +998,28 @@ export async function initTaskpane(opts: {
   const requestRuntimeToolApproval = (args: {
     title: string;
     message: string;
+    toolCallId?: string;
+    headline?: string;
     confirmLabel?: string;
+    signal?: AbortSignal;
+    source?: string;
+    onStop?: () => void;
+    allowForTurn?: boolean;
+    note?: string;
+    secondaryApproval?: { label: string; onApprove: () => void | Promise<void> };
   }): Promise<boolean> => {
-    return requestConfirmationDialog({
-      overlayId: TOOL_APPROVAL_OVERLAY_ID,
+    return requestApproval({
       title: args.title,
+      ...(args.toolCallId ? { toolCallId: args.toolCallId } : {}),
+      ...(args.headline ? { headline: args.headline } : {}),
       message: normalizeApprovalMessage(args.title, args.message),
-      ...(args.confirmLabel !== undefined ? { confirmLabel: args.confirmLabel } : {}),
-      cancelLabel: t("confirm.cancel"),
-      restoreFocusOnClose: true,
+      confirmLabel: args.confirmLabel ?? t("init.confirm.allowOnce"),
+      ...(args.allowForTurn ? { allowForTurn: true } : {}),
+      ...(args.note ? { note: args.note } : {}),
+      ...(args.secondaryApproval ? { secondaryApproval: args.secondaryApproval } : {}),
+      ...(args.signal ? { signal: args.signal } : {}),
+      ...(args.source ? { source: args.source } : {}),
+      ...(args.onStop ? { onStop: args.onStop } : {}),
     });
   };
 
@@ -792,62 +1027,83 @@ export async function initTaskpane(opts: {
     optsForRuntime: CreateRuntimeOptions,
   ): Promise<SessionRuntime> {
     const runtimeId = crypto.randomUUID();
-    let runtimeSessionId: string = crypto.randomUUID();
+    let runtimeSessionId: string = optsForRuntime.sessionId ?? crypto.randomUUID();
     const runtimeSkillReadCache = createSkillReadCache();
+    const runtimeAssistantCreatedFiles = new Set<string>();
 
     let runtimeAgent: Agent | null = null;
+
+    const stopRuntimeTurn = (): void => {
+      const runtime = runtimeManager.getRuntime(runtimeId);
+      if (runtime) stopTab(runtime);
+    };
+
+    const approvalSource = (): { source?: string } => {
+      if (getActiveRuntime()?.runtimeId === runtimeId) return {};
+      const runtime = runtimeManager.getRuntime(runtimeId);
+      if (!runtime) return {};
+      return { source: t("approval.fromTab", { title: resolveRuntimeTabTitle(runtimeId, runtime) }) };
+    };
 
     const buildRuntimeCapabilities = async (sessionId: string): Promise<{
       tools: ReturnType<typeof withWorkbookCoordinator>;
       systemPrompt: string;
       extensionToolRevision: number;
     }> => {
-      const workbookId = await resolveWorkbookId();
-      const activeIntegrationIds = await resolveRuntimeIntegrationIds({
-        sessionId,
-        workbookId,
-      });
+      const model = modelRuntime.models.getModel(
+        runtimeAgent?.state.model.provider ?? initialModel.provider,
+        runtimeAgent?.state.model.id ?? initialModel.id,
+      ) ?? initialModel;
+      const workbookIdPromise = resolveWorkbookId();
+      const [workbookId, configuredIntegrationIds, searchConfig, nativeAvailable] = await Promise.all([
+        workbookIdPromise,
+        workbookIdPromise.then((workbookId) => resolveRuntimeIntegrationIds({ sessionId, workbookId })),
+        loadWebSearchProviderConfig(settings),
+        supportsNativeWebSearch(model) ? providerKeys.get(model.provider).then(Boolean) : false,
+      ]);
+      let activeIntegrationIds = configuredIntegrationIds;
+      if (!nativeAvailable && !getApiKeyForProvider(searchConfig) && !getApiKeyForProvider(searchConfig, "jina")) {
+        activeIntegrationIds = activeIntegrationIds.filter((id) => id !== "web_search");
+      }
 
       const coreTools = createAllTools({
         hostKind: spreadsheetHost.kind,
         getExtensionManager: () => extensionManager,
         getSessionId: () => runtimeAgent?.sessionId ?? runtimeSessionId,
+        getTurnId: (toolCallId) => turns.turnIdOf(toolCallId),
         skillReadCache: runtimeSkillReadCache,
+        guidance: {
+          getExecutionMode: () => executionModeController.readMode(),
+          requestLocalChangeApproval: (request) => requestRuntimeToolApproval({
+            title: request.title,
+            message: request.message,
+            confirmLabel: request.confirmLabel,
+            ...(request.signal ? { signal: request.signal } : {}),
+            onStop: stopRuntimeTurn,
+            ...approvalSource(),
+          }),
+        },
       }).filter(isRuntimeAgentTool);
 
-      const gatedCoreTools = await applyExperimentalToolGates(coreTools, {
-        getExecutionMode: () => Promise.resolve(getExecutionMode()),
-        requestOfficeJsExecuteApproval: (request) => {
-          const apiName = request.apiName ?? "Office.js";
-          return requestRuntimeToolApproval({
-            title: apiName === "WPS JSAPI"
-              ? t("init.confirm.wpsJsTitle")
-              : t("init.confirm.officeJsTitle"),
-            message: buildOfficeJsExecuteApprovalMessage(request),
-            confirmLabel: t("init.confirm.allowOnce"),
-          });
-        },
-        requestPythonBridgeApproval: (request) => {
-          return requestRuntimeToolApproval({
-            title: t("init.confirm.pythonTitle"),
-            message: buildPythonBridgeApprovalMessage(
-              request.toolName,
-              request.bridgeUrl,
-              request.params,
-            ),
-            confirmLabel: t("init.confirm.allowBridge"),
-          });
-        },
-      });
-
-      // Snapshot extension tools + revision together so schema-stable handler
-      // reloads are compared against the same point-in-time payload.
       const extensionTools = extensionManager.getRegisteredTools();
       const extensionToolRevision = extensionManager.getToolRevision();
 
       const runtimeTools = normalizeRuntimeTools([
-        ...gatedCoreTools,
-        ...createToolsForIntegrations(activeIntegrationIds),
+        ...coreTools,
+        ...createToolsForIntegrations(activeIntegrationIds, {
+          getExecutionMode: () => executionModeController.readMode(),
+          requestToolApproval: (request) => requestApproval({
+            ...request,
+            onStop: stopRuntimeTurn,
+            ...approvalSource(),
+          }),
+          nativeSearch: async (query, signal) => {
+            if (!supportsNativeWebSearch(nativeSearchModel)) return null;
+            const apiKey = await runtimeAgent?.getApiKey?.(nativeSearchModel.provider);
+            if (!apiKey) return null;
+            return runNativeWebSearch({ model: nativeSearchModel, apiKey, query, signal, sessionId, stream: streamFn });
+          },
+        }),
         ...extensionTools,
       ]);
 
@@ -861,32 +1117,116 @@ export async function initTaskpane(opts: {
           getSessionId: () => runtimeAgent?.sessionId ?? runtimeSessionId,
         },
         {
+          onWriteStarted: (window) => {
+            const turn = turns.current();
+            if (turns.turnIdOf(window.toolCallId) === turn.id) {
+              turn.toolCallIds.add(window.toolCallId);
+              if (window.toolName === "execute_office_js") turn.officeJsCallIds.add(window.toolCallId);
+            }
+            changeTracker.notePiWrite(window, { kind: "runtime", runtimeId });
+          },
           onWriteCommitted: (event) => {
             if (event.impact !== "structure") return;
             invalidateBlueprint(event.workbookId);
+            autoContext.noteOwnStructureChange();
           },
         },
         {
-          getExecutionMode: () => Promise.resolve(getExecutionMode()),
-          requestMutationApproval: (request) => {
-            return requestRuntimeToolApproval({
-              title: t("init.confirm.safeModeMutationTitle"),
-              message: buildMutationApprovalMessage(request),
-              confirmLabel: t("init.confirm.allowOnce"),
+          getExecutionMode: () => executionModeController.readMode(),
+          requestToolApproval: (request) => {
+            const deletesBackups = request.reason === "always";
+            const irreversible = request.reason === "irreversible";
+            const details = humanizeToolInput(request.toolName, request.params);
+            const overwrites = request.overwrites
+              ? t("approval.overwrites", {
+                count: request.overwrites.count,
+                sample: request.overwrites.sample
+                  .map((cell) => `${cell.address} = ${cell.content.length > 40 ? `${cell.content.slice(0, 40)}…` : cell.content}`)
+                  .join("; ") + (request.overwrites.count > request.overwrites.sample.length ? "; …" : ""),
+              })
+              : null;
+            const title = deletesBackups ? t("approval.title.deleteBackups") : t("approval.title.workbookChange");
+            return requestApproval({
+              title,
+              toolCallId: request.toolCallId,
+              headline: describePendingToolCall(request.toolName, request.params) ?? request.toolName,
+              ...(details ? { details } : {}),
+              note: deletesBackups ? t("approval.note.deleteBackups")
+                : irreversible ? t("approval.note.irreversible") : t("approval.note.confirmMode"),
+              allowForTurn: request.reason === "confirm_mode",
+              ...(irreversible ? { secondaryApproval: {
+                label: t("approval.fullBackupFirst"),
+                onApprove: backUpBeforeChange,
+              } } : {}),
+              confirmLabel: deletesBackups ? t("approval.allowDelete") : toolActionVerb(request.toolName, request.params) ?? t("init.confirm.allowOnce"),
+              confirmTone: deletesBackups || irreversible ? "danger" : "primary",
+              ...(request.signal ? { signal: request.signal } : {}),
+              ...(overwrites ? { overwrites } : {}),
+              onStop: stopRuntimeTurn,
+              ...approvalSource(),
             });
           },
         },
       );
 
-      const preflightTools = withConnectionPreflight(coordinatedTools, {
+      const gatedTools = await applyExperimentalToolGates(coordinatedTools, {
+        getExecutionMode: () => executionModeController.readMode(),
+        requestOfficeJsExecuteApproval: (request) => {
+          const apiName = request.apiName ?? "Office.js";
+          return requestRuntimeToolApproval({
+            title: apiName === "WPS JSAPI"
+              ? t("init.confirm.wpsJsTitle")
+              : t("init.confirm.officeJsTitle"),
+            toolCallId: request.toolCallId,
+            headline: apiName === "WPS JSAPI" ? t("turn.verb.run_wps_jsapi.base") : t("turn.verb.run_office_js.base"),
+            message: buildOfficeJsExecuteApprovalMessage(request),
+            confirmLabel: t("init.confirm.allowOnce"),
+            allowForTurn: !request.destructive && !request.riskIdentifiers?.length,
+            ...(request.destructive ? { note: t("approval.note.irreversible") } : {}),
+            ...(request.destructive ? { secondaryApproval: {
+              label: t("approval.fullBackupFirst"),
+              onApprove: backUpBeforeChange,
+            } } : {}),
+            ...(request.signal ? { signal: request.signal } : {}),
+            onStop: stopRuntimeTurn,
+            ...approvalSource(),
+          });
+        },
+        requestPythonBridgeApproval: (request) => {
+          return requestRuntimeToolApproval({
+            title: t("init.confirm.pythonTitle"),
+            message: buildPythonBridgeApprovalMessage(
+              request.toolName,
+              request.bridgeUrl,
+              request.params,
+            ),
+            confirmLabel: t("init.confirm.allowBridge"),
+            ...(request.signal ? { signal: request.signal } : {}),
+            onStop: stopRuntimeTurn,
+            ...approvalSource(),
+          });
+        },
+        requestLocalChangeApproval: (request) => requestRuntimeToolApproval({
+          title: request.title,
+          message: request.message,
+          confirmLabel: request.confirmLabel,
+          ...(request.signal ? { signal: request.signal } : {}),
+          onStop: stopRuntimeTurn,
+          ...approvalSource(),
+        }),
+        assistantCreatedFiles: runtimeAssistantCreatedFiles,
+        listExtensions: () => extensionManager.list(),
+      });
+
+
+      const preflightTools = withConnectionPreflight(gatedTools, {
         connectionManager,
       });
 
-      const tools = applyToolOutputTruncation(preflightTools, {
-        // Scale caps with the active model's context window (#566).
+      const tools = withStopResults(applyToolOutputTruncation(preflightTools, {
         limits: () => effectiveToolOutputLimits(runtimeAgent?.state.model.contextWindow),
         saveTruncatedOutput: saveTruncatedToolOutputToWorkspace,
-      });
+      }));
 
       const systemPrompt = await buildRuntimeSystemPrompt({
         workbookId,
@@ -901,14 +1241,17 @@ export async function initTaskpane(opts: {
       };
     };
 
-    const initialModel = getActiveRuntime()?.agent.state.model
+    const activeSelection = getActiveRuntime()?.agent.state.model;
+    const initialModel = (activeSelection && modelRuntime.models.getModel(activeSelection.provider, activeSelection.id))
       ?? modelRefreshOwner.snapshot().defaultModel;
+    let nativeSearchModel = initialModel;
+    const autoContext = createAutoContext({ changeTracker, getAgent: () => runtimeAgent, runtimeId });
     const initialCapabilities = await buildRuntimeCapabilities(runtimeSessionId);
 
     const agent = new Agent({
       initialState: {
         model: initialModel,
-        thinkingLevel: initialModel.reasoning ? "high" : "off",
+        thinkingLevel: clampThinkingLevel(initialModel, getActiveRuntime()?.agent.state.thinkingLevel ?? "high"),
         messages: [{
           role: "system",
           content: "",
@@ -921,7 +1264,8 @@ export async function initTaskpane(opts: {
       convertToLlm: createConvertToLlm({
         getContextWindow: () => runtimeAgent?.state.model.contextWindow,
       }),
-      transformContext: createContextInjector(changeTracker),
+      prepareRequest: autoContext.prepareRequest,
+      transformContext: autoContext.transformContext,
       streamFn,
     });
 
@@ -968,46 +1312,94 @@ export async function initTaskpane(opts: {
       }
     };
 
-    // API key resolution
+    const tab = createTabState();
+    const turns = trackTurns(agent);
+
     agent.getApiKey = async (provider: string) => {
+      const turn = turns.running();
+      if (await oauthRefresher.ensureFresh(provider) === "expired") {
+        // Sending the stale token would only surface the provider's 401, and
+        // returning no key lets pi-ai fall back to that same stored token.
+        if (turn) turn.expiredLoginFor = modelRuntime.models.getProvider(provider)?.name ?? provider;
+        throw new Error(`The ${provider} login has expired and could not be refreshed.`);
+      }
       const resolvedAuth = await modelRuntime.models.getAuth(provider);
       if (resolvedAuth) return resolvedAuth.auth.apiKey;
 
-      // Extension provider credentials are configured through their host-owned
-      // connection cards, never through the generic API-key dialog.
       if (modelRuntime.isExtensionProvider(provider)) {
-        showErrorBanner(errorRoot, t("runtime.error.noApiKey", { provider }));
+        tab.setError(t("runtime.error.noApiKey", { provider }));
         return undefined;
       }
 
       const success = await promptForProviderConnection(provider);
       await modelRefreshOwner.refreshConfiguredProviders(false);
       if (success) {
-        clearErrorBanner(errorRoot);
+        tab.setError(null);
         return (await getAppStorage().providerKeys.get(provider)) ?? undefined;
       }
 
-      showErrorBanner(errorRoot, `API key required for ${provider}.`);
+      if (turn) turn.missingCredentialsFor = provider;
       return undefined;
     };
 
-    const queueDisplay = createQueueDisplay({ agent });
+    const queueDisplay = createQueueDisplay({ agent, held: tab });
+    let savePersistence: () => Promise<void> = () => Promise.resolve();
     const actionQueue = createActionQueue({
       agent,
-      sidebar,
-      queueDisplay,
+      tab,
+      queueDisplay: {
+        ...queueDisplay,
+        setActionQueue: (items) => {
+          queueDisplay.setActionQueue(items);
+          runtimeManager.notifyRuntimeChanged();
+        },
+      },
       autoCompactEnabled,
-      runCompact: () => runCompactCommand(agent, ""),
+      runCompact: async (args, signal) => {
+        const before = agent.state.messages;
+        await runCompactCommand(agent, args, signal);
+        if (agent.state.messages !== before) {
+          document.dispatchEvent(new CustomEvent("pi:status-update"));
+          await savePersistence();
+        }
+      },
+      onTurnSettled: ({ overflowAfterRecovery }) => {
+        const { missingCredentialsFor, expiredLoginFor } = turns.current();
+        void getConfiguredProxyUrl().then((proxyUrl) => {
+          tab.setError(describeTurnFailure({
+            messages: agent.state.messages,
+            isContextOverflow: findTrailingContextOverflowError(agent.state) !== null,
+            overflowAfterRecovery,
+            missingCredentialsFor,
+            expiredLoginFor,
+            online: navigator.onLine,
+            proxyUrl: proxyUrl ?? null,
+            defaultProxyUrl: DEFAULT_PROXY_URL,
+            proxyBlockedByBrowser: isProxyBlockedByBrowser(),
+          }));
+        });
+      },
+      onLeftUnsent: (count) => {
+        if (runtimeManager.getActiveRuntime()?.runtimeId !== runtimeId) return;
+        showToast(t("turn.toast.leftUnsent", { count, plural: count === 1 ? "" : "s" }));
+      },
     });
 
     const persistence = await setupSessionPersistence({
       agent,
       sessions,
       settings,
-      models: modelRuntime.models,
+      resolveModel: (persisted) => modelRefreshOwner.resolveModel(persisted),
       initialSessionId: runtimeSessionId,
       autoRestoreLatest: optsForRuntime.autoRestoreLatest,
+      onSaveError: (message) => {
+        showToast(t("sessions.toast.saveFailed", { error: message }));
+      },
+      onSavedAsCopy: () => {
+        showToast(t("init.sessionSavedAsCopy"), 8000);
+      },
     });
+    savePersistence = async () => { await persistence.saveSession({ force: true }); };
 
     runtimeSessionId = persistence.getSessionId();
     await refreshRuntimeCapabilities();
@@ -1023,48 +1415,42 @@ export async function initTaskpane(opts: {
       void refreshRuntimeCapabilities();
     });
 
-    const unsubscribeErrorTracking = agent.subscribe((ev) => {
-      const isActiveRuntime = runtimeManager.getActiveRuntime()?.runtimeId === runtimeId;
+    const unbindDraft = draftStore.bind(tab, persistence);
 
-      if (ev.type === "message_start" && ev.message.role === "user" && isActiveRuntime) {
-        clearErrorBanner(errorRoot);
+    const unsubscribeErrorTracking = agent.subscribe(async (ev, signal) => {
+      if (ev.type === "agent_start") {
+        nativeSearchModel = modelRuntime.models.getModel(agent.state.model.provider, agent.state.model.id) ?? initialModel;
+      }
+      if (ev.type === "message_start" && ev.message.role === "user") {
+        tab.setError(null);
       }
 
       if (ev.type !== "agent_end") return;
 
-      // Provider refreshes intentionally skip working runtimes. Re-run the
-      // reconciliation after the action queue unwinds so an extension that
-      // unloads mid-turn cannot leave its now-missing provider selected.
-      window.setTimeout(() => modelRefreshOwner.reconcileRuntimes(), 0);
-
-      const wasUserAbort = abortedAgents.has(agent);
-      abortedAgents.delete(agent);
-
-      if (!isActiveRuntime) return;
-
-      const errorMessage = agent.state.errorMessage;
-      if (errorMessage) {
-        const isAbort = wasUserAbort || /abort/i.test(errorMessage) || /cancel/i.test(errorMessage);
-        if (!isAbort) {
-          const err = errorMessage;
-          if (findTrailingContextOverflowError(agent.state)) {
-            showErrorBanner(
-              errorRoot,
-              autoCompactEnabled
-                ? "Context window exceeded — Pi will try compacting older history and retrying once. If this error persists, run /compact, scope your request to a smaller range, or use a larger-context model."
-                : "Context window exceeded. Run /compact to free up context, scope your request to a smaller range, or use a larger-context model.",
-            );
-          } else if (isLikelyCorsErrorMessage(err)) {
-            showErrorBanner(
-              errorRoot,
-              `Network error (likely CORS). If you're using OAuth, enable /settings → Proxy with ${DEFAULT_PROXY_URL} and retry. Guide: ${PROXY_HELPER_DOCS_URL}`,
-            );
-          } else {
-            showErrorBanner(errorRoot, t("init.llmError", { error: err }));
-          }
+      const lastAssistant = [...agent.state.messages].reverse().find((message) => message.role === "assistant");
+      const stopReason = lastAssistant?.role === "assistant" ? lastAssistant.stopReason : undefined;
+      runOutcomes.set(runtimeId, stopReason === "aborted" ? null : stopReason === "error" ? "failed" : "finished");
+      const { id: turnId, toolCallIds, officeJsCallIds } = turns.current();
+      try {
+        const backups = await readTurnBackups(workbookRecoveryLog, turnId);
+        const summary = summarizeTurnChanges({
+          turnId,
+          timestamp: Date.now(),
+          outcome: signal.aborted || stopReason === "aborted" ? "stopped" : stopReason === "error" ? "failed" : "finished",
+          toolCallIds,
+          ranOfficeJs: officeJsCallIds.size > 0,
+          officeJsRanges: officeJsCallIds.size > 0 ? await changeTracker.rangesChangedBy(officeJsCallIds) : [],
+          audit: await getWorkbookChangeAuditLog().list(500),
+          backups,
+        });
+        if (summary) {
+          agent.state.messages = [...agent.state.messages, summary];
+          if (getActiveRuntime()?.runtimeId === runtimeId) sidebar.syncFromAgent();
+          await persistence.saveSession({ force: true });
         }
-      } else {
-        clearErrorBanner(errorRoot);
+      } catch (error) {
+        console.warn("[pi] Could not summarize workbook changes:", getErrorMessage(error));
+        showToast(t("turnChanges.summaryFailed"), { variant: "error" });
       }
     });
 
@@ -1073,6 +1459,7 @@ export async function initTaskpane(opts: {
       agent,
       actionQueue,
       queueDisplay,
+      tab,
       persistence,
       lockState: "idle",
       refreshCapabilities: refreshRuntimeCapabilities,
@@ -1080,6 +1467,8 @@ export async function initTaskpane(opts: {
         runtimeSkillReadCache.clearAll();
         unsubscribeSessionCapabilitySync();
         unsubscribeErrorTracking();
+        turns.dispose();
+        unbindDraft();
         queueDisplay.detach();
         actionQueue.shutdown();
         uninstallImageInputNormalization();
@@ -1103,7 +1492,12 @@ export async function initTaskpane(opts: {
   let tabLayoutReadSucceeded = false;
 
   const restorePersistedTabLayout = async (): Promise<SessionRuntime | null> => {
-    const workbookId = await resolveWorkbookId();
+    const key = await resolvePersistentWorkbookKey("read");
+    if (!key) {
+      tabLayoutReadSucceeded = true;
+      return null;
+    }
+    const workbookId = key.workbookId;
     let savedLayout: WorkbookTabLayout | null;
     try {
       savedLayout = await loadWorkbookTabLayout(settings, workbookId);
@@ -1114,39 +1508,31 @@ export async function initTaskpane(opts: {
     }
     if (!savedLayout) return null;
 
-    const runtimesBySessionId = new Map<string, SessionRuntime>();
-    let firstRuntime: SessionRuntime | null = null;
+    runtimeManager.seedNextTabNumber(savedLayout.nextTabNumber ?? 1);
+    const restoredTabs = await mapWithConcurrency(savedLayout.sessionIds, RESTORE_TAB_CONCURRENCY, async (sessionId) => {
+      const tabNumber = savedLayout.tabNumbers?.[sessionId];
+      const tabNumberOption = tabNumber !== undefined ? { tabNumber } : {};
+      const [runtime, sessionData] = await Promise.all([
+        buildSessionRuntime({ activate: false, autoRestoreLatest: false, sessionId, ...tabNumberOption }),
+        sessions.loadSession(sessionId),
+      ]);
+      return { sessionId, runtime, sessionData, tabNumberOption };
+    });
 
-    for (const sessionId of savedLayout.sessionIds) {
-      const runtime = await runtimeManager.createRuntime({
-        activate: false,
-        autoRestoreLatest: false,
-      });
-
-      const sessionData = await sessions.loadSession(sessionId);
-      if (sessionData) {
-        await runtime.persistence.applyLoadedSession(sessionData);
-      } else {
-        // Keep blank tabs durable across reloads.
-        await runtime.persistence.saveSession({ force: true });
-      }
-
-      if (!firstRuntime) {
-        firstRuntime = runtime;
-      }
-
-      if (!runtimesBySessionId.has(sessionId)) {
-        runtimesBySessionId.set(sessionId, runtime);
-      }
+    for (const { runtime, tabNumberOption } of restoredTabs) {
+      runtimeManager.registerRuntime(runtime, { activate: false, ...tabNumberOption });
     }
 
+    for (const { runtime, sessionData } of restoredTabs) {
+      if (sessionData) await runtime.persistence.applyLoadedSession(sessionData);
+      else await runtime.persistence.saveSession({ force: true });
+    }
+
+    const firstRuntime = restoredTabs[0]?.runtime;
     if (!firstRuntime) return null;
 
-    const preferredActiveRuntime = savedLayout.activeSessionId
-      ? runtimesBySessionId.get(savedLayout.activeSessionId) ?? null
-      : null;
-
-    const nextActiveRuntime = preferredActiveRuntime ?? firstRuntime;
+    const nextActiveRuntime = restoredTabs.find((tab) => tab.sessionId === savedLayout.activeSessionId)?.runtime
+      ?? firstRuntime;
     runtimeManager.switchRuntime(nextActiveRuntime.runtimeId);
     return nextActiveRuntime;
   };
@@ -1160,43 +1546,26 @@ export async function initTaskpane(opts: {
     document.dispatchEvent(new CustomEvent("pi:status-update"));
   };
 
-  const replaceActiveRuntimeSession = async (sessionData: SessionData): Promise<void> => {
-    const activeRuntime = getActiveRuntime();
-    if (!activeRuntime) {
-      showToast(t("init.noActiveSession"));
-      return;
-    }
-
-    const busy = activeRuntime.agent.state.isStreaming || activeRuntime.actionQueue.isBusy();
-    if (busy) {
-      showToast(t("init.currentTabBusy"));
-      return;
-    }
-
-    await activeRuntime.persistence.applyLoadedSession(sessionData);
-    syncRuntimeAfterSessionLoad(activeRuntime);
+  const getRuntimeTabTitle = (runtimeId: string): string => {
+    return runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title ?? t("session.untitled");
   };
 
-  const openSessionInNewTab = async (sessionData: SessionData): Promise<SessionRuntime> => {
-    const runtime = await runtimeManager.createRuntime({
-      activate: true,
-      autoRestoreLatest: false,
-    });
+  const openSavedSession = async (
+    sessionData: SessionData,
+    target: OpenSessionTarget,
+  ): Promise<{ outcome: "opened" | "replaced" | "focused"; title: string }> => {
+    const result = await runtimeManager.openSession(sessionData, target);
 
-    await runtime.persistence.applyLoadedSession(sessionData);
-    syncRuntimeAfterSessionLoad(runtime);
-    return runtime;
+    recentlyClosed.removeBySessionId(result.runtime.persistence.getSessionId());
+    if (result.outcome !== "focused") {
+      syncRuntimeAfterSessionLoad(result.runtime);
+    }
+    return { outcome: result.outcome, title: getRuntimeTabTitle(result.runtime.runtimeId) };
   };
 
-  const openResumePicker = async (defaultTarget: ResumeDialogTarget = "new_tab"): Promise<void> => {
+  const openResumePicker = async (): Promise<void> => {
     await showResumeDialog({
-      defaultTarget,
-      onOpenInNewTab: async (sessionData: SessionData) => {
-        await openSessionInNewTab(sessionData);
-      },
-      onReplaceCurrent: async (sessionData: SessionData) => {
-        await replaceActiveRuntimeSession(sessionData);
-      },
+      onOpenSession: (sessionData: SessionData) => openSavedSession(sessionData, { kind: "resume" }),
       getRecentlyClosedItems: () => recentlyClosed.snapshot(),
       onReopenRecentlyClosed: async (item) => {
         return reopenRecentlyClosedById(item.id);
@@ -1210,7 +1579,14 @@ export async function initTaskpane(opts: {
 
   type ReopenRecentlyClosedResult = "reopened" | "missing" | "failed";
 
+  let closeUndoToast: { itemId: string; toast: ActionToastHandle } | null = null;
+
   const reopenRecentlyClosedItem = async (item: RecentlyClosedItem): Promise<ReopenRecentlyClosedResult> => {
+    if (closeUndoToast?.itemId === item.id) {
+      closeUndoToast.toast.dismiss();
+      closeUndoToast = null;
+    }
+
     try {
       const sessionData = await sessions.loadSession(item.sessionId);
       if (!sessionData) {
@@ -1218,8 +1594,16 @@ export async function initTaskpane(opts: {
         return "missing";
       }
 
-      await openSessionInNewTab(sessionData);
-      showToast(t("init.reopened", { title: formatSessionTitle(item.title) }));
+      const opened = await openSavedSession(sessionData, {
+        kind: "new_tab",
+        ...(item.tabNumber !== undefined ? { tabNumber: item.tabNumber } : {}),
+      });
+      if (!opened) return "failed";
+      dismissToast(`closed-tab:${item.id}`);
+
+      showToast(opened.outcome === "focused"
+        ? t("init.alreadyOpen", { title: opened.title })
+        : t("init.reopened", { title: opened.title }));
       return "reopened";
     } catch {
       showToast(t("init.couldNotReopenSession"));
@@ -1256,25 +1640,24 @@ export async function initTaskpane(opts: {
   };
 
   const revertLatestCheckpoint = async (): Promise<void> => {
-    const latest = await workbookRecoveryLog.listForCurrentWorkbook(1);
-    const checkpoint = latest[0];
-
-    if (!checkpoint) {
+    const preview = await runUserWorkbookOperation("workbook_history", async () => {
+      const latest = (await workbookRecoveryLog.listForCurrentWorkbook(1))[0];
+      return latest ? workbookRecoveryLog.previewRestore(latest.id) : null;
+    });
+    if (!preview) {
       showToast(t("init.noBackupsYet"));
       return;
     }
-
-    await restoreCheckpointById(checkpoint.id);
+    await restoreAfterConfirmation(preview);
   };
 
-  const createManualFullBackup = async (): Promise<{
-    id: string;
-    createdAt: number;
-    sizeBytes: number;
-  }> => {
-    const backup = await manualFullBackupStore.create();
-    await getFilesWorkspace().downloadFile(backup.path);
-    return toManualFullBackupSummary(backup);
+  const createManualFullBackup = (): Promise<DownloadedFullWorkbookBackup> => manualFullBackupStore.createAndDownload({
+    runCapture: (capture) => runUserWorkbookOperation("manual_backup", capture),
+  });
+
+  const backUpBeforeChange = async (): Promise<void> => {
+    const backup = await createManualFullBackup();
+    if (!backup.kept) showToast(t("recovery.toast.backupDownloadedNotKept", { id: backup.id, size: formatBytes(backup.sizeBytes) }));
   };
 
   const listManualFullBackups = async (limit = 5): Promise<Array<{
@@ -1301,8 +1684,8 @@ export async function initTaskpane(opts: {
     return resolved ? toManualFullBackupSummary(resolved) : null;
   };
 
-  const clearManualFullBackups = async (): Promise<number> => {
-    return manualFullBackupStore.clearForCurrentWorkbook();
+  const clearManualFullBackups = async (confirm: (count: number) => Promise<boolean>): Promise<number> => {
+    return manualFullBackupStore.clearForCurrentWorkbook(confirm);
   };
 
   const closeRuntimeWithRecovery = async (
@@ -1322,7 +1705,7 @@ export async function initTaskpane(opts: {
       return false;
     }
 
-    if (runtime.agent.state.isStreaming) {
+    if (runtime.actionQueue.isBusy()) {
       const proceed = await requestConfirmationDialog({
         title: t("init.confirm.stopAndCloseTitle"),
         message: t("init.confirm.stopAndCloseMessage"),
@@ -1332,21 +1715,30 @@ export async function initTaskpane(opts: {
       });
       if (!proceed) return false;
 
-      abortedAgents.add(runtime.agent);
-      runtime.agent.abort();
+      const current = runtimeManager.getRuntime(runtimeId);
+      if (current !== runtime) return false;
+      if (runtimeManager.listRuntimes().length <= 1) {
+        showToast(t("init.cantCloseLastTab"));
+        return false;
+      }
+      runtime.actionQueue.stop();
     }
+
+    if (runtime.lockState !== "idle") {
+      showToast(t("init.waitingForChangeBeforeClose"));
+    }
+    await runtime.agent.waitForIdle();
 
     await runtime.persistence.saveSession({ force: true });
 
-    const closeTitle = runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title
-      ?? formatSessionTitle(runtime.persistence.getSessionTitle());
-
+    const closingTab = runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId);
     const closedItem: RecentlyClosedItem = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       sessionId: runtime.persistence.getSessionId(),
-      title: closeTitle,
+      title: closingTab?.title ?? formatSessionTitle(runtime.persistence.getSessionTitle()),
       closedAt: new Date().toISOString(),
       workbookId: await resolveWorkbookId(),
+      ...(closingTab ? { tabNumber: closingTab.tabNumber } : {}),
     };
 
     runtimeManager.closeRuntime(runtimeId);
@@ -1354,14 +1746,17 @@ export async function initTaskpane(opts: {
 
     const showUndoToast = optsForClose?.showUndoToast !== false;
     if (showUndoToast) {
-      showActionToast({
+      const toast = showActionToast({
+        id: `closed-tab:${closedItem.id}`,
         message: t("init.closedTab", { title: closedItem.title }),
         actionLabel: t("init.undo"),
         duration: 9000,
         onAction: () => {
+          closeUndoToast = null;
           void reopenRecentlyClosedById(closedItem.id);
         },
       });
+      closeUndoToast = { itemId: closedItem.id, toast };
     }
 
     return true;
@@ -1374,21 +1769,22 @@ export async function initTaskpane(opts: {
       return;
     }
 
-    if (runtime.agent.state.isStreaming || runtime.actionQueue.isBusy()) {
-      showToast(t("init.waitBeforeRenaming"));
-      return;
-    }
-
     const currentTitle = runtimeManager.snapshotTabs().find((tab) => tab.runtimeId === runtimeId)?.title
       ?? formatSessionTitle(runtime.persistence.getSessionTitle());
     const defaultTitle = runtime.persistence.hasExplicitTitle()
       ? runtime.persistence.getSessionTitle().trim()
       : currentTitle;
 
-    const nextTitleRaw = window.prompt("Rename tab", defaultTitle);
+    const nextTitleRaw = await requestTextInputDialog({
+      title: t("init.renameTab.title"),
+      message: t("init.renameTab.message"),
+      initialValue: defaultTitle,
+      confirmLabel: t("init.renameTab.confirm"),
+    });
     if (nextTitleRaw === null) {
       return;
     }
+    if (runtimeManager.getRuntime(runtimeId) !== runtime) return;
 
     const nextTitle = nextTitleRaw.trim();
     await runtime.persistence.renameSession(nextTitle);
@@ -1443,7 +1839,7 @@ export async function initTaskpane(opts: {
       return;
     }
 
-    if (sourceRuntime.agent.state.isStreaming || sourceRuntime.actionQueue.isBusy()) {
+    if (sourceRuntime.actionQueue.isBusy()) {
       showToast(t("init.waitBeforeDuplicating"));
       return;
     }
@@ -1499,21 +1895,13 @@ export async function initTaskpane(opts: {
   workbookCoordinator.subscribe((event) => {
     if (event.operationType !== "write") return;
 
-    const runtime = runtimeManager.findRuntimeBySessionId(event.context.sessionId);
-    if (!runtime) return;
-
-    if (event.type === "queued") {
-      runtimeManager.setRuntimeLockState(runtime.runtimeId, "waiting_for_lock");
-      return;
-    }
-
-    if (event.type === "started") {
-      runtimeManager.setRuntimeLockState(runtime.runtimeId, "holding_lock");
-      return;
-    }
-
-    if (event.type === "completed" || event.type === "failed") {
-      runtimeManager.setRuntimeLockState(runtime.runtimeId, "idle");
+    const snapshot = workbookCoordinator.getSnapshot(event.context.workbookId);
+    const finishedOpId = event.type === "completed" || event.type === "failed" ? event.context.opId : undefined;
+    for (const runtime of runtimeManager.listRuntimes()) {
+      runtimeManager.setRuntimeLockState(
+        runtime.runtimeId,
+        getSessionLockState(snapshot, runtime.persistence.getSessionId(), finishedOpId),
+      );
     }
   });
 
@@ -1528,13 +1916,13 @@ export async function initTaskpane(opts: {
   configureSettingsPages({
     getExecutionMode,
     setExecutionMode,
-    getModelSwitchBehavior,
-    setModelSwitchBehavior,
     models: modelRuntime.models,
+    isAnyTabBusy: () => runtimeManager.snapshotTabs().some((tab) => tab.isBusy),
     onRulesSaved: async () => {
       await refreshWorkbookState();
     },
     extensionsHub: {
+      getActiveModel: () => modelRefreshOwner.snapshot().availableProviders.length > 0 ? getActiveAgent()?.state.model ?? null : null,
       getActiveSessionId: () => getActiveRuntime()?.persistence.getSessionId() ?? null,
       resolveWorkbookContext: async () => {
         const workbookContext = await resolveWorkbookContext();
@@ -1548,12 +1936,12 @@ export async function initTaskpane(opts: {
       onChanged: refreshCapabilitiesForAllRuntimes,
     },
     backups: {
-      loadCheckpoints: async () => {
-        const checkpoints = await workbookRecoveryLog.listForCurrentWorkbook(40);
-        return checkpoints.map((checkpoint) => toRecoveryCheckpointSummary(checkpoint));
+      loadCheckpoints: async (options) => {
+        const page = await workbookRecoveryLog.pageForCurrentWorkbook(options);
+        return { ...page, entries: page.entries.map(toRecoveryCheckpointSummary) };
       },
       onRestore: async (snapshotId: string) => {
-        await restoreCheckpointById(snapshotId);
+        await restoreAfterConfirmation(await workbookRecoveryLog.previewRestore(snapshotId));
       },
       onDelete: async (snapshotId: string) => {
         return workbookRecoveryLog.delete(snapshotId);
@@ -1564,13 +1952,6 @@ export async function initTaskpane(opts: {
       onCreateManualFullBackup: async () => {
         return createManualFullBackup();
       },
-      getRetentionConfig: async () => {
-        const maxSnapshots = await readRetentionLimit();
-        return { maxSnapshots };
-      },
-      setRetentionConfig: async (config) => {
-        await writeRetentionLimit(config.maxSnapshots);
-      },
     },
   });
 
@@ -1578,22 +1959,16 @@ export async function initTaskpane(opts: {
     const result = await runtimeManager.selectModel({
       runtimeId,
       nextModel,
-      behavior: getModelSwitchBehavior(),
     });
 
     if (result.outcome === "missing") {
       showToast(t("init.sessionNotFound"));
       return;
     }
-    if (result.outcome === "busy") {
-      showToast(t("init.waitBeforeChangingModels"));
-      return;
-    }
     if (result.outcome === "unchanged") return;
 
-    if (result.outcome === "forked") {
-      sidebar.syncFromAgent();
-      showToast(t("init.openedInNewTab", { title: result.title }));
+    if (result.outcome === "next_turn") {
+      showToast(t("init.modelNextTurn", { model: nextModel.name }));
     }
     document.dispatchEvent(new CustomEvent("pi:model-changed"));
     document.dispatchEvent(new CustomEvent("pi:status-update"));
@@ -1601,6 +1976,10 @@ export async function initTaskpane(opts: {
   };
 
   const openModelSelector = (): void => {
+    if (modelRefreshOwner.snapshot().availableProviders.length === 0) {
+      void showWelcomeLogin(modelRefreshOwner);
+      return;
+    }
     const activeRuntime = getActiveRuntime();
     if (!activeRuntime) {
       showToast(t("init.noActiveSession"));
@@ -1608,7 +1987,6 @@ export async function initTaskpane(opts: {
     }
 
     const targetRuntimeId = activeRuntime.runtimeId;
-    const currentModel = activeRuntime.agent.state.model;
 
     void (async () => {
       try {
@@ -1619,6 +1997,8 @@ export async function initTaskpane(opts: {
 
       closeStatusPopover();
 
+      const currentModel = runtimeManager.getRuntime(targetRuntimeId)?.agent.state.model
+        ?? activeRuntime.agent.state.model;
       openModelSelectorDialog({
         models: modelRuntime.models,
         currentModel,
@@ -1648,8 +2028,8 @@ export async function initTaskpane(opts: {
     createRuntime: async () => {
       await createRuntimeFromUi();
     },
-    openResumeDialog: async (defaultTarget: ResumeDialogTarget = "new_tab") => {
-      await openResumePicker(defaultTarget);
+    openResumeDialog: async () => {
+      await openResumePicker();
     },
     openRecoveryDialog,
     reopenLastClosed,
@@ -1670,8 +2050,8 @@ export async function initTaskpane(opts: {
     restoreManualFullBackup: async (backupId?: string) => {
       return restoreManualFullBackup(backupId);
     },
-    clearManualFullBackups: async () => {
-      return clearManualFullBackups();
+    clearManualFullBackups: async (confirm) => {
+      return clearManualFullBackups(confirm);
     },
     openInstructionsEditor: async () => {
       await openRulesEditor();
@@ -1682,7 +2062,6 @@ export async function initTaskpane(opts: {
     openFilesWorkspace: () => showFilesWorkspaceDialog(),
   });
 
-  // Slash commands chosen from the popup menu dispatch this event.
   const onCommandRun: EventListener = (event) => {
     if (!(event instanceof CustomEvent)) return;
     if (!isTaskpaneInitPayloadShape(event.detail)) return;
@@ -1697,7 +2076,7 @@ export async function initTaskpane(opts: {
       return;
     }
 
-    const busy = activeRuntime.agent.state.isStreaming || activeRuntime.actionQueue.isBusy();
+    const busy = activeRuntime.actionQueue.isBusy();
     const result = executeSlashCommand({
       name,
       args,
@@ -1725,22 +2104,37 @@ export async function initTaskpane(opts: {
   };
   document.addEventListener("pi:command-run", onCommandRun);
 
-  sidebar.onSend = (text, images) => {
-    clearErrorBanner(errorRoot);
-    const activeRuntime = getActiveRuntime();
-    if (!activeRuntime) {
-      showToast(t("init.noActiveSession"));
-      return;
+  sidebar.onSend = (text, { followUp, images }) => {
+    if (!text.startsWith("/") && modelRefreshOwner.snapshot().availableProviders.length === 0) {
+      void showWelcomeLogin(modelRefreshOwner);
+      return false;
     }
-    activeRuntime.actionQueue.enqueuePrompt(text, images);
+    const activeRuntime = getActiveRuntime();
+    const accepted = submitComposerText({ text, followUp, images, target: activeRuntime });
+    if (accepted && activeRuntime) activeRuntime.tab.setError(null);
+    return accepted;
   };
 
-  sidebar.onAbort = () => {
+  const stopActiveTab = (): void => {
     const activeRuntime = getActiveRuntime();
-    if (!activeRuntime) return;
-    abortedAgents.add(activeRuntime.agent);
-    activeRuntime.agent.abort();
+    if (activeRuntime) stopTab(activeRuntime);
   };
+
+  function stopTab(runtime: SessionRuntime): void {
+    const { texts, cancelledCommands } = runtime.actionQueue.stop();
+    const count = texts.length;
+    const plural = count === 1 ? "" : "s";
+    const commands = cancelledCommands.join(", ");
+    if (count > 0 && commands) {
+      showToast(t("turn.toast.stopKeptCancelled", { count, plural, commands }));
+    } else if (count > 0) {
+      showToast(t("turn.toast.stopKept", { count, plural }));
+    } else if (commands) {
+      showToast(t("turn.toast.stopCancelled", { commands }));
+    }
+  }
+
+  sidebar.onAbort = stopActiveTab;
 
   sidebar.onCreateTab = () => {
     void createRuntimeFromUi();
@@ -1782,25 +2176,30 @@ export async function initTaskpane(opts: {
   };
   sidebar.onFilesDrop = (files: File[]) => {
     const workspace = getFilesWorkspace();
+    const runtime = getActiveRuntime();
+    const sessionId = runtime?.persistence.getSessionId();
 
     void workspace.importFiles(files, {
       audit: { actor: "user", source: "input-drop" },
     })
-      .then((count) => {
+      .then((result) => {
+        const count = result.imported;
         if (count <= 0) {
           showToast(t("init.noFilesImported"));
           return;
         }
 
-        const importedLabel = `${count} file${count === 1 ? "" : "s"}`;
-        showToast(t("init.importedIntoFiles", { label: importedLabel }));
+        if (runtime && runtime.persistence.getSessionId() === sessionId) {
+          runtime.tab.setAttachments([...runtime.tab.attachments, ...result.paths]);
+        }
+        showToast(t("input.attached", { count }) + describeImportRenames(result));
       })
       .catch((error: unknown) => {
         showToast(t("init.importFailed", { error: error instanceof Error ? error.message : t("init.unknownError") }));
       });
   };
   sidebar.onOpenResumePicker = () => {
-    void openResumePicker("new_tab");
+    void openResumePicker();
   };
   sidebar.onOpenRecovery = () => {
     void openRecoveryDialog();
@@ -1810,77 +2209,29 @@ export async function initTaskpane(opts: {
   };
 
 
-  // Bootstrap from persisted tab layout; fallback to legacy single-runtime restore.
-  const restoredRuntime = await restorePersistedTabLayout();
-  if (!restoredRuntime) {
-    await runtimeManager.createRuntime({ activate: true, autoRestoreLatest: true });
-  }
-
-  const startupTabLayout = snapshotRuntimeTabLayout();
-  tabLayoutPersistence.enable(tabLayoutReadSucceeded ? undefined : startupTabLayout);
-  tabLayoutPersistence.persist(startupTabLayout);
-
-  // ── Disclosure bar (onboarding banner) ──
-  // Must run after runtime bootstrap so the sidebar has rendered .pi-messages.
-  {
-    const { createDisclosureBar } = await import("../ui/disclosure-bar.js");
-    const disclosureEl = createDisclosureBar({
-      providerCount: modelRefreshOwner.snapshot().availableProviders.length,
-      onOpenSettings: () => void openSettings(),
-    });
-    if (disclosureEl) {
-      const messagesContainer = sidebar.querySelector(".pi-messages");
-      if (messagesContainer) {
-        messagesContainer.parentElement?.insertBefore(disclosureEl, messagesContainer);
-      }
+  const wireTextarea = () => {
+    const composer = sidebar.getInput();
+    if (composer) {
+      wireCommandMenu(composer);
+    } else {
+      requestAnimationFrame(wireTextarea);
     }
-  }
+  };
+  requestAnimationFrame(wireTextarea);
 
-  // ── Proxy warning banner (state-driven) ──
-  {
-    const messagesContainer = sidebar.querySelector(".pi-messages");
-    const host = messagesContainer?.parentElement;
-    if (host && messagesContainer) {
-      const proxyBanner = createProxyBanner();
-      host.insertBefore(proxyBanner.root, messagesContainer);
-      proxyBanner.update(getProxyState());
-
-      document.addEventListener("pi:proxy-state-changed", (event: Event) => {
-        if (!(event instanceof CustomEvent)) return;
-        const detail: unknown = event.detail;
-        if (!isTaskpaneInitPayloadShape(detail)) return;
-        const state = detail.state;
-        if (state === "detected" || state === "not-detected" || state === "unknown") {
-          proxyBanner.update(state);
-        }
-      });
-    }
-  }
-
-  // ── Register extensions ──
-  // Never let extension startup block core UI wiring (status bar + slash menu).
-  // Some extension sources can be slow/unreachable; continue boot even if this
-  // is still in-flight, and let extensions finish loading in the background.
-  const extensionInitialization = extensionManager.initialize();
-
-  void extensionInitialization.catch((error: unknown) => {
-    console.warn("[pi] Extension initialization failed:", error);
-  });
-
-  try {
-    await awaitWithTimeout("Extension initialization", 5000, extensionInitialization);
-  } catch (error) {
-    console.warn("[pi] Extension initialization did not complete during startup:", error);
-  }
-
-  // ── Keyboard shortcuts ──
   installKeyboardShortcuts({
     getActiveAgent,
-    getActiveQueueDisplay,
-    getActiveActionQueue,
+    isActiveTabBusy: () => {
+      const runtime = getActiveRuntime();
+      return runtime !== null && runtime.actionQueue.isBusy();
+    },
     sidebar,
-    markUserAborted: (agent: Agent) => {
-      abortedAgents.add(agent);
+    stopActiveTab,
+    editLastQueued: () => {
+      const edited = getActiveRuntime()?.actionQueue.editLast() ?? false;
+      if (edited) focusChatInputSoon();
+      else showToast(t("keyboard-shortcuts.toast.noQueuedMessages"));
+      return edited;
     },
     onCreateTab: () => {
       void createRuntimeFromUi();
@@ -1897,7 +2248,6 @@ export async function initTaskpane(opts: {
     onReopenLastClosed: () => {
       void reopenLastClosed();
     },
-    canUndoCloseTab: () => recentlyClosed.peekMostRecent() !== null,
     onSwitchAdjacentTab: (direction: -1 | 1) => {
       const tabs = runtimeManager.snapshotTabs();
       if (tabs.length <= 1) {
@@ -1917,33 +2267,17 @@ export async function initTaskpane(opts: {
         return;
       }
 
+      focusSoon(() => sidebar.focusTabNavigationAnchor());
       runtimeManager.switchRuntime(nextTab.runtimeId);
-      requestAnimationFrame(() => {
-        sidebar.focusTabNavigationAnchor();
-      });
     },
   });
 
-  // ── Status bar ──
   injectStatusBar({
     getActiveAgent,
     getLockState: getActiveLockState,
     getExecutionMode,
+    autoCompactionEnabled: autoCompactEnabled,
   });
-
-  // ── Proxy status polling ──
-  startProxyPolling(settings);
-
-  // ── Wire command menu to textarea ──
-  const wireTextarea = () => {
-    const ta = sidebar.getTextarea();
-    if (ta) {
-      wireCommandMenu(ta);
-    } else {
-      requestAnimationFrame(wireTextarea);
-    }
-  };
-  requestAnimationFrame(wireTextarea);
 
   const runSlashCommand = (name: string, args = ""): void => {
     document.dispatchEvent(new CustomEvent("pi:command-run", { detail: { name, args } }));
@@ -2004,7 +2338,129 @@ export async function initTaskpane(opts: {
     });
   };
 
-  // ── Dev-only background verification bridge ──
+  document.addEventListener("click", (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+
+    const el = target;
+
+    if (el.closest(".pi-status-popover")) {
+      return;
+    }
+
+    if (el.closest(".pi-status-model")) {
+      openModelSelector();
+      return;
+    }
+
+    const modeTrigger = el.closest(".pi-status-mode");
+    if (modeTrigger) {
+      toggleModePopover({
+        anchor: modeTrigger,
+        activeMode: getExecutionMode(),
+        onSelectMode: (mode) => {
+          void setExecutionMode(mode).catch(() => {
+            showToast(t("status.mode.saveFailed"));
+          });
+        },
+      });
+      return;
+    }
+
+    if (el.closest(".pi-status-ctx--trigger")) {
+      openContextPopoverFrom(el);
+      return;
+    }
+
+    if (el.closest(".pi-status-thinking")) {
+      openThinkingPopoverFrom(el);
+      return;
+    }
+
+    closeStatusPopover();
+  });
+
+  const restoredRuntime = await restorePersistedTabLayout();
+  if (!restoredRuntime) {
+    const autoRestoreLatest = usesSharedUnidentifiedState || (await resolveWorkbookId()) !== null;
+    await runtimeManager.createRuntime({ activate: true, autoRestoreLatest });
+  }
+  for (const tab of runtimeManager.snapshotTabs()) {
+    recentlyClosed.removeBySessionId(tab.sessionId);
+  }
+
+  const startupTabLayout = snapshotRuntimeTabLayout();
+  tabLayoutPersistence.enable(tabLayoutReadSucceeded ? undefined : startupTabLayout);
+  tabLayoutPersistence.persist(startupTabLayout);
+
+  if (spreadsheetHost.servesOneDocument) {
+    const identityFollower = createWorkbookIdentityFollower({
+      settings,
+      resolveIdentity: async () => (await resolvePersistentWorkbookKey("read"))?.workbookId ?? null,
+      onIdentityChanged: async ({ from, to }) => {
+        if (from !== null) {
+          await workbookRecoveryLog.rescopeWorkbook({
+            fromWorkbookId: from, toWorkbookId: to,
+            workbookLabel: formatWorkbookLabel(await resolveWorkbookContext()),
+          });
+        }
+        await Promise.all(runtimeManager.snapshotTabs()
+          .map((tab) => moveSessionToWorkbook(settings, tab.sessionId, from, to)));
+        maybePersistTabLayout();
+        if (recentlyClosedWritable) await saveRecentlyClosed(settings, to, recentlyClosed.snapshot());
+        await tabLayoutPersistence.flush();
+      },
+    });
+    const followIdentity = () => {
+      void identityFollower.checkOnce().catch((error) => {
+        console.warn("[pi] Failed to move tabs to the workbook's new identity:", error);
+      });
+    };
+    followIdentity();
+    const identityPoll = setInterval(followIdentity, 4_000);
+    window.addEventListener("beforeunload", () => clearInterval(identityPoll), { once: true });
+  }
+
+  {
+    const { createDisclosureBar } = await import("../ui/disclosure-bar.js");
+    const disclosure = createDisclosureBar({
+      providerCount: modelRefreshOwner.snapshot().availableProviders.length,
+      onOpenSettings: () => void openSettings(),
+    });
+    if (disclosure) {
+      mountBanner(disclosure.root);
+    }
+
+    const proxyBanner = createProxyBannerController({
+      isProxyEnabled: async () => (await readTaskpaneProxySettings(settings)).enabled,
+    });
+    void proxyBanner.update(getProxyState(), isProxyBlockedByBrowser());
+
+    document.addEventListener("pi:proxy-state-changed", (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail: unknown = event.detail;
+      if (!isTaskpaneInitPayloadShape(detail)) return;
+      const state = detail.state;
+      if (state === "detected" || state === "not-detected" || state === "unknown") {
+        void proxyBanner.update(state, isProxyBlockedByBrowser());
+      }
+    });
+  }
+
+  const extensionInitialization = extensionManager.initialize();
+
+  void extensionInitialization.catch((error: unknown) => {
+    console.warn("[pi] Extension initialization failed:", error);
+  });
+
+  try {
+    await awaitWithTimeout("Extension initialization", 5000, extensionInitialization);
+  } catch (error) {
+    console.warn("[pi] Extension initialization did not complete during startup:", error);
+  }
+
+  startProxyPolling(settings);
+
   const backgroundVerificationBridge = maybeStartBackgroundVerificationBridge({
     sidebar,
     getWorkbookContext: resolveWorkbookContext,
@@ -2020,45 +2476,6 @@ export async function initTaskpane(opts: {
   if (backgroundVerificationBridge) {
     window.addEventListener("pagehide", () => backgroundVerificationBridge.stop(), { once: true });
   }
-
-  // ── Status bar click handlers ──
-  document.addEventListener("click", (e) => {
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-
-    const el = target;
-
-    if (el.closest(".pi-status-popover")) {
-      return;
-    }
-
-    // Model picker
-    if (el.closest(".pi-status-model")) {
-      openModelSelector();
-      return;
-    }
-
-    // Execution mode toggle
-    if (el.closest(".pi-status-mode")) {
-      closeStatusPopover();
-      void toggleExecutionModeFromUi();
-      return;
-    }
-
-    // Context quick actions
-    if (el.closest(".pi-status-ctx--trigger")) {
-      openContextPopoverFrom(el);
-      return;
-    }
-
-    // Thinking level selector
-    if (el.closest(".pi-status-thinking")) {
-      openThinkingPopoverFrom(el);
-      return;
-    }
-
-    closeStatusPopover();
-  });
 
   console.log("[pi] PiSidebar mounted");
 }

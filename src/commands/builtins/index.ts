@@ -1,7 +1,3 @@
-/**
- * Register all builtin slash commands.
- */
-
 import { commandRegistry, type SlashCommand } from "../types.js";
 
 import { createModelCommands, type ActiveAgentProvider } from "./model.js";
@@ -30,10 +26,10 @@ export interface BuiltinsContext
   openModelSelector: () => void;
 }
 
-/** Register all built-in commands. Call once after runtime manager is ready. */
 export function registerBuiltins(context: BuiltinsContext): void {
-  // Keep registration order stable: this is the order shown in the command menu.
   const builtins: SlashCommand[] = [
+    ...createSessionLifecycleCommands(context),
+    ...createCompactCommands(context.getActiveAgent),
     ...createModelCommands({
       getActiveAgent: context.getActiveAgent,
       openModelSelector: context.openModelSelector,
@@ -50,11 +46,13 @@ export function registerBuiltins(context: BuiltinsContext): void {
     ...createSessionIdentityCommands(context),
     ...createHelpCommands(),
     ...createExtensionsCommands(context),
-    ...createSessionLifecycleCommands(context),
-    ...createCompactCommands(context.getActiveAgent),
   ];
 
   for (const cmd of builtins) {
-    commandRegistry.register(cmd);
+    const menuGroup = ["history", "backup", "revert", "rules", "yolo"].includes(cmd.name) ? "workbook"
+      : ["new", "resume", "reopen", "compact", "name", "copy", "export"].includes(cmd.name) ? "chat" : "setup";
+    const menuVisibility = ["tools", "plugins", "skills"].includes(cmd.name) ? "hidden"
+      : ["debug", "experimental"].includes(cmd.name) ? "exact" : undefined;
+    commandRegistry.register({ ...cmd, menuGroup, ...(menuVisibility ? { menuVisibility } : {}) });
   }
 }

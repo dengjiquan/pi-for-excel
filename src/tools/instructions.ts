@@ -1,10 +1,3 @@
-/**
- * instructions — update persistent user/workbook rules.
- *
- * The tool name remains "instructions" for backward compatibility with
- * existing sessions. All user-facing text says "rules".
- */
-
 import { Type, type Static } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getAppStorage } from "../storage/local/app-storage.js";
@@ -20,6 +13,9 @@ import {
 } from "../rules/store.js";
 import { getWorkbookContext } from "../workbook/context.js";
 import { getErrorMessage } from "../utils/errors.js";
+import { t } from "../language/index.js";
+import { approveGuidanceChange, showGuidanceUndo, type GuidanceChangeDependencies } from "./guidance-change.js";
+import { isStop } from "./tool-stopped.js";
 
 const schema = Type.Object({
   action: Type.Union([
@@ -53,7 +49,7 @@ function emitRulesUpdatedEvent(): void {
   document.dispatchEvent(new CustomEvent("pi:status-update"));
 }
 
-export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
+export function createInstructionsTool(dependencies: GuidanceChangeDependencies = {}): AgentTool<typeof schema, undefined> {
   return {
     name: "instructions",
     label: "Rules",
@@ -64,6 +60,7 @@ export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
     execute: async (
       _toolCallId: string,
       params: Params,
+      signal: AbortSignal | undefined,
     ): Promise<AgentToolResult<undefined>> => {
       try {
         const storage = getAppStorage();
@@ -84,8 +81,18 @@ export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
             content: params.content,
           });
 
+          if (updated !== current) {
+            await approveGuidanceChange(dependencies, "instructions", t("guidance.rules.userPreview", { text: updated ?? "" }), signal);
+          }
+          signal?.throwIfAborted();
+          if (await getUserRules(settings) !== current) throw new Error("Rules changed while waiting; read them again before retrying.");
           const saved = await setUserRules(settings, updated);
           emitRulesUpdatedEvent();
+          if (saved !== current) showGuidanceUndo(t("guidance.rules.userUpdated"), async () => {
+            if (await getUserRules(settings) !== saved) throw new Error("Rules changed since this update.");
+            await setUserRules(settings, current ?? "");
+            emitRulesUpdatedEvent();
+          });
 
           const body = saved ?? "(No user rules set.)";
           const warning =
@@ -124,8 +131,18 @@ export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
           content: params.content,
         });
 
+        if (updated !== current) {
+          await approveGuidanceChange(dependencies, "instructions", t("guidance.rules.workbookPreview", { text: updated ?? "" }), signal, true);
+        }
+        signal?.throwIfAborted();
+        if (await getWorkbookRules(settings, workbookId) !== current) throw new Error("Rules changed while waiting; read them again before retrying.");
         const saved = await setWorkbookRules(settings, workbookId, updated);
         emitRulesUpdatedEvent();
+        if (saved !== current) showGuidanceUndo(t("guidance.rules.workbookUpdated"), async () => {
+          if (await getWorkbookRules(settings, workbookId) !== saved) throw new Error("Rules changed since this update.");
+          await setWorkbookRules(settings, workbookId, current ?? "");
+          emitRulesUpdatedEvent();
+        });
 
         const limit = getSoftLimit(params.level);
         const body = saved ?? "(No workbook rules set.)";
@@ -144,6 +161,7 @@ export function createInstructionsTool(): AgentTool<typeof schema, undefined> {
           details: undefined,
         };
       } catch (error) {
+        if (isStop(error, signal)) throw error;
         return {
           content: [{ type: "text", text: `Error updating rules: ${getErrorMessage(error)}` }],
           details: undefined,

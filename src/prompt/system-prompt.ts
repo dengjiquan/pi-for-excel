@@ -1,10 +1,3 @@
-/**
- * System prompt builder — constructs the Excel-aware system prompt.
- *
- * Kept concise because every token is paid on every turn.
- * The workbook blueprint is injected separately via transformContext.
- */
-
 import type { ResolvedConventions } from "../conventions/types.js";
 import { diffFromDefaults } from "../conventions/store.js";
 import type { ExecutionMode } from "../execution/mode.js";
@@ -43,7 +36,6 @@ export interface SystemPromptOptions {
   localServices?: LocalServiceEntry[];
   availableSkills?: AvailableSkillPromptEntry[];
   executionMode?: ExecutionMode;
-  /** Resolved conventions (defaults merged with stored). Omit to skip convention diff section. */
   conventions?: ResolvedConventions | null;
 }
 
@@ -82,8 +74,8 @@ function buildExecutionModeSection(mode: ExecutionMode | undefined): string {
 
 Current mode: **Confirm**
 
-- Ask for explicit user confirmation before mutating workbook tools.
-- Treat destructive structure operations as high-risk and reconfirm before proceeding.
+- The tool approval dialog is the confirmation; do not ask again in chat before calling a mutating tool.
+- Present a concise plan before multi-step changes, then let the tool approval dialog obtain consent.
 - Keep workbook identity and fail-closed restore safeguards unchanged.`;
   }
 
@@ -217,7 +209,6 @@ function formatPythonServiceLine(service: LocalServiceEntry & { name: "python" }
     );
   }
 
-  // "running" — fully healthy
   const loPart = service.libreofficeVersion
     ? `, libreoffice ${service.libreofficeVersion}`
     : service.libreofficeAvailable
@@ -246,7 +237,6 @@ function formatTmuxServiceLine(service: LocalServiceEntry & { name: "tmux" }): s
     );
   }
 
-  // "running" — fully healthy
   const versionPart = service.tmuxVersion ? `tmux ${service.tmuxVersion}` : "tmux available";
   const sessionsPart = typeof service.tmuxSessions === "number"
     ? `, ${service.tmuxSessions} active session${service.tmuxSessions === 1 ? "" : "s"}`
@@ -292,9 +282,6 @@ function buildAvailableSkillsSection(availableSkills: AvailableSkillPromptEntry[
   return lines.join("\n");
 }
 
-/**
- * Build the system prompt.
- */
 export function buildSystemPrompt(opts: SystemPromptOptions = {}): string {
   const sections: string[] = [];
 
@@ -424,13 +411,13 @@ You may create other folders as needed — these are conventions, not constraint
 
 const WORKFLOW = `## Workflow
 
-1. **Read first.** Always read cells before modifying. Never guess what's in the spreadsheet.
+1. **Read first.** Always read cells before modifying. Never guess what's in the spreadsheet. Name the sheet explicitly for every mutation; unqualified mutation targets are refused.
 2. **Edit scope.** Make the smallest set of changes that fulfills the request. Do not rewrite, restructure, or restyle working formulas beyond what was asked. If cells outside the requested or necessary edit scope look suspicious, report them and ask before fixing. Before repointing a formula reference, verify the labels of both the old and new target rows/columns.
-3. **Verify writes.** write_cells auto-verifies and reports errors. If errors occur, diagnose and fix. After repairing or changing formulas, re-read the key downstream outputs and sanity-check that results moved as intended — and that nothing else moved.
-4. **Overwrite protection.** write_cells blocks if the target has data. Ask the user before setting allow_overwrite=true.
+3. **Verify writes.** write_cells and fill_formula read back what Excel stored and report cells that did not take their value, text Excel converted, formula errors, data-validation violations and manual calculation; a result marked as an error means the change is not (fully) in the workbook. Act on what the result reports. After repairing or changing formulas, re-read the key downstream outputs and sanity-check that results moved as intended — and that nothing else moved.
+4. **Overwrite protection.** write_cells blocks if the target has data. If the user asked to change those cells, set allow_overwrite=true; otherwise show the existing data and ask first.
 5. **Prefer formulas** over hardcoded values. Put assumptions in separate cells and reference them.
 6. **Report changes.** When a turn mutated the workbook, end by listing exactly which cells/ranges you changed.
-7. **Plan complex tasks.** In Confirm mode, present a plan and get approval first. In Auto mode, keep plans concise and proceed unless the user asked to review first.
+7. **Plan complex tasks.** Present a concise plan before multi-step changes. In Confirm mode, the tool approval dialog obtains consent; do not ask for a second confirmation in chat. In Auto mode, proceed unless the user asked to review first.
 8. **Analysis = read-only.** When the user asks about data, read and answer in chat. Only write when asked to modify.
 9. **Extension requests.** If the user asks to create/update an extension, generate code and use **extensions_manager** so it is installed directly.`;
 

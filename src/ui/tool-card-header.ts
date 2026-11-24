@@ -44,14 +44,14 @@ function renderStreamingSpinner(state: ToolHeaderState): TemplateResult {
   `;
 }
 
-export function renderToolCardHeader(state: ToolHeaderState, text: TemplateResult): TemplateResult {
+function renderChevron(expanded: boolean): TemplateResult {
   return html`
-    <div class="pi-tool-card__toggle pi-tool-card__toggle--static">
-      <span class="pi-tool-card__toggle-main">
-        ${renderStreamingSpinner(state)}
-        ${text}
-      </span>
-    </div>
+    <span class="pi-tool-card__chevron-up ${expanded ? "" : "hidden"}">
+      ${icon(ChevronUp, "sm")}
+    </span>
+    <span class="pi-tool-card__chevron-collapsed ${expanded ? "hidden" : ""}">
+      ${icon(ChevronsUpDown, "sm")}
+    </span>
   `;
 }
 
@@ -72,14 +72,7 @@ export function renderCollapsibleToolCardHeader(
         ${renderStreamingSpinner(state)}
         ${text}
       </span>
-      <span class="pi-tool-card__toggle-chevron" ${ref(chevronRef)} aria-hidden="true">
-        <span class="pi-tool-card__chevron-up ${defaultExpanded ? "" : "hidden"}">
-          ${icon(ChevronUp, "sm")}
-        </span>
-        <span class="pi-tool-card__chevron-collapsed ${defaultExpanded ? "hidden" : ""}">
-          ${icon(ChevronsUpDown, "sm")}
-        </span>
-      </span>
+      <span class="pi-tool-card__toggle-chevron" ${ref(chevronRef)} aria-hidden="true">${renderChevron(defaultExpanded)}</span>
     </button>
   `;
 }
